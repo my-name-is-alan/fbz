@@ -2391,6 +2391,7 @@ impl LibraryRepository {
         &self,
         input: SimilarItemsInput,
     ) -> Result<Option<BrowseItemsResult>, sqlx::Error> {
+        let fetch_limit = input.limit.saturating_add(1);
         let rows = sqlx::query(
             r#"
             with target_item as (
@@ -2433,10 +2434,10 @@ impl LibraryRepository {
                     mi.created_at as sort_created_at,
                     case
                         when target.production_year is null or mi.production_year is null then null
-                        else abs(mi.production_year - target.production_year)
+                    else abs(mi.production_year - target.production_year)
                     end as year_distance,
                     array[]::text[] as image_tags,
-                    count(*) over() as total_record_count
+                    0::bigint as total_record_count
                 from target_item target
                 join media_items mi on mi.library_id = target.library_id
                     and mi.item_type = target.item_type
@@ -2480,7 +2481,7 @@ impl LibraryRepository {
         )
         .bind(input.user_id)
         .bind(&input.item_id)
-        .bind(input.limit)
+        .bind(fetch_limit)
         .bind(input.start_index)
         .bind(input.options.type_filter.enabled)
         .bind(&input.options.type_filter.item_types)
@@ -2497,7 +2498,7 @@ impl LibraryRepository {
             return Ok(None);
         }
 
-        browse_result_from_rows(rows).map(Some)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit).map(Some)
     }
 
     pub async fn list_series_seasons(
@@ -3103,6 +3104,38 @@ fn browse_result_from_rows(rows: Vec<PgRow>) -> Result<BrowseItemsResult, sqlx::
         .into_iter()
         .map(MediaItemBrowseRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(BrowseItemsResult {
+        items,
+        total_record_count,
+    })
+}
+
+fn browse_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<BrowseItemsResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
+        .into_iter()
+        .take(visible_limit)
+        .map(MediaItemBrowseRecord::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = if items.is_empty() {
+        0
+    } else {
+        start_index
+            .max(0)
+            .saturating_add(items.len() as i64)
+            .saturating_add(i64::from(has_more))
+            .try_into()
+            .unwrap_or(u32::MAX)
+    };
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(BrowseItemsResult {
         items,
@@ -3830,5 +3863,27 @@ mod tests {
         assert!(!latest_query.contains("count(*) over()"));
         assert!(latest_query.contains("0::bigint as total_record_count"));
         assert!(latest_query.contains("mi.item_type in ('movie', 'series', 'episode', 'track')"));
+    }
+
+    #[test]
+    fn similar_items_query_uses_limit_probe_without_exact_total_count() {
+        let repository = include_str!("repository.rs");
+        let similar_query = repository
+            .split("pub async fn list_similar_items")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_series_seasons")
+            .next()
+            .unwrap();
+
+        assert!(similar_query.contains("let fetch_limit = input.limit.saturating_add(1);"));
+        assert!(!similar_query.contains("count(*) over()"));
+        assert!(similar_query.contains("0::bigint as total_record_count"));
+        assert!(similar_query.contains(".bind(fetch_limit)"));
+        assert!(
+            similar_query.contains(
+                "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
+            )
+        );
     }
 }
