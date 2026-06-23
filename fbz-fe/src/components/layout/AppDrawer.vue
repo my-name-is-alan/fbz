@@ -90,11 +90,12 @@ watch(() => route.fullPath, close);
   border-radius: 6px;
 
   &.router-link-active {
-    color: #fff;
+    color: var(--fbz-color-brand-500);
+    font-weight: 700;
   }
 
   &:active {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--fbz-color-panel-strong);
   }
 }
 

@@ -85,7 +85,9 @@ const chapters = computed<PlaybackChapter[]>(() => {
     const nextStart = Math.floor((total / chapterCount) * (index + 1));
     return {
       id: `chapter-${index + 1}`,
-      title: ["片头", "铺垫", "冲突", "转折", "高潮", "尾声", "彩蛋", "下一集预告"][index] ?? `章节 ${index + 1}`,
+      title:
+        ["片头", "铺垫", "冲突", "转折", "高潮", "尾声", "彩蛋", "下一集预告"][index] ??
+        `章节 ${index + 1}`,
       startTime,
       duration: Math.max(30, nextStart - startTime),
     };
@@ -99,12 +101,35 @@ const mediaStats = computed<MediaStat[]>(() => {
   const activeTrack = variantTracks.find((track) => track.active);
   return [
     { label: "播放器核心", value: "Shaka Player 5.1" },
-    { label: "协议", value: props.item.source?.mimeType ?? (hasSource.value ? "自适应流" : "演示模式") },
-    { label: "分辨率", value: activeTrack?.height ? `${activeTrack.width}x${activeTrack.height}` : "3840x2160" },
-    { label: "带宽估算", value: stats?.estimatedBandwidth ? `${Math.round(stats.estimatedBandwidth / 1000)} Kbps` : "18200 Kbps" },
-    { label: "缓冲", value: `${Math.round(stats?.bufferingTime ?? (isBuffering.value ? 1.2 : 0.2))}s` },
-    { label: "音轨", value: audioTracks.value.find((track) => track.id === selectedAudioTrack.value)?.label ?? "默认" },
-    { label: "字幕", value: subtitleTracks.value.find((track) => track.id === selectedSubtitleTrack.value)?.label ?? "关闭" },
+    {
+      label: "协议",
+      value: props.item.source?.mimeType ?? (hasSource.value ? "自适应流" : "演示模式"),
+    },
+    {
+      label: "分辨率",
+      value: activeTrack?.height ? `${activeTrack.width}x${activeTrack.height}` : "3840x2160",
+    },
+    {
+      label: "带宽估算",
+      value: stats?.estimatedBandwidth
+        ? `${Math.round(stats.estimatedBandwidth / 1000)} Kbps`
+        : "18200 Kbps",
+    },
+    {
+      label: "缓冲",
+      value: `${Math.round(stats?.bufferingTime ?? (isBuffering.value ? 1.2 : 0.2))}s`,
+    },
+    {
+      label: "音轨",
+      value:
+        audioTracks.value.find((track) => track.id === selectedAudioTrack.value)?.label ?? "默认",
+    },
+    {
+      label: "字幕",
+      value:
+        subtitleTracks.value.find((track) => track.id === selectedSubtitleTrack.value)?.label ??
+        "关闭",
+    },
   ];
 });
 
@@ -194,7 +219,8 @@ function handlePointerMove() {
   controlsVisible.value = true;
   if (hideTimer) window.clearTimeout(hideTimer);
   hideTimer = window.setTimeout(() => {
-    if (isPlaying.value && !infoPanelOpen.value && !settingsOpen.value) controlsVisible.value = false;
+    if (isPlaying.value && !infoPanelOpen.value && !settingsOpen.value)
+      controlsVisible.value = false;
   }, 2600);
 }
 
@@ -311,7 +337,12 @@ function handleKeydown(event: KeyboardEvent) {
       <span v-if="loadError">{{ loadError }}</span>
     </div>
 
-    <button class="center-play" type="button" :aria-label="isPlaying ? '暂停' : '播放'" @click="togglePlay">
+    <button
+      class="center-play"
+      type="button"
+      :aria-label="isPlaying ? '暂停' : '播放'"
+      @click="togglePlay"
+    >
       {{ isPlaying ? "Ⅱ" : "▶" }}
     </button>
 
@@ -345,11 +376,19 @@ function handleKeydown(event: KeyboardEvent) {
 
       <div class="control-row">
         <div class="left-controls">
-          <button type="button" @click="emit('previousEpisode')" :disabled="!props.hasPreviousEpisode">上一集</button>
+          <button
+            type="button"
+            @click="emit('previousEpisode')"
+            :disabled="!props.hasPreviousEpisode"
+          >
+            上一集
+          </button>
           <button class="primary-control" type="button" @click="togglePlay">
             {{ isPlaying ? "暂停" : "播放" }}
           </button>
-          <button type="button" @click="emit('nextEpisode')" :disabled="!props.hasNextEpisode">下一集</button>
+          <button type="button" @click="emit('nextEpisode')" :disabled="!props.hasNextEpisode">
+            下一集
+          </button>
           <button type="button" @click="seekBy(-10)">-10s</button>
           <button type="button" @click="seekBy(10)">+10s</button>
         </div>
@@ -357,7 +396,16 @@ function handleKeydown(event: KeyboardEvent) {
         <div class="right-controls">
           <label class="volume-control">
             <span>音量</span>
-            <input v-model.number="volume" type="range" min="0" max="1" step="0.01" aria-label="音量" />
+            <input
+              v-model.number="volume"
+              class="volume-slider"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              :style="{ '--progress': `${volume * 100}%` }"
+              aria-label="音量"
+            />
           </label>
           <button type="button" @click="settingsOpen = !settingsOpen">音轨/字幕</button>
           <button type="button" @click="infoPanelOpen = !infoPanelOpen">
@@ -396,13 +444,25 @@ function handleKeydown(event: KeyboardEvent) {
 
     <aside v-if="infoPanelOpen" class="info-dock">
       <div class="dock-tabs">
-        <button type="button" :class="{ active: selectedInfoTab === 'episodes' }" @click="selectedInfoTab = 'episodes'">
+        <button
+          type="button"
+          :class="{ active: selectedInfoTab === 'episodes' }"
+          @click="selectedInfoTab = 'episodes'"
+        >
           选集
         </button>
-        <button type="button" :class="{ active: selectedInfoTab === 'chapters' }" @click="selectedInfoTab = 'chapters'">
+        <button
+          type="button"
+          :class="{ active: selectedInfoTab === 'chapters' }"
+          @click="selectedInfoTab = 'chapters'"
+        >
           章节
         </button>
-        <button type="button" :class="{ active: selectedInfoTab === 'info' }" @click="selectedInfoTab = 'info'">
+        <button
+          type="button"
+          :class="{ active: selectedInfoTab === 'info' }"
+          @click="selectedInfoTab = 'info'"
+        >
           加载信息
         </button>
       </div>
@@ -426,11 +486,18 @@ function handleKeydown(event: KeyboardEvent) {
           v-for="chapter in chapters"
           :key="chapter.id"
           type="button"
-          :class="{ active: currentTime >= chapter.startTime && currentTime < chapter.startTime + chapter.duration }"
+          :class="{
+            active:
+              currentTime >= chapter.startTime &&
+              currentTime < chapter.startTime + chapter.duration,
+          }"
           @click="jumpToChapter(chapter)"
         >
           <strong>{{ chapter.title }}</strong>
-          <span>{{ formatTime(chapter.startTime) }} - {{ formatTime(chapter.startTime + chapter.duration) }}</span>
+          <span
+            >{{ formatTime(chapter.startTime) }} -
+            {{ formatTime(chapter.startTime + chapter.duration) }}</span
+          >
         </button>
       </div>
 
@@ -481,7 +548,12 @@ function handleKeydown(event: KeyboardEvent) {
   z-index: 3;
   pointer-events: none;
   background:
-    linear-gradient(180deg, rgba(0, 0, 0, 0.64) 0%, rgba(0, 0, 0, 0.08) 36%, rgba(0, 0, 0, 0.78) 100%),
+    linear-gradient(
+      180deg,
+      rgba(0, 0, 0, 0.64) 0%,
+      rgba(0, 0, 0, 0.08) 36%,
+      rgba(0, 0, 0, 0.78) 100%
+    ),
     radial-gradient(circle at 50% 48%, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.45) 68%);
 }
 
@@ -541,12 +613,20 @@ function handleKeydown(event: KeyboardEvent) {
   padding-left: 4px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 50%;
-  background: rgba(30, 215, 96, 0.92);
+  background: color-mix(in srgb, var(--fbz-color-brand-500) 92%, transparent);
   color: #07120a;
   font-size: 28px;
   transform: translate(-50%, -50%);
   cursor: pointer;
   box-shadow: 0 22px 62px rgba(0, 0, 0, 0.38);
+  transition:
+    transform var(--fbz-motion-fast) ease,
+    background var(--fbz-motion-fast) ease;
+
+  &:hover {
+    background: var(--fbz-color-brand-500);
+    transform: translate(-50%, -50%) scale(1.08);
+  }
 }
 
 .buffering {
@@ -620,9 +700,103 @@ function handleKeydown(event: KeyboardEvent) {
   font-size: var(--fbz-font-size-sm);
 }
 
-.seek {
-  width: 100%;
-  accent-color: var(--fbz-color-brand-500);
+.seek,
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  height: 20px;
+  display: flex;
+  align-items: center;
+
+  &:focus {
+    outline: none;
+  }
+
+  // Webkit Track
+  &::-webkit-slider-runnable-track {
+    background: linear-gradient(
+      to right,
+      var(--fbz-color-brand-500) 0%,
+      var(--fbz-color-brand-500) var(--progress),
+      rgba(255, 255, 255, 0.2) var(--progress),
+      rgba(255, 255, 255, 0.2) 100%
+    );
+    height: 4px;
+    border-radius: 2px;
+    transition: height var(--fbz-motion-fast) ease;
+  }
+
+  // Webkit Thumb
+  &::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    background: #ffffff;
+    height: 12px;
+    width: 12px;
+    border-radius: 50%;
+    margin-top: -4px; // Center (4px height - 12px thumb = -8px / 2 = -4px)
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    transition:
+      transform var(--fbz-motion-fast) ease,
+      background var(--fbz-motion-fast) ease;
+  }
+
+  // Firefox Track
+  &::-moz-range-track {
+    background: linear-gradient(
+      to right,
+      var(--fbz-color-brand-500) 0%,
+      var(--fbz-color-brand-500) var(--progress),
+      rgba(255, 255, 255, 0.2) var(--progress),
+      rgba(255, 255, 255, 0.2) 100%
+    );
+    height: 4px;
+    border-radius: 2px;
+    transition: height var(--fbz-motion-fast) ease;
+  }
+
+  // Firefox Thumb
+  &::-moz-range-thumb {
+    background: #ffffff;
+    height: 12px;
+    width: 12px;
+    border: none;
+    border-radius: 50%;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    transition:
+      transform var(--fbz-motion-fast) ease,
+      background var(--fbz-motion-fast) ease;
+  }
+
+  &:hover {
+    &::-webkit-slider-runnable-track {
+      height: 6px;
+    }
+    &::-webkit-slider-thumb {
+      transform: scale(1.3);
+      background: var(--fbz-color-brand-500);
+      margin-top: -5px;
+    }
+    &::-moz-range-track {
+      height: 6px;
+    }
+    &::-moz-range-thumb {
+      transform: scale(1.3);
+      background: var(--fbz-color-brand-500);
+    }
+  }
+}
+
+.volume-slider {
+  width: 80px;
+  transition: width var(--fbz-motion-base) ease;
+
+  &:hover,
+  &:focus-within {
+    width: 110px;
+  }
 }
 
 .control-row {
@@ -654,6 +828,16 @@ function handleKeydown(event: KeyboardEvent) {
   cursor: pointer;
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  transition:
+    background var(--fbz-motion-fast) ease,
+    border-color var(--fbz-motion-fast) ease,
+    color var(--fbz-motion-fast) ease;
+
+  &:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+  }
 }
 
 .left-controls button,
@@ -669,8 +853,15 @@ function handleKeydown(event: KeyboardEvent) {
 }
 
 .primary-control {
-  background: rgba(30, 215, 96, 0.92) !important;
+  background: color-mix(in srgb, var(--fbz-color-brand-500) 92%, transparent) !important;
   color: #07120a !important;
+  border-color: transparent !important;
+
+  &:hover:not(:disabled) {
+    background: var(--fbz-color-brand-500) !important;
+    color: #000000 !important;
+    box-shadow: 0 0 12px color-mix(in srgb, var(--fbz-color-brand-500) 40%, transparent);
+  }
 }
 
 .volume-control {
@@ -711,9 +902,9 @@ function handleKeydown(event: KeyboardEvent) {
 .dock-tabs .active,
 .episode-rail .active,
 .chapter-list .active {
-  border-color: rgba(30, 215, 96, 0.56);
-  background: rgba(30, 215, 96, 0.16);
-  color: #fff;
+  border-color: color-mix(in srgb, var(--fbz-color-brand-500) 56%, transparent) !important;
+  background: color-mix(in srgb, var(--fbz-color-brand-500) 16%, transparent) !important;
+  color: #fff !important;
 }
 
 .info-dock {

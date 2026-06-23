@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { ref, watch } from "vue";
+
 /**
- * 媒体海报 —— 有 src 时显示真实图，无 src 时渲染纯色占位块（设计阶段默认走占位）。
+ * 媒体海报 —— 有 src 时显示真实图，加载中展示骨架屏，加载失败或无 src 时渲染精美的 placeholder 反馈。
  * variant 让相邻占位块色块交替，避免一片死板。
  */
 interface Props {
@@ -16,12 +18,73 @@ const props = withDefaults(defineProps<Props>(), {
   variant: 0,
   ratio: "poster",
 });
+
+const isLoaded = ref(false);
+const hasError = ref(false);
+
+watch(
+  () => props.src,
+  (newSrc) => {
+    isLoaded.value = false;
+    hasError.value = false;
+    if (!newSrc) {
+      hasError.value = true;
+    }
+  },
+  { immediate: true },
+);
+
+function onLoad() {
+  isLoaded.value = true;
+  hasError.value = false;
+}
+
+function onError() {
+  isLoaded.value = false;
+  hasError.value = true;
+}
 </script>
 
 <template>
   <div class="media-poster" :class="[`is-${props.ratio}`, { 'is-alt': props.variant === 1 }]">
-    <img v-if="props.src" :src="props.src" :alt="props.title" loading="lazy" />
-    <span v-else class="placeholder">{{ props.title }}</span>
+    <!-- 真实图片，加载成功后淡入显示 -->
+    <img
+      v-if="props.src && !hasError"
+      :src="props.src"
+      :alt="props.title"
+      loading="lazy"
+      @load="onLoad"
+      @error="onError"
+      :class="{ 'is-hidden': !isLoaded }"
+    />
+
+    <!-- 加载中的骨架屏占位 -->
+    <div v-if="props.src && !isLoaded && !hasError" class="shimmer-overlay" />
+
+    <!-- 无图片或加载失败时的反馈占位 -->
+    <div v-if="!props.src || hasError" class="placeholder-fallback">
+      <div class="fallback-icon">
+        <svg
+          v-if="props.ratio === 'poster'"
+          viewBox="0 0 24 24"
+          width="36"
+          height="36"
+          fill="currentColor"
+        >
+          <path
+            d="M18 4v16H6V4h12m0-2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM8 6h3v2H8zm5 0h3v2h-3zm-5 4h3v2H8zm5 0h3v2h-3zm-5 4h3v2H8zm5 0h3v2h-3z"
+          />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" width="48" height="48" fill="currentColor">
+          <path
+            d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zM8 10l7 4-7 4v-8z"
+          />
+        </svg>
+      </div>
+      <span class="fallback-title">{{ props.title }}</span>
+      <span class="fallback-tips">{{ hasError ? "图片加载失败" : "暂无封面" }}</span>
+    </div>
+
     <slot />
   </div>
 </template>
@@ -31,10 +94,9 @@ const props = withDefaults(defineProps<Props>(), {
   position: relative;
   width: 100%;
   overflow: hidden;
-  // 自带圆角：starport 飞渡时海报会被传送到 carrier（脱离卡片/详情的圆角容器），
-  // 没有这层圆角飞行途中会变成直角，落地才变圆
   border-radius: var(--fbz-radius-card);
   background: var(--fbz-color-panel);
+  transition: background var(--fbz-motion-base);
 
   &.is-poster {
     aspect-ratio: 2 / 3;
@@ -53,20 +115,79 @@ const props = withDefaults(defineProps<Props>(), {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    opacity: 1;
+    transition: opacity 0.3s ease;
+
+    &.is-hidden {
+      opacity: 0;
+      position: absolute;
+      inset: 0;
+    }
   }
 }
 
-.placeholder {
+.shimmer-overlay {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-content: center;
-  padding: 10px;
+  background: linear-gradient(
+    90deg,
+    var(--fbz-color-panel) 25%,
+    var(--fbz-color-panel-strong) 37%,
+    var(--fbz-color-panel) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+.placeholder-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--fbz-space-3);
   text-align: center;
-  font-family: var(--fbz-font-display);
-  font-size: var(--fbz-font-size-xs);
-  font-weight: 700;
-  letter-spacing: 0;
-  color: var(--fbz-color-text-muted);
+  background: var(--fbz-color-panel-strong);
+
+  .is-alt & {
+    background: var(--fbz-color-panel-elevated);
+  }
+
+  .fallback-icon {
+    color: var(--fbz-color-text-disabled);
+    margin-bottom: var(--fbz-space-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .fallback-title {
+    font-family: var(--fbz-font-display);
+    font-size: var(--fbz-font-size-xs);
+    font-weight: 700;
+    color: var(--fbz-color-text-soft);
+    margin-bottom: var(--fbz-space-1);
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-height: 1.3;
+  }
+
+  .fallback-tips {
+    font-size: 10px;
+    color: var(--fbz-color-text-muted);
+    font-weight: 600;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
 </style>

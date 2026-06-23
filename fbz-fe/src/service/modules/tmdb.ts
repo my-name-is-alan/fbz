@@ -106,6 +106,17 @@ export function libraryCounts(): Record<string, number> {
   return counts;
 }
 
+/** 各库最新入库的封面剧照（取有 backdrop 的前 4 张，用于管理页库卡片缩略图） */
+export function libraryCovers(): Record<string, string[]> {
+  const covers: Record<string, string[]> = {};
+  for (const it of catalogItems) {
+    if (!it.backdrop_path) continue;
+    const arr = (covers[it.libraryId] ??= []);
+    if (arr.length < 4) arr.push(imageUrl(it.backdrop_path, "w780")!);
+  }
+  return covers;
+}
+
 /* ---------- 合成清晰度（TMDB 不提供，按 id 稳定分配，演示用） ---------- */
 const RESOLUTIONS = ["4K", "2K", "1080P", "720P"] as const;
 

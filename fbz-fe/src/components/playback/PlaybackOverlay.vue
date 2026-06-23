@@ -5,14 +5,8 @@ import { useBodyScrollLock } from "@/composables/useBodyScrollLock.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
 
 const playback = usePlaybackStore();
-const {
-  item,
-  isOpen,
-  playlist,
-  currentEpisodeIndex,
-  hasPreviousEpisode,
-  hasNextEpisode,
-} = storeToRefs(playback);
+const { item, isOpen, playlist, currentEpisodeIndex, hasPreviousEpisode, hasNextEpisode } =
+  storeToRefs(playback);
 
 useBodyScrollLock(isOpen);
 

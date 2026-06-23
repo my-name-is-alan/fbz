@@ -55,7 +55,9 @@ export default defineConfig(({ mode }) => {
       include: ["src/**/*.{test,spec}.{js,ts,jsx,tsx}"],
       exclude: ["**/node_modules/**", "**/dist/**", "**/dist-ssr/**", "**/.tmp/**"],
     },
-    fmt: {},
+    fmt: {
+      ignorePatterns: ["src/auto-imports.d.ts", "src/components.d.ts"],
+    },
     lint: { options: { typeAware: true, typeCheck: true } },
   };
 });

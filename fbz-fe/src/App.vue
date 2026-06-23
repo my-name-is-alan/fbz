@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import DefaultLayout from "@/layouts/default.vue";
+import { useThemeStore } from "@/stores/theme.ts";
+
+const themeStore = useThemeStore();
+themeStore.applyTheme();
 </script>
 
 <template>
-  <DefaultLayout />
+  <RouterView />
+  <GlobalUiContainer />
 </template>

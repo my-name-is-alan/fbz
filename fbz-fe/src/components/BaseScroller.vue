@@ -135,15 +135,16 @@ function scrollStep(dir: 1 | -1) {
   border: 0;
   display: flex;
   align-items: center;
-  color: #fff;
+  color: var(--fbz-color-text);
   cursor: pointer;
+  background: transparent;
   transition: opacity var(--fbz-motion-fast);
 
   svg {
     transition:
       color var(--fbz-motion-fast),
       transform var(--fbz-motion-fast);
-    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
   }
 
   &:hover svg {
@@ -158,8 +159,8 @@ function scrollStep(dir: 1 | -1) {
     background: linear-gradient(
       90deg,
       var(--fbz-color-bg) 0%,
-      rgba(10, 10, 11, 0.72) 45%,
-      rgba(10, 10, 11, 0) 100%
+      color-mix(in srgb, var(--fbz-color-bg) 72%, transparent) 45%,
+      color-mix(in srgb, var(--fbz-color-bg) 0%, transparent) 100%
     );
   }
 
@@ -170,8 +171,8 @@ function scrollStep(dir: 1 | -1) {
     background: linear-gradient(
       270deg,
       var(--fbz-color-bg) 0%,
-      rgba(10, 10, 11, 0.72) 45%,
-      rgba(10, 10, 11, 0) 100%
+      color-mix(in srgb, var(--fbz-color-bg) 72%, transparent) 45%,
+      color-mix(in srgb, var(--fbz-color-bg) 0%, transparent) 100%
     );
   }
 }

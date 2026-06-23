@@ -54,12 +54,12 @@ $fbz-z-overlay: 50;
     --fbz-color-text-muted: #{$fbz-color-text-muted};
     --fbz-color-text-disabled: #{$fbz-color-text-disabled};
     --fbz-color-brand-500: #{$fbz-color-brand-500};
-    --fbz-color-brand-600: #{$fbz-color-brand-600};
+    --fbz-color-brand-600: color-mix(in srgb, var(--fbz-color-brand-500) 84%, black);
     --fbz-color-cyan-500: #{$fbz-color-cyan-500};
-    --fbz-color-green-500: #{$fbz-color-green-500};
+    --fbz-color-green-500: var(--fbz-color-brand-500);
     --fbz-color-amber-500: #{$fbz-color-amber-500};
     --fbz-color-danger-500: #{$fbz-color-danger-500};
-    --fbz-color-focus: #{$fbz-color-focus};
+    --fbz-color-focus: color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
     --fbz-space-1: #{$fbz-space-1};
     --fbz-space-2: #{$fbz-space-2};
     --fbz-space-3: #{$fbz-space-3};
@@ -77,7 +77,8 @@ $fbz-z-overlay: 50;
     --fbz-radius-hero: #{$fbz-radius-hero};
     --fbz-radius-round: #{$fbz-radius-round};
     --fbz-shadow-panel: 0 20px 50px rgba(0, 0, 0, 0.5);
-    --fbz-shadow-focus: 0 0 0 3px rgba(30, 215, 96, 0.3);
+    --fbz-shadow-focus: 0 0 0 3px color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
+    --fbz-color-panel-transparent: rgba(20, 20, 22, 0);
     // 字体：正文走系统优先的现代字栈（借鉴 HDHive），数字/品牌用 Orbitron 展示体
     --fbz-font-sans:
       ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
@@ -88,5 +89,22 @@ $fbz-z-overlay: 50;
     --fbz-motion-slow: #{$fbz-motion-slow};
     --fbz-z-sticky: #{$fbz-z-sticky};
     --fbz-z-overlay: #{$fbz-z-overlay};
+  }
+
+  :root[data-theme="light"] {
+    --fbz-color-bg: #f5f5f7;
+    --fbz-color-bg-strong: #ffffff;
+    --fbz-color-panel: #ffffff;
+    --fbz-color-panel-strong: #e9ecef;
+    --fbz-color-panel-elevated: #dee2e6;
+    --fbz-color-line: #dee2e6;
+    --fbz-color-line-bright: #ced4da;
+    --fbz-color-line-soft: #f8f9fa;
+    --fbz-color-text: #1c1c1e;
+    --fbz-color-text-soft: #48484a;
+    --fbz-color-text-muted: #8e8e93;
+    --fbz-color-text-disabled: #aeaeb2;
+    --fbz-color-panel-transparent: rgba(255, 255, 255, 0);
+    --fbz-shadow-panel: 0 10px 30px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.02);
   }
 }

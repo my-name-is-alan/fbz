@@ -81,7 +81,12 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
         <p v-if="props.overview" class="overview">{{ props.overview }}</p>
 
         <div v-if="props.showActions" class="actions">
-          <button class="btn btn-play" type="button" @click="emit('play')">▶ 播放</button>
+          <button class="btn btn-play" type="button" @click="emit('play')">
+            <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            <span>播放</span>
+          </button>
 
           <!-- 多版本下拉 -->
           <BaseSelect
@@ -94,7 +99,22 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
           />
           <span v-else-if="activeVersion" class="version-single">{{ activeVersion.label }}</span>
 
-          <button class="btn btn-ghost">＋ 收藏</button>
+          <button class="btn btn-ghost" type="button">
+            <svg
+              class="btn-icon"
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+            </svg>
+            <span>收藏</span>
+          </button>
         </div>
 
         <div class="extra">
@@ -115,6 +135,7 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   inset: 0 0 auto 0;
   height: 62vh;
   min-height: 440px;
+  max-height: 100%;
   z-index: 0;
 
   img {
@@ -161,6 +182,7 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   flex: 1;
   min-width: 0;
   padding-bottom: var(--fbz-space-2);
+  color: #ffffff; /* 确保在亮色主题下，叠加在剧照大图上的文字依然为白色，以保证最佳可读性 */
 }
 
 .title {
@@ -168,13 +190,14 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   font-size: 40px;
   line-height: 1.1;
   font-weight: 800;
+  color: #ffffff;
 }
 
 .tagline {
   margin: 0 0 var(--fbz-space-3);
   font-size: var(--fbz-font-size-md);
   font-style: italic;
-  color: var(--fbz-color-text-muted);
+  color: rgba(255, 255, 255, 0.65);
 }
 
 .meta {
@@ -184,13 +207,13 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   gap: var(--fbz-space-3);
   margin-bottom: var(--fbz-space-3);
   font-size: var(--fbz-font-size-md);
-  color: var(--fbz-color-text-soft);
+  color: rgba(255, 255, 255, 0.85);
 
   .dot {
     width: 3px;
     height: 3px;
     border-radius: 50%;
-    background: var(--fbz-color-text-muted);
+    background: rgba(255, 255, 255, 0.4);
   }
 
   .rating {
@@ -208,13 +231,13 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
 
 .tag {
   padding: 3px 9px;
-  border: 1px solid var(--fbz-color-line-bright);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.05);
   border-radius: 3px;
   font-size: var(--fbz-font-size-xs);
   font-weight: 600;
   letter-spacing: 0.4px;
-  color: var(--fbz-color-text-soft);
-  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .subs {
@@ -222,10 +245,10 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   gap: var(--fbz-space-2);
   margin-bottom: var(--fbz-space-4);
   font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-soft);
+  color: rgba(255, 255, 255, 0.85);
 
   .subs-label {
-    color: var(--fbz-color-text-muted);
+    color: rgba(255, 255, 255, 0.5);
   }
 }
 
@@ -234,7 +257,7 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   margin: 0 0 var(--fbz-space-5);
   font-size: var(--fbz-font-size-md);
   line-height: 1.7;
-  color: var(--fbz-color-text-soft);
+  color: rgba(255, 255, 255, 0.8);
 }
 
 .actions {
@@ -254,11 +277,21 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   text-decoration: none;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   cursor: pointer;
   transition:
-    background var(--fbz-motion-fast),
-    border-color var(--fbz-motion-fast);
+    background var(--fbz-motion-fast) ease,
+    border-color var(--fbz-motion-fast) ease,
+    box-shadow var(--fbz-motion-fast) ease,
+    transform var(--fbz-motion-fast) ease;
+
+  &:active {
+    transform: scale(0.96);
+  }
+}
+
+.btn-icon {
+  flex: 0 0 auto;
 }
 
 .btn-play {
@@ -267,22 +300,39 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
 
   &:hover {
     background: var(--fbz-color-brand-600);
+    box-shadow: 0 6px 20px color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
+    transform: translateY(-2px);
   }
 }
 
 .btn-ghost {
-  color: #fff;
+  color: #ffffff;
   background: rgba(255, 255, 255, 0.08);
-  border-color: var(--fbz-color-line);
+  border-color: rgba(255, 255, 255, 0.16);
 
   &:hover {
-    background: rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.35);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    transform: translateY(-2px);
   }
 }
 
 .version-single {
   font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.extra :deep(.fact) {
+  dt {
+    color: rgba(255, 255, 255, 0.5) !important;
+  }
+  dd {
+    color: rgba(255, 255, 255, 0.85) !important;
+  }
+  .link {
+    color: var(--fbz-color-brand-500) !important;
+  }
 }
 
 @media (max-width: 1024px) {

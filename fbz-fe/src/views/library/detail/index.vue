@@ -296,14 +296,15 @@ onBeforeUnmount(() => observer?.disconnect());
     background var(--fbz-motion-fast);
 
   &:hover {
-    color: #fff;
-    background: rgba(255, 255, 255, 0.06);
+    color: var(--fbz-color-text);
+    background: var(--fbz-color-panel-strong);
   }
 
   &.active {
-    color: #fff;
-    background: rgba(30, 215, 96, 0.14);
-    border-color: rgba(30, 215, 96, 0.4);
+    color: var(--fbz-color-brand-500);
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 14%, transparent);
+    border-color: color-mix(in srgb, var(--fbz-color-brand-500) 40%, transparent);
+    font-weight: 600;
   }
 }
 
@@ -315,6 +316,14 @@ onBeforeUnmount(() => observer?.disconnect());
   background: var(--fbz-color-panel);
   color: var(--fbz-color-text);
   font-size: 14px;
+  transition:
+    background var(--fbz-motion-fast),
+    border-color var(--fbz-motion-fast);
+
+  &:hover {
+    background: var(--fbz-color-panel-strong);
+    border-color: var(--fbz-color-line-bright);
+  }
 }
 
 .body {

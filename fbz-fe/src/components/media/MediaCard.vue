@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ContinueItem } from "@/types/media.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
+import { useUiStore } from "@/stores/ui.ts";
 
 interface Props {
   item: ContinueItem;
@@ -9,6 +10,8 @@ interface Props {
   showRating?: boolean;
   /** 占位块色块交替 */
   variant?: 0 | 1;
+  /** 自定义副标题，若提供则优先显示 */
+  subtitle?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -22,8 +25,8 @@ const router = useRouter();
 const playback = usePlaybackStore();
 
 const ratio = computed(() => (props.layout === "wide" ? "wide" : "poster"));
-const detailType = computed(() =>
-  props.item.detailType ?? (props.item.libraryId === "series" ? "tv" : "movie"),
+const detailType = computed(
+  () => props.item.detailType ?? (props.item.libraryId === "series" ? "tv" : "movie"),
 );
 
 // 详情页类型路径：优先用 detailType；缺省时按库 id 推断（剧集库→tv）
@@ -31,9 +34,9 @@ const to = computed(() => `/${detailType.value}/${props.item.id}`);
 
 const rating = computed(() => (props.item.rating != null ? props.item.rating.toFixed(1) : null));
 
-// 副标题：优先年份，否则用 meta 文案
-const subtitle = computed(() =>
-  props.item.year != null ? String(props.item.year) : props.item.meta,
+// 副标题：优先使用传入的 subtitle，否则用年份或 meta 文案
+const subtitle = computed(
+  () => props.subtitle ?? (props.item.year != null ? String(props.item.year) : props.item.meta),
 );
 
 // 清晰度徽章：统一弱化为黑色半透明小角标
@@ -53,6 +56,12 @@ function goPlayback() {
     tags: resolution.value ? [resolution.value] : undefined,
   });
 }
+
+const uiStore = useUiStore();
+
+function onContextMenu(e: MouseEvent) {
+  uiStore.openContextMenu(e.clientX, e.clientY, props.item as any);
+}
 </script>
 
 <template>
@@ -61,6 +70,7 @@ function goPlayback() {
     role="link"
     tabindex="0"
     @click="goDetail"
+    @contextmenu.prevent="onContextMenu"
     @keydown.enter.self.prevent="goDetail"
     @keydown.space.self.prevent="goDetail"
   >
@@ -72,8 +82,15 @@ function goPlayback() {
         :variant="props.variant"
       />
 
-      <button class="play-overlay" type="button" :aria-label="`播放 ${props.item.title}`" @click.stop="goPlayback">
-        <span class="play-icon">▶</span>
+      <button
+        class="play-overlay"
+        type="button"
+        :aria-label="`播放 ${props.item.title}`"
+        @click.stop="goPlayback"
+      >
+        <svg class="play-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+          <path d="M8 5v14l11-7z" />
+        </svg>
       </button>
 
       <!-- 角标/进度只是卡片叠层，不参与飞渡 -->
@@ -114,9 +131,11 @@ function goPlayback() {
   &:hover,
   &:focus-visible,
   &:focus-within {
-    border-color: var(--fbz-color-line-bright);
-    box-shadow: 0 18px 38px rgba(0, 0, 0, 0.3);
-    transform: translateY(-2px);
+    border-color: var(--fbz-color-brand-500);
+    box-shadow:
+      0 12px 32px color-mix(in srgb, var(--fbz-color-brand-500) 18%, transparent),
+      0 4px 12px rgba(0, 0, 0, 0.4);
+    transform: translateY(-4px);
   }
 
   &:hover .play-overlay,
@@ -144,8 +163,7 @@ function goPlayback() {
     content: "";
     background: linear-gradient(
       180deg,
-      rgba(20, 20, 22, 0) 0%,
-      rgba(20, 20, 22, 0.52) 52%,
+      var(--fbz-color-panel-transparent) 0%,
       var(--fbz-color-panel) 100%
     );
   }
@@ -162,7 +180,7 @@ function goPlayback() {
   place-content: center;
   border-radius: 50%;
   border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(30, 215, 96, 0.92);
+  background: color-mix(in srgb, var(--fbz-color-brand-500) 92%, transparent);
   color: #07120a;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
   opacity: 0;
@@ -179,8 +197,7 @@ function goPlayback() {
 
 .play-icon {
   margin-left: 2px;
-  font-size: 15px;
-  line-height: 1;
+  display: flex;
 }
 
 .rating {
@@ -215,7 +232,7 @@ function goPlayback() {
   padding: 18px 10px 10px;
   background: linear-gradient(
     180deg,
-    rgba(20, 20, 22, 0) 0%,
+    var(--fbz-color-panel-transparent) 0%,
     var(--fbz-color-panel) 22%,
     var(--fbz-color-bg-strong) 100%
   );

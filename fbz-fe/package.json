@@ -24,6 +24,7 @@
     "@vitejs/plugin-vue": "^6.0.7",
     "@vitejs/plugin-vue-jsx": "^5.1.5",
     "@vue/test-utils": "^2.4.11",
+    "jsdom": "^29.1.1",
     "sass": "^1.101.0",
     "typescript": "~6.0.2",
     "unocss": "^66.7.2",

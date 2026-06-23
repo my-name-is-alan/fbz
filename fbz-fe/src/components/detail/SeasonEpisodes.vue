@@ -1,6 +1,6 @@
 <script setup lang="ts">
+import { ref, computed, watch, nextTick, onMounted } from "vue";
 import type { SeasonInfo } from "@/types/media.ts";
-import { useBodyScrollLock } from "@/composables/useBodyScrollLock.ts";
 import { imageUrl } from "@/service/modules/tmdb.ts";
 
 interface Props {
@@ -60,17 +60,82 @@ interface EpisodePlayPayload {
 }
 
 const RANGE_SIZE = 50;
+const PREVIEW_LIMIT = 8;
 
 const props = defineProps<Props>();
 const emit = defineEmits<{
   playEpisode: [episode: EpisodePlayPayload];
 }>();
 
-const modalSeasonNumber = shallowRef<number>();
-const activeRangeIndex = shallowRef(0);
+const selectedSeasonNumber = ref<number>();
+const activeRangeIndex = ref(0);
+const viewState = ref<"seasons" | "episodes">("seasons");
+const isPopupOpen = ref(false);
+const popupContentRef = ref<HTMLElement | null>(null);
+const sectionRef = ref<HTMLElement | null>(null);
 
-const isSingleSeason = computed(() => props.seasons.length === 1);
-const modalOpen = computed(() => modalSeasonNumber.value != null);
+let allowScroll = false;
+
+onMounted(() => {
+  nextTick(() => {
+    allowScroll = true;
+  });
+});
+
+watch(viewState, () => {
+  if (!allowScroll) return;
+  nextTick(() => {
+    if (sectionRef.value) {
+      const headerH =
+        parseInt(getComputedStyle(document.documentElement).getPropertyValue("--header-h")) || 60;
+      const elementPosition = sectionRef.value.getBoundingClientRect().top + window.scrollY;
+      const offsetPosition = elementPosition - headerH - 16;
+
+      if (typeof window.scrollTo === "function") {
+        window.scrollTo({
+          top: offsetPosition,
+          behavior: "smooth",
+        });
+      }
+    }
+  });
+});
+
+let lastSeriesId: number | string | undefined = undefined;
+let isInitialized = false;
+
+// Watch for seriesId and seasons to initialize/reset state ONLY when the TV show changes
+watch(
+  [() => props.seriesId, () => props.seasons],
+  ([newId, seasons]) => {
+    if (!seasons?.length) return;
+    if (!isInitialized || newId !== lastSeriesId) {
+      isInitialized = true;
+      lastSeriesId = newId;
+      const defSeason = props.defaultSeason;
+      if (defSeason != null && seasons.some((s) => s.season_number === defSeason)) {
+        selectedSeasonNumber.value = defSeason;
+        viewState.value = "episodes";
+        if (props.watchedEpisode != null) {
+          activeRangeIndex.value = Math.floor((props.watchedEpisode - 1) / RANGE_SIZE);
+        }
+      } else {
+        selectedSeasonNumber.value = seasons[0].season_number;
+        viewState.value = seasons.length > 1 ? "seasons" : "episodes";
+      }
+    }
+  },
+  { immediate: true },
+);
+
+// Watch for selectedSeasonNumber changes to reset range index
+watch(selectedSeasonNumber, (newVal) => {
+  if (newVal === props.defaultSeason && props.watchedEpisode != null) {
+    activeRangeIndex.value = Math.floor((props.watchedEpisode - 1) / RANGE_SIZE);
+  } else {
+    activeRangeIndex.value = 0;
+  }
+});
 
 const seasonCards = computed<SeasonCard[]>(() =>
   props.seasons.map((season, index) => {
@@ -87,12 +152,12 @@ const seasonCards = computed<SeasonCard[]>(() =>
   }),
 );
 
-const singleSeason = computed(() => props.seasons[0]);
-const modalSeason = computed(() =>
-  props.seasons.find((season) => season.season_number === modalSeasonNumber.value),
+const activeSeason = computed(
+  () =>
+    props.seasons.find((season) => season.season_number === selectedSeasonNumber.value) ??
+    props.seasons[0],
 );
 
-const activeSeason = computed(() => modalSeason.value ?? singleSeason.value);
 const activeSeasonCard = computed(() =>
   seasonCards.value.find((season) => season.season_number === activeSeason.value?.season_number),
 );
@@ -104,7 +169,7 @@ const activeSeasonMeta = computed(() => {
   const season = activeSeason.value;
   if (!season) return [];
   const airYear = season.air_date ? new Date(season.air_date).getFullYear() : undefined;
-  return [airYear ? `${airYear}` : "", `${season.episode_count} 集`].filter(Boolean);
+  return [airYear ? `${airYear}年` : "", `${season.episode_count} 集`].filter(Boolean);
 });
 
 const activeEpisodes = computed(() => {
@@ -127,12 +192,19 @@ const episodeRanges = computed<EpisodeRange[]>(() => {
   return ranges;
 });
 
-const visibleModalEpisodes = computed(() => {
+const visibleEpisodes = computed(() => {
   if (!showRanges.value) return activeEpisodes.value;
-  return episodeRanges.value[activeRangeIndex.value]?.episodes ?? activeEpisodes.value.slice(0, RANGE_SIZE);
+  return (
+    episodeRanges.value[activeRangeIndex.value]?.episodes ??
+    activeEpisodes.value.slice(0, RANGE_SIZE)
+  );
 });
 
-const currentEpisode = computed(() => activeEpisodes.value.find((episode) => episode.current));
+// Up to 8 episodes for page preview (used in multi-season view)
+const pageVisibleEpisodes = computed(() => {
+  return visibleEpisodes.value.slice(0, PREVIEW_LIMIT);
+});
+
 function buildEpisodes(season: SeasonInfo): EpisodeItem[] {
   return Array.from({ length: season.episode_count }, (_, index) => {
     const number = index + 1;
@@ -146,7 +218,7 @@ function buildEpisodes(season: SeasonInfo): EpisodeItem[] {
       airDate: formatEpisodeDate(season.air_date, number),
       summary: episodeSummary(number),
       watched: isHistorySeason && props.watchedEpisode != null && number < props.watchedEpisode,
-      current: isHistorySeason && number === props.watchedEpisode,
+      current: isHistorySeason && props.watchedEpisode != null && number === props.watchedEpisode,
     };
   });
 }
@@ -159,17 +231,12 @@ function formatEpisodeDate(seasonDate: string | null, episodeNumber: number) {
 }
 
 function episodeSummary(episodeNumber: number) {
-  return `这一集围绕主要人物继续展开，新的线索逐渐浮出水面，角色之间的关系也被推向更紧张的位置。`;
+  return `第 ${episodeNumber} 集故事线继续深入，伴随着新线索逐渐浮出水面，剧中角色们的矛盾纠葛与剧情张力被推向了新的高峰，精彩不容错过。`;
 }
 
-function openSeason(seasonNumber: number, episodeNumber?: number) {
-  modalSeasonNumber.value = seasonNumber;
-  activeRangeIndex.value = episodeNumber ? Math.floor((episodeNumber - 1) / RANGE_SIZE) : 0;
-}
-
-function closeSeasonModal() {
-  modalSeasonNumber.value = undefined;
-  activeRangeIndex.value = 0;
+function selectSeason(seasonNumber: number) {
+  selectedSeasonNumber.value = seasonNumber;
+  viewState.value = "episodes";
 }
 
 function playEpisode(episode: EpisodeItem) {
@@ -192,492 +259,607 @@ function playEpisode(episode: EpisodeItem) {
   });
 }
 
-useBodyScrollLock(modalOpen);
+function playWatchedEpisode() {
+  if (!activeEpisodes.value.length || props.watchedEpisode == null) return;
+  const episode = activeEpisodes.value.find((e) => e.number === props.watchedEpisode);
+  if (episode) {
+    playEpisode(episode);
+  }
+}
 
-useEventListener(window, "keydown", (event) => {
-  if (event.key === "Escape") closeSeasonModal();
-});
+function openEpisodesPopup() {
+  isPopupOpen.value = true;
+  document.body.style.overflow = "hidden";
+  nextTick(() => {
+    if (popupContentRef.value) {
+      const activeCard = popupContentRef.value.querySelector(".popup-episode-card.current");
+      if (activeCard) {
+        activeCard.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  });
+}
+
+function closeEpisodesPopup() {
+  isPopupOpen.value = false;
+  document.body.style.overflow = "";
+}
 </script>
 
 <template>
-  <section v-if="props.seasons.length" class="seasons">
-    <template v-if="isSingleSeason && singleSeason">
-      <header class="section-head">
-        <h2 class="section-title">{{ singleSeason.name }}</h2>
+  <section v-if="props.seasons.length" ref="sectionRef" class="seasons-section">
+    <!-- Case 1: Single Season Flat Layout (Only horizontal scrolling, no wrapping) -->
+    <div v-if="props.seasons.length === 1" class="single-season-scroller-container">
+      <header class="single-season-header">
+        <h2 class="section-title">{{ props.seasons[0].name }}</h2>
       </header>
 
-      <BaseScroller col-width="276px" gap="var(--fbz-space-4)" class="single-episodes">
+      <BaseScroller class="scroller" col-width="var(--episode-col-width)" gap="var(--fbz-space-4)">
         <button
           v-for="episode in activeEpisodes"
           :key="episode.id"
-          class="episode-tile"
+          class="episode-card"
           :class="{ watched: episode.watched, current: episode.current }"
           type="button"
           @click="() => playEpisode(episode)"
         >
-          <div class="episode-thumb">
+          <div class="episode-thumb-wrap">
             <MediaPoster
               :src="activeSeasonBackdrop"
               :title="`${props.showTitle} ${episode.title}`"
               ratio="wide"
+              class="episode-poster"
             />
-            <span class="episode-play">▶</span>
+            <div class="episode-play-overlay">
+              <span class="play-icon">▶</span>
+            </div>
+            <!-- Progress indicator bar for currently active/watching episode -->
+            <div v-if="episode.current" class="episode-active-progress">
+              <span class="active-bar" />
+            </div>
           </div>
-          <strong>{{ episode.number }}. {{ episode.title }}</strong>
-          <span>{{ episode.airDate }}　{{ episode.runtime }}分钟</span>
-          <p>{{ episode.summary }}</p>
+
+          <div class="episode-info">
+            <div class="episode-header-row">
+              <strong class="episode-title">{{ episode.number }}. {{ episode.title }}</strong>
+              <span class="episode-duration">{{ episode.runtime }}分钟</span>
+            </div>
+            <span class="episode-airdate">{{ episode.airDate }}</span>
+            <p class="episode-summary" :title="episode.summary">{{ episode.summary }}</p>
+          </div>
         </button>
       </BaseScroller>
-    </template>
+    </div>
 
-    <template v-else>
-      <header class="section-head">
-        <h2 class="section-title">播出季</h2>
-      </header>
-
-      <BaseScroller col-width="176px" gap="var(--fbz-space-5)" class="season-strip">
-        <button
-          v-for="season in seasonCards"
-          :key="season.season_number"
-          class="season-poster-card"
-          type="button"
-          @click="() => openSeason(season.season_number, season.hasHistory ? props.watchedEpisode : undefined)"
-        >
-          <div class="season-poster">
-            <MediaPoster :src="season.poster" :title="season.name" ratio="poster" />
-            <span class="count-badge">{{ season.episode_count }}</span>
-          </div>
-          <strong>{{ season.name }}</strong>
-          <span class="season-rating">豆 {{ season.rating }}</span>
-          <span v-if="season.hasHistory" class="history-line">继续 E{{ props.watchedEpisode }}</span>
-        </button>
-      </BaseScroller>
-    </template>
-
-    <Teleport to="body">
-      <Transition name="season-modal">
-        <section v-if="modalOpen && activeSeason" class="season-modal" aria-modal="true" role="dialog">
-          <img
-            v-if="activeSeasonBackdrop"
-            class="modal-backdrop"
-            :src="activeSeasonBackdrop"
-            :alt="activeSeason.name"
-          />
-          <div class="modal-scrim" />
-
-          <button class="modal-close" type="button" aria-label="关闭季详情" @click="closeSeasonModal">
-            ‹
-          </button>
-
-          <div class="modal-content">
-            <header class="modal-hero">
-              <button class="modal-poster" type="button" @click="currentEpisode && playEpisode(currentEpisode)">
-                <MediaPoster
-                  :src="activeSeasonPoster"
-                  :title="activeSeason.name"
-                  ratio="poster"
-                />
-                <span class="poster-play">▶</span>
-              </button>
-
-              <div class="modal-copy">
-                <p class="modal-kicker">{{ props.showTitle }}</p>
-                <h2>{{ activeSeason.name }}</h2>
-                <div class="modal-meta">
-                  <span class="season-rating">豆 {{ activeSeasonCard?.rating ?? props.rating?.toFixed(1) ?? "8.8" }}</span>
-                  <span v-for="meta in activeSeasonMeta" :key="meta">{{ meta }}</span>
-                </div>
-                <div class="modal-actions">
-                  <button
-                    class="modal-play"
-                    type="button"
-                    @click="() => currentEpisode && playEpisode(currentEpisode)"
-                  >
-                    ▶ 播放
-                  </button>
-                  <button class="round-action" type="button">✓</button>
-                  <button class="round-action" type="button">•••</button>
-                </div>
-                <p class="modal-overview">
-                  {{ activeSeason.overview || "本季继续展开故事主线，人物关系、冲突和关键事件逐步推进。" }}
-                </p>
+    <!-- Case 2: Multiple Seasons Layout -->
+    <div v-else class="multi-seasons-container">
+      <!-- View 1: Season Grid View -->
+      <div v-if="viewState === 'seasons'" class="seasons-grid-container">
+        <header class="seasons-grid-header">
+          <h2 class="section-title">季列表</h2>
+        </header>
+        <div class="seasons-grid">
+          <button
+            v-for="season in seasonCards"
+            :key="season.season_number"
+            class="season-card-item"
+            type="button"
+            @click="selectSeason(season.season_number)"
+          >
+            <div class="season-poster-wrap-grid">
+              <MediaPoster :src="season.poster" :title="season.name" ratio="poster" />
+              <span v-if="season.hasHistory" class="history-badge-grid">继续观看</span>
+            </div>
+            <div class="season-info-grid">
+              <h4>{{ season.name }}</h4>
+              <div class="season-meta-grid">
+                <span>{{ season.airYear ? season.airYear + "年" : "" }}</span>
+                <span>{{ season.episode_count }} 集</span>
               </div>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <!-- View 2: Episode List View -->
+      <div v-else-if="viewState === 'episodes'" class="episodes-container">
+        <header class="episodes-view-header">
+          <button class="back-to-seasons-btn" type="button" @click="viewState = 'seasons'">
+            <span class="arrow">←</span> 返回季列表
+          </button>
+          <span class="current-season-title">{{ activeSeason?.name }}</span>
+        </header>
+
+        <!-- Selected Season Summary Banner -->
+        <div v-if="activeSeason" class="season-banner">
+          <div class="season-poster-wrap">
+            <MediaPoster :src="activeSeasonPoster" :title="activeSeason.name" ratio="poster" />
+          </div>
+          <div class="season-meta">
+            <div class="season-title-row">
+              <h3>{{ activeSeason.name }}</h3>
+              <span v-if="activeSeasonCard?.rating" class="season-rating">
+                ★ {{ activeSeasonCard.rating }}
+              </span>
+            </div>
+            <div class="season-stats">
+              <span v-for="meta in activeSeasonMeta" :key="meta" class="stat-badge">
+                {{ meta }}
+              </span>
+              <span
+                v-if="activeSeasonCard?.hasHistory && props.watchedEpisode"
+                class="continue-badge"
+              >
+                上次看到第 {{ props.watchedEpisode }} 集
+              </span>
+            </div>
+            <p class="season-overview">
+              {{
+                activeSeason.overview ||
+                "本季继续展开故事主线，人物关系、冲突 and 关键事件逐步推进。"
+              }}
+            </p>
+            <button
+              v-if="activeSeasonCard?.hasHistory && props.watchedEpisode"
+              class="continue-play-btn"
+              type="button"
+              @click="playWatchedEpisode"
+            >
+              ▶ 继续播放第 {{ props.watchedEpisode }} 集
+            </button>
+          </div>
+        </div>
+
+        <!-- Episode Range Selector for long seasons (episodes > 50) -->
+        <div v-if="showRanges" class="episode-ranges" aria-label="集数范围">
+          <button
+            v-for="(range, index) in episodeRanges"
+            :key="range.label"
+            class="range-tab"
+            :class="{ active: activeRangeIndex === index }"
+            type="button"
+            @click="activeRangeIndex = index"
+          >
+            {{ range.label }}
+          </button>
+        </div>
+
+        <!-- Inline Episode Preview Scroller (up to 8 episodes, horizontal scroll) -->
+        <div class="episodes-scroller-wrap">
+          <BaseScroller
+            class="scroller"
+            col-width="var(--episode-col-width)"
+            gap="var(--fbz-space-4)"
+          >
+            <button
+              v-for="episode in pageVisibleEpisodes"
+              :key="episode.id"
+              class="episode-card"
+              :class="{ watched: episode.watched, current: episode.current }"
+              type="button"
+              @click="() => playEpisode(episode)"
+            >
+              <div class="episode-thumb-wrap">
+                <MediaPoster
+                  :src="activeSeasonBackdrop"
+                  :title="`${props.showTitle} ${episode.title}`"
+                  ratio="wide"
+                  class="episode-poster"
+                />
+                <div class="episode-play-overlay">
+                  <span class="play-icon">▶</span>
+                </div>
+                <!-- Progress indicator bar for currently active/watching episode -->
+                <div v-if="episode.current" class="episode-active-progress">
+                  <span class="active-bar" />
+                </div>
+              </div>
+
+              <div class="episode-info">
+                <div class="episode-header-row">
+                  <strong class="episode-title">{{ episode.number }}. {{ episode.title }}</strong>
+                  <span class="episode-duration">{{ episode.runtime }}分钟</span>
+                </div>
+                <span class="episode-airdate">{{ episode.airDate }}</span>
+                <p class="episode-summary" :title="episode.summary">{{ episode.summary }}</p>
+              </div>
+            </button>
+          </BaseScroller>
+        </div>
+
+        <!-- View All Episodes Trigger -->
+        <div v-if="visibleEpisodes.length > PREVIEW_LIMIT" class="view-all-container">
+          <button class="view-all-btn" type="button" @click="openEpisodesPopup">
+            查看全部 (共 {{ visibleEpisodes.length }} 集)
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bottom-up Popup Drawer for View All -->
+  <Teleport to="body">
+    <Transition name="drawer-fade">
+      <div v-if="isPopupOpen" class="popup-backdrop" @click="closeEpisodesPopup">
+        <Transition name="drawer-slide">
+          <div class="popup-drawer" @click.stop>
+            <header class="popup-header">
+              <div class="popup-title-area">
+                <h3>{{ activeSeason?.name }} - 全部单集</h3>
+                <span class="popup-season-stats">{{ activeSeasonMeta.join(" · ") }}</span>
+              </div>
+              <button class="popup-close-btn" type="button" @click="closeEpisodesPopup">
+                <span class="close-icon">✕</span>
+              </button>
             </header>
 
-            <div v-if="showRanges" class="modal-ranges" aria-label="集数范围">
+            <!-- Range tabs if episodes count > 50 inside the popup -->
+            <div v-if="showRanges" class="popup-episode-ranges">
               <button
                 v-for="(range, index) in episodeRanges"
-                :key="range.label"
+                :key="'popup-' + range.label"
                 class="range-tab"
                 :class="{ active: activeRangeIndex === index }"
                 type="button"
-                @click="() => { activeRangeIndex = index; }"
+                @click="activeRangeIndex = index"
               >
                 {{ range.label }}
               </button>
             </div>
 
-            <div class="episode-list">
-              <button
-                v-for="episode in visibleModalEpisodes"
-                :key="episode.id"
-                class="episode-row"
-                :class="{ watched: episode.watched, current: episode.current }"
-                type="button"
-                @click="() => playEpisode(episode)"
-              >
-                <div class="row-thumb">
-                  <MediaPoster
-                    :src="activeSeasonBackdrop"
-                    :title="`${props.showTitle} ${episode.title}`"
-                    ratio="wide"
-                  />
-                  <span class="row-play">▶</span>
-                </div>
-                <div class="row-copy">
-                  <strong>{{ episode.number }}. {{ episode.title }}</strong>
-                  <span>{{ episode.airDate }}　{{ episode.runtime }}分钟</span>
-                  <p>{{ episode.summary }}</p>
-                </div>
-                <div class="row-actions">
-                  <span>♡</span>
-                  <span>✓</span>
-                  <span>•••</span>
-                </div>
-              </button>
+            <div ref="popupContentRef" class="popup-content">
+              <div class="popup-episodes-grid">
+                <button
+                  v-for="episode in visibleEpisodes"
+                  :key="'popup-' + episode.id"
+                  class="episode-card popup-episode-card"
+                  :class="{ watched: episode.watched, current: episode.current }"
+                  type="button"
+                  @click="
+                    () => {
+                      playEpisode(episode);
+                      closeEpisodesPopup();
+                    }
+                  "
+                >
+                  <div class="episode-thumb-wrap">
+                    <MediaPoster
+                      :src="activeSeasonBackdrop"
+                      :title="`${props.showTitle} ${episode.title}`"
+                      ratio="wide"
+                      class="episode-poster"
+                    />
+                    <div class="episode-play-overlay">
+                      <span class="play-icon">▶</span>
+                    </div>
+                    <div v-if="episode.current" class="episode-active-progress">
+                      <span class="active-bar" />
+                    </div>
+                  </div>
+
+                  <div class="episode-info">
+                    <div class="episode-header-row">
+                      <strong class="episode-title"
+                        >{{ episode.number }}. {{ episode.title }}</strong
+                      >
+                      <span class="episode-duration">{{ episode.runtime }}分钟</span>
+                    </div>
+                    <span class="episode-airdate">{{ episode.airDate }}</span>
+                    <p class="episode-summary" :title="episode.summary">{{ episode.summary }}</p>
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
-        </section>
-      </Transition>
-    </Teleport>
-  </section>
+        </Transition>
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped lang="scss">
-.seasons {
+.seasons-section {
+  position: relative;
   max-width: 1280px;
   margin: 0 auto;
   padding: 0 var(--fbz-space-8) var(--fbz-space-8);
 }
 
-.section-head {
-  margin-bottom: var(--fbz-space-3);
+/* Single Season flat horizontal layout */
+.single-season-scroller-container {
+  --episode-col-width: 280px;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 var(--fbz-space-8) var(--fbz-space-8);
+
+  :deep(.track) {
+    padding: 10px 0;
+  }
+}
+
+.single-season-header {
+  border-bottom: 1px solid var(--fbz-color-line-soft);
+  padding-bottom: var(--fbz-space-3);
+  margin-bottom: var(--fbz-space-4);
+}
+
+/* Multi-Season episodes scroller */
+.episodes-scroller-wrap {
+  --episode-col-width: 280px;
+  margin-bottom: var(--fbz-space-4);
+
+  :deep(.track) {
+    padding: 10px 0;
+  }
+}
+
+/* Season Grid View */
+.seasons-grid-header {
+  border-bottom: 1px solid var(--fbz-color-line-soft);
+  padding-bottom: var(--fbz-space-3);
+  margin-bottom: var(--fbz-space-4);
+}
+
+.seasons-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--fbz-space-5);
+}
+
+@media (max-width: 600px) {
+  .single-season-scroller-container {
+    --episode-col-width: 220px;
+    padding: 0 var(--fbz-space-4) var(--fbz-space-5);
+  }
+
+  .episodes-scroller-wrap {
+    --episode-col-width: 220px;
+  }
+
+  .seasons-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: var(--fbz-space-3);
+  }
+}
+
+.season-card-item {
+  display: flex;
+  flex-direction: column;
+  background: var(--fbz-color-panel);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: var(--fbz-radius-card);
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  transition:
+    transform var(--fbz-motion-base),
+    border-color var(--fbz-motion-base),
+    box-shadow var(--fbz-motion-base);
+  padding: 0;
+
+  &:hover {
+    transform: translateY(-4px);
+    border-color: var(--fbz-color-brand-500);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  }
+}
+
+.season-poster-wrap-grid {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  background: var(--fbz-color-panel-strong);
+}
+
+.history-badge-grid {
+  position: absolute;
+  top: var(--fbz-space-2);
+  left: var(--fbz-space-2);
+  background: var(--fbz-color-brand-500);
+  color: #07120a;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+.season-info-grid {
+  padding: var(--fbz-space-3);
+
+  h4 {
+    margin: 0 0 var(--fbz-space-1);
+    font-size: var(--fbz-font-size-md);
+    font-weight: 800;
+    color: var(--fbz-color-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.season-meta-grid {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--fbz-font-size-xs);
+  color: var(--fbz-color-text-muted);
+  font-weight: 600;
+}
+
+/* Episode View Header */
+.episodes-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--fbz-space-2);
+  margin-bottom: var(--fbz-space-4);
+  gap: var(--fbz-space-3);
+  border-bottom: 1px solid var(--fbz-color-line);
+  padding-bottom: var(--fbz-space-3);
+}
+
+.back-to-seasons-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fbz-space-2);
+  background: none;
+  border: none;
+  color: var(--fbz-color-text-soft);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 700;
+  cursor: pointer;
+  padding: var(--fbz-space-2) 0;
+  transition: color var(--fbz-motion-fast);
+
+  &:hover {
+    color: var(--fbz-color-brand-500);
+  }
+
+  .arrow {
+    font-size: 16px;
+  }
+}
+
+.current-season-title {
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 800;
+  color: var(--fbz-color-text);
 }
 
 .section-title {
   margin: 0;
-  font-size: 24px;
-  line-height: 1.2;
-  font-weight: 900;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
 }
 
-.single-episodes,
-.season-strip {
-  :deep(.track) {
-    align-items: start;
-  }
+/* Season Banner styling */
+.season-banner {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: var(--fbz-space-5);
+  background: linear-gradient(
+    135deg,
+    var(--fbz-color-panel) 0%,
+    color-mix(in srgb, var(--fbz-color-panel) 60%, transparent) 100%
+  );
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: var(--fbz-radius-card);
+  padding: var(--fbz-space-4);
+  margin-bottom: var(--fbz-space-5);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
 }
 
-.episode-tile,
-.season-poster-card {
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
+.season-poster-wrap {
+  width: 100px;
+  border-radius: var(--fbz-radius-card);
+  overflow: hidden;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
 }
 
-.episode-tile {
+.season-meta {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  justify-content: center;
+}
 
-  strong {
-    margin-top: 2px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--fbz-font-size-sm);
-    font-weight: 800;
-  }
+.season-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--fbz-space-3);
+  margin-bottom: var(--fbz-space-2);
 
-  span {
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
-  }
-
-  p {
+  h3 {
     margin: 0;
-    color: var(--fbz-color-text-soft);
-    font-size: var(--fbz-font-size-sm);
-    line-height: 1.45;
-    display: -webkit-box;
-    overflow: hidden;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-  }
-
-  &.watched {
-    opacity: 0.58;
-  }
-
-  &.current .episode-thumb {
-    border-color: rgba(30, 215, 96, 0.86);
-    box-shadow: inset 0 0 0 1px rgba(30, 215, 96, 0.86);
-  }
-}
-
-.episode-thumb,
-.season-poster,
-.row-thumb,
-.modal-poster {
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--fbz-radius-card);
-}
-
-.episode-thumb {
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
-  transition:
-    border-color var(--fbz-transition-fast),
-    box-shadow var(--fbz-transition-fast);
-}
-
-.episode-tile:hover .episode-thumb,
-.episode-tile:focus-visible .episode-thumb {
-  border-color: rgba(255, 255, 255, 0.34);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
-}
-
-.episode-play,
-.poster-play,
-.row-play {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.18);
-  opacity: 0;
-  transition: opacity var(--fbz-motion-fast);
-}
-
-.episode-tile:hover .episode-play,
-.modal-poster:hover .poster-play,
-.episode-row:hover .row-play {
-  opacity: 1;
-}
-
-.season-poster-card {
-  display: block;
-
-  strong,
-  .season-rating,
-  .history-line {
-    display: block;
-    margin-top: 6px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    text-align: center;
-  }
-
-  strong {
-    font-size: var(--fbz-font-size-sm);
+    font-size: var(--fbz-font-size-lg);
     font-weight: 800;
+    color: var(--fbz-color-text);
   }
-
-  &:hover .season-poster {
-    filter: brightness(1.08);
-    transform: translateY(-2px);
-  }
-}
-
-.season-poster {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  transition:
-    filter var(--fbz-motion-fast),
-    transform var(--fbz-motion-fast);
-}
-
-.count-badge {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  min-width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--fbz-color-brand-500);
-  color: #07120a;
-  font-size: 11px;
-  font-weight: 900;
 }
 
 .season-rating {
-  color: var(--fbz-color-brand-500);
+  font-family: var(--fbz-font-display);
   font-size: var(--fbz-font-size-sm);
-  font-weight: 800;
+  font-weight: 700;
+  color: var(--fbz-color-brand-500);
+  background: color-mix(in srgb, var(--fbz-color-brand-500) 8%, transparent);
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid color-mix(in srgb, var(--fbz-color-brand-500) 20%, transparent);
 }
 
-.history-line {
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-xs);
-}
-
-.season-modal {
-  position: fixed;
-  inset: 0;
-  z-index: calc(var(--fbz-z-overlay) + 40);
-  overflow-y: auto;
-  background: #030304;
-  color: var(--fbz-color-text);
-}
-
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.24;
-}
-
-.modal-scrim {
-  position: fixed;
-  inset: 0;
-  background:
-    linear-gradient(90deg, rgba(0, 0, 0, 0.92), rgba(0, 0, 0, 0.68) 48%, rgba(0, 0, 0, 0.82)),
-    linear-gradient(180deg, rgba(0, 0, 0, 0.18), #030304 100%);
-}
-
-.modal-close {
-  position: fixed;
-  z-index: 2;
-  top: 28px;
-  left: 22px;
-  width: 42px;
-  height: 42px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
-  font-size: 34px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.modal-content {
-  position: relative;
-  z-index: 1;
-  max-width: 1580px;
-  margin: 0 auto;
-  padding: 80px var(--fbz-space-8) 64px;
-}
-
-.modal-hero {
-  display: grid;
-  grid-template-columns: 258px minmax(0, 1fr);
-  gap: 36px;
-  align-items: start;
-  max-width: 1180px;
-  min-height: 420px;
-}
-
-.modal-poster {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
-}
-
-.poster-play {
-  font-size: 28px;
-  background: rgba(0, 0, 0, 0.34);
-}
-
-.modal-copy {
-  padding-top: 8px;
-}
-
-.modal-kicker {
-  margin: 0 0 8px;
-  color: var(--fbz-color-text-soft);
-  font-size: var(--fbz-font-size-md);
-}
-
-.modal-copy h2 {
-  margin: 0 0 var(--fbz-space-3);
-  font-size: 32px;
-  line-height: 1.1;
-  font-weight: 900;
-}
-
-.modal-meta {
+.season-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--fbz-space-3);
-  align-items: center;
-  margin-bottom: var(--fbz-space-4);
-  color: var(--fbz-color-text-soft);
-}
-
-.modal-actions {
-  display: flex;
   align-items: center;
   gap: var(--fbz-space-2);
-  margin-bottom: var(--fbz-space-4);
+  margin-bottom: var(--fbz-space-3);
 }
 
-.modal-play,
-.round-action {
-  height: 46px;
-  border: 0;
-  cursor: pointer;
+.stat-badge {
+  font-size: var(--fbz-font-size-xs);
+  color: var(--fbz-color-text-muted);
+  background: var(--fbz-color-panel-strong);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.continue-badge {
+  font-size: var(--fbz-font-size-xs);
+  color: var(--fbz-color-brand-500);
+  font-weight: 700;
+}
+
+.continue-play-btn {
+  margin-top: var(--fbz-space-3);
+  align-self: flex-start;
+  height: 36px;
+  padding: 0 var(--fbz-space-4);
+  border-radius: var(--fbz-radius-control);
+  background: var(--fbz-color-brand-500);
+  border: none;
+  color: #07120a;
+  font-size: var(--fbz-font-size-sm);
   font-weight: 800;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fbz-space-2);
+  transition:
+    transform var(--fbz-motion-fast),
+    box-shadow var(--fbz-motion-fast);
+
+  &:hover {
+    transform: scale(1.02);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--fbz-color-brand-500) 25%, transparent);
+  }
+
+  &:active {
+    transform: scale(0.98);
+  }
 }
 
-.modal-play {
-  padding: 0 24px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
-  color: #fff;
-}
-
-.round-action {
-  width: 46px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.16);
-  color: #fff;
-}
-
-.modal-overview {
-  max-width: 920px;
+.season-overview {
   margin: 0;
+  font-size: var(--fbz-font-size-sm);
+  line-height: 1.6;
   color: var(--fbz-color-text-soft);
-  font-size: var(--fbz-font-size-md);
-  line-height: 1.7;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
-.modal-ranges {
-  position: sticky;
-  top: 0;
-  z-index: 2;
+/* Episode Ranges */
+.episode-ranges {
   display: flex;
   gap: var(--fbz-space-2);
   overflow-x: auto;
-  padding: var(--fbz-space-3) 0;
-  margin-bottom: var(--fbz-space-2);
-  background: linear-gradient(180deg, rgba(3, 3, 4, 0.96), rgba(3, 3, 4, 0.78));
+  padding: var(--fbz-space-2) 0;
+  margin-bottom: var(--fbz-space-4);
   scrollbar-width: none;
 
   &::-webkit-scrollbar {
@@ -687,141 +869,364 @@ useEventListener(window, "keydown", (event) => {
 
 .range-tab {
   flex: 0 0 auto;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid transparent;
+  height: 28px;
+  padding: 0 var(--fbz-space-3);
+  border: 1px solid var(--fbz-color-line);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--fbz-color-text-soft);
-  font-size: var(--fbz-font-size-sm);
+  background: var(--fbz-color-panel-strong);
+  color: var(--fbz-color-text-muted);
+  font-size: var(--fbz-font-size-xs);
+  font-weight: 700;
   cursor: pointer;
+  transition:
+    background var(--fbz-motion-fast),
+    color var(--fbz-motion-fast);
 
   &.active {
     background: var(--fbz-color-brand-500);
     color: #07120a;
-    font-weight: 900;
+    border-color: var(--fbz-color-brand-500);
   }
 }
 
-.episode-list {
+.episode-card {
   display: flex;
   flex-direction: column;
-  gap: var(--fbz-space-5);
-}
-
-.episode-row {
-  display: grid;
-  grid-template-columns: 232px minmax(0, 1fr) 132px;
-  gap: var(--fbz-space-4);
-  align-items: center;
+  background: var(--fbz-color-panel);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: var(--fbz-radius-card);
   padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
+  overflow: hidden;
   text-align: left;
+  color: inherit;
   cursor: pointer;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+  transition:
+    border-color var(--fbz-motion-base),
+    box-shadow var(--fbz-motion-base),
+    transform var(--fbz-motion-base);
+  width: 100%;
+
+  &:hover {
+    border-color: var(--fbz-color-line-bright);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24);
+    transform: translateY(-2px);
+  }
 
   &.watched {
-    opacity: 0.56;
+    opacity: 0.6;
   }
 
-  &.current .row-thumb {
-    outline: 2px solid rgba(30, 215, 96, 0.72);
+  &.current {
+    border-color: var(--fbz-color-brand-500);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--fbz-color-brand-500) 12%, transparent);
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 4%, var(--fbz-color-panel));
   }
 }
 
-.row-thumb {
-  background: rgba(255, 255, 255, 0.06);
+.episode-thumb-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: var(--fbz-color-panel-strong);
+  overflow: hidden;
+
+  :deep(.media-poster) {
+    border-radius: 0;
+  }
 }
 
-.row-copy {
-  min-width: 0;
+.episode-poster {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform var(--fbz-motion-slow) ease;
 
-  strong {
+  .episode-card:hover & {
+    transform: scale(1.04);
+  }
+}
+
+.episode-play-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  background: rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transition: opacity var(--fbz-motion-fast);
+}
+
+.play-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-content: center;
+  border-radius: 50%;
+  background: var(--fbz-color-brand-500);
+  color: #07120a;
+  font-size: 13px;
+  margin-left: 2px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.episode-card:hover .episode-play-overlay {
+  opacity: 1;
+}
+
+.episode-active-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.15);
+
+  .active-bar {
     display: block;
-    margin-bottom: 4px;
-    font-size: var(--fbz-font-size-md);
-    font-weight: 900;
-  }
-
-  span {
-    display: block;
-    margin-bottom: 5px;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
-  }
-
-  p {
-    margin: 0;
-    color: var(--fbz-color-text-soft);
-    line-height: 1.55;
-    display: -webkit-box;
-    overflow: hidden;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    height: 100%;
+    width: 35%; /* mock progress */
+    background: var(--fbz-color-brand-500);
   }
 }
 
-.row-actions {
+.episode-info {
+  padding: var(--fbz-space-3);
   display: flex;
-  justify-content: flex-end;
-  gap: var(--fbz-space-5);
+  flex-direction: column;
+  flex: 1;
+}
+
+.episode-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--fbz-space-2);
+  margin-bottom: 2px;
+}
+
+.episode-title {
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 800;
+  line-height: 1.3;
+  color: var(--fbz-color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.episode-duration {
+  font-size: var(--fbz-font-size-xs);
   color: var(--fbz-color-text-muted);
-  font-size: 22px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-.season-modal-enter-active,
-.season-modal-leave-active {
-  transition: opacity var(--fbz-motion-base);
+.episode-airdate {
+  font-size: var(--fbz-font-size-xs);
+  color: var(--fbz-color-text-muted);
+  margin-bottom: var(--fbz-space-2);
 }
 
-.season-modal-enter-from,
-.season-modal-leave-to {
+.episode-summary {
+  margin: 0;
+  font-size: var(--fbz-font-size-xs);
+  line-height: 1.5;
+  color: var(--fbz-color-text-soft);
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* View All Button */
+.view-all-container {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--fbz-space-5);
+}
+
+.view-all-btn {
+  height: 40px;
+  padding: 0 var(--fbz-space-6);
+  border-radius: var(--fbz-radius-control);
+  border: 1px solid var(--fbz-color-brand-500);
+  background: transparent;
+  color: var(--fbz-color-brand-500);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 800;
+  cursor: pointer;
+  transition:
+    background var(--fbz-motion-base),
+    color var(--fbz-motion-base),
+    box-shadow var(--fbz-motion-base);
+
+  &:hover {
+    background: var(--fbz-color-brand-500);
+    color: #07120a;
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
+  }
+}
+
+/* Bottom Popup Drawer */
+.popup-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.popup-drawer {
+  width: 100%;
+  max-width: 960px;
+  background: var(--fbz-color-bg);
+  border-top: 1px solid var(--fbz-color-line);
+  border-radius: var(--fbz-radius-card) var(--fbz-radius-card) 0 0;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--fbz-space-4) var(--fbz-space-6);
+  border-bottom: 1px solid var(--fbz-color-line-soft);
+  flex-shrink: 0;
+}
+
+.popup-title-area {
+  h3 {
+    margin: 0 0 2px;
+    font-size: var(--fbz-font-size-lg);
+    font-weight: 800;
+    color: var(--fbz-color-text);
+  }
+
+  .popup-season-stats {
+    font-size: var(--fbz-font-size-xs);
+    color: var(--fbz-color-text-muted);
+  }
+}
+
+.popup-close-btn {
+  background: var(--fbz-color-panel);
+  border: 1px solid var(--fbz-color-line);
+  color: var(--fbz-color-text-muted);
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--fbz-motion-fast);
+
+  &:hover {
+    color: var(--fbz-color-text);
+    border-color: var(--fbz-color-line-bright);
+    background: var(--fbz-color-panel-strong);
+  }
+}
+
+.popup-episode-ranges {
+  display: flex;
+  gap: var(--fbz-space-2);
+  overflow-x: auto;
+  padding: var(--fbz-space-3) var(--fbz-space-6) var(--fbz-space-1);
+  scrollbar-width: none;
+  flex-shrink: 0;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.popup-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--fbz-space-4) var(--fbz-space-6) var(--fbz-space-6);
+  scrollbar-width: thin;
+}
+
+.popup-episodes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--fbz-space-4);
+}
+
+/* Drawer Transitions */
+.drawer-fade-enter-active,
+.drawer-fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.drawer-fade-enter-from,
+.drawer-fade-leave-to {
   opacity: 0;
 }
 
+.drawer-fade-enter-active .popup-drawer,
+.drawer-fade-leave-active .popup-drawer {
+  transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.drawer-fade-enter-from .popup-drawer,
+.drawer-fade-leave-to .popup-drawer {
+  transform: translateY(100%);
+}
+
 @media (max-width: 900px) {
-  .modal-hero {
-    grid-template-columns: 132px minmax(0, 1fr);
-    min-height: 0;
+  .season-banner {
+    grid-template-columns: 80px 1fr;
+    gap: var(--fbz-space-4);
   }
 
-  .episode-row {
-    grid-template-columns: 148px minmax(0, 1fr);
-  }
-
-  .row-actions {
-    grid-column: 2;
-    justify-content: flex-start;
-    font-size: 18px;
+  .season-poster-wrap {
+    width: 80px;
   }
 }
 
 @media (max-width: 600px) {
-  .seasons {
+  .seasons-section {
     padding: 0 var(--fbz-space-4) var(--fbz-space-5);
   }
 
-  .modal-content {
-    padding: 72px var(--fbz-space-4) var(--fbz-space-5);
-  }
-
-  .modal-hero {
-    grid-template-columns: 96px minmax(0, 1fr);
-    gap: var(--fbz-space-4);
-  }
-
-  .modal-copy h2 {
-    font-size: 24px;
-  }
-
-  .modal-overview {
-    grid-column: 1 / -1;
-  }
-
-  .episode-row {
-    grid-template-columns: 116px minmax(0, 1fr);
+  .season-banner {
+    grid-template-columns: 1fr;
     gap: var(--fbz-space-3);
+    padding: var(--fbz-space-3);
+  }
+
+  .season-poster-wrap {
+    display: none;
+  }
+
+  .popup-episodes-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .popup-drawer {
+    max-height: 90vh;
+  }
+
+  .popup-header {
+    padding: var(--fbz-space-3) var(--fbz-space-4);
+  }
+
+  .popup-content {
+    padding: var(--fbz-space-3) var(--fbz-space-4) var(--fbz-space-4);
+  }
+
+  .popup-episode-ranges {
+    padding: var(--fbz-space-2) var(--fbz-space-4) 0;
   }
 }
 </style>

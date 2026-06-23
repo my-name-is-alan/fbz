@@ -56,3 +56,34 @@ a {
 #app {
   min-height: 100vh;
 }
+
+/* ───── 全局滚动条 ───── */
+
+// Firefox / 标准
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--fbz-color-line-bright) transparent;
+}
+
+// WebKit (Chrome / Edge / Safari)
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--fbz-color-line);
+  border-radius: 3px;
+
+  &:hover {
+    background: var(--fbz-color-line-bright);
+  }
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

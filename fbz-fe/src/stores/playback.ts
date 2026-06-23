@@ -53,8 +53,8 @@ export const usePlaybackStore = defineStore("playback", () => {
     return playlist.value.findIndex((episode) => episode.id === item.value?.id);
   });
   const hasPreviousEpisode = computed(() => currentEpisodeIndex.value > 0);
-  const hasNextEpisode = computed(() =>
-    currentEpisodeIndex.value >= 0 && currentEpisodeIndex.value < playlist.value.length - 1,
+  const hasNextEpisode = computed(
+    () => currentEpisodeIndex.value >= 0 && currentEpisodeIndex.value < playlist.value.length - 1,
   );
 
   function open(nextItem: PlaybackItem) {

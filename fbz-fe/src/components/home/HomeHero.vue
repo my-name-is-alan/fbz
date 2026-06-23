@@ -42,6 +42,25 @@ const colA = computed(() =>
 const colB = computed(() =>
   props.items.map((item, i) => ({ item, i })).filter(({ i }) => i % 2 === 1),
 );
+
+import { usePlaybackStore } from "@/stores/playback.ts";
+
+const router = useRouter();
+const playback = usePlaybackStore();
+
+function playActive() {
+  playback.open({
+    type: "movie",
+    id: String(active.value.id),
+    title: active.value.title,
+    subtitle: active.value.meta.join(" · "),
+    poster: active.value.thumb,
+  });
+}
+
+function viewDetails() {
+  router.push(`/movie/${active.value.id}`);
+}
 </script>
 
 <template>
@@ -73,8 +92,31 @@ const colB = computed(() =>
       </div>
       <p class="overview">{{ active.overview }}</p>
       <div class="actions">
-        <button class="btn btn-play">▶ 播放</button>
-        <button class="btn btn-ghost">详情</button>
+        <button class="btn btn-play" type="button" @click="playActive">
+          <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+          <span>播放</span>
+        </button>
+
+        <button class="btn btn-ghost" type="button" @click="viewDetails">
+          <svg
+            class="btn-icon"
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="16" x2="12" y2="12" />
+            <line x1="12" y1="8" x2="12.01" y2="8" />
+          </svg>
+          <span>详情</span>
+        </button>
       </div>
     </div>
 
@@ -169,6 +211,7 @@ const colB = computed(() =>
   position: relative;
   z-index: 2;
   max-width: 540px;
+  color: #ffffff; /* 确保在任何主题下，叠加在暗色图片之上的文字均为白色以实现高可读性 */
 }
 
 .eyebrow {
@@ -185,6 +228,7 @@ const colB = computed(() =>
   font-size: 48px;
   line-height: 1.06;
   font-weight: 800;
+  color: #ffffff;
 }
 
 .meta {
@@ -194,13 +238,13 @@ const colB = computed(() =>
   gap: var(--fbz-space-3);
   margin-bottom: var(--fbz-space-4);
   font-size: var(--fbz-font-size-md);
-  color: var(--fbz-color-text-soft);
+  color: rgba(255, 255, 255, 0.85);
 
   .dot {
     width: 3px;
     height: 3px;
     border-radius: 50%;
-    background: var(--fbz-color-text-muted);
+    background: rgba(255, 255, 255, 0.4);
   }
 
   .tags {
@@ -211,11 +255,12 @@ const colB = computed(() =>
 
   .tag {
     padding: 2px 7px;
-    border: 1px solid var(--fbz-color-line);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.05);
     border-radius: 3px;
     font-size: var(--fbz-font-size-xs);
     letter-spacing: 0.5px;
-    color: var(--fbz-color-text-soft);
+    color: rgba(255, 255, 255, 0.85);
   }
 }
 
@@ -224,7 +269,7 @@ const colB = computed(() =>
   max-width: 480px;
   font-size: var(--fbz-font-size-md);
   line-height: 1.65;
-  color: var(--fbz-color-text-soft);
+  color: rgba(255, 255, 255, 0.8);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -244,13 +289,24 @@ const colB = computed(() =>
   border-radius: var(--fbz-radius-control);
   font-size: var(--fbz-font-size-md);
   font-weight: 700;
+  text-decoration: none;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
+  cursor: pointer;
   transition:
-    background var(--fbz-motion-fast),
-    border-color var(--fbz-motion-fast),
-    color var(--fbz-motion-fast);
+    background var(--fbz-motion-fast) ease,
+    border-color var(--fbz-motion-fast) ease,
+    box-shadow var(--fbz-motion-fast) ease,
+    transform var(--fbz-motion-fast) ease;
+
+  &:active {
+    transform: scale(0.96);
+  }
+}
+
+.btn-icon {
+  flex: 0 0 auto;
 }
 
 .btn-play {
@@ -259,16 +315,21 @@ const colB = computed(() =>
 
   &:hover {
     background: var(--fbz-color-brand-600);
+    box-shadow: 0 6px 20px color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
+    transform: translateY(-2px);
   }
 }
 
 .btn-ghost {
-  color: #fff;
+  color: #ffffff;
   background: rgba(255, 255, 255, 0.08);
-  border-color: var(--fbz-color-line);
+  border-color: rgba(255, 255, 255, 0.16);
 
   &:hover {
-    background: rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.35);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    transform: translateY(-2px);
   }
 }
 

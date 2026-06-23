@@ -15,6 +15,18 @@ const accountLinks = [
 
 // 滚动 → header 镂空磨砂
 const scrolled = ref(false);
+const route = useRoute();
+const hasHeroBackdrop = computed(() => {
+  const name = String(route.name ?? "");
+  const path = route.path;
+  return (
+    ["home", "movie-detail", "tv-detail", "collection-detail"].includes(name) ||
+    path === "/" ||
+    path.startsWith("/movie/") ||
+    path.startsWith("/tv/") ||
+    path.startsWith("/collection/")
+  );
+});
 function onScroll() {
   scrolled.value = window.scrollY > 50;
 }
@@ -41,7 +53,10 @@ function logout() {
 </script>
 
 <template>
-  <header class="site-header" :class="{ 'is-scrolled': scrolled }">
+  <header
+    class="site-header"
+    :class="{ 'is-scrolled': scrolled, 'is-hero-transparent': hasHeroBackdrop && !scrolled }"
+  >
     <button class="hamburger" aria-label="菜单" @click="emit('openDrawer')">☰</button>
 
     <RouterLink to="/" class="brand">F<b>B</b>Z</RouterLink>
@@ -124,7 +139,7 @@ function logout() {
     backdrop-filter var(--fbz-motion-slow) ease;
 
   &.is-scrolled {
-    background: rgba(10, 10, 11, 0.72);
+    background: color-mix(in srgb, var(--fbz-color-bg) 72%, transparent);
     border-bottom: 1px solid var(--fbz-color-line);
     backdrop-filter: saturate(140%) blur(14px);
     -webkit-backdrop-filter: saturate(140%) blur(14px);
@@ -153,6 +168,8 @@ function logout() {
 
 .nav-item {
   position: relative;
+  display: inline-flex;
+  align-items: center;
   color: var(--fbz-color-text-soft);
   background: none;
   border: 0;
@@ -165,12 +182,12 @@ function logout() {
     background var(--fbz-motion-fast);
 
   &:hover {
-    color: #fff;
-    background: rgba(255, 255, 255, 0.06);
+    color: var(--fbz-color-text);
+    background: var(--fbz-color-panel-strong);
   }
 
   &.active {
-    color: #fff;
+    color: var(--fbz-color-text);
 
     &::after {
       content: "";
@@ -189,11 +206,16 @@ function logout() {
     font-size: 10px;
     margin-right: 6px;
     opacity: 0.6;
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
   }
 }
 
 .lib-wrap {
   position: relative;
+  display: inline-flex;
+  align-items: center;
 }
 
 .lib-menu {
@@ -201,11 +223,12 @@ function logout() {
   top: calc(100% + 8px);
   left: 0;
   width: 320px;
-  background: rgba(16, 16, 18, 0.97);
+  background: color-mix(in srgb, var(--fbz-color-panel) 97%, transparent);
   border: 1px solid var(--fbz-color-line);
   border-radius: 8px;
   padding: 8px;
   backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   box-shadow: var(--fbz-shadow-panel);
   opacity: 0;
   visibility: hidden;
@@ -241,8 +264,8 @@ function logout() {
   text-decoration: none;
 
   &:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: #fff;
+    background: var(--fbz-color-panel-strong);
+    color: var(--fbz-color-text);
   }
 
   &.strong {
@@ -277,10 +300,10 @@ function logout() {
   padding: 0 12px;
   border-radius: var(--fbz-radius-control);
   border: 1px solid var(--fbz-color-line);
-  background: rgba(20, 20, 22, 0.82);
+  background: var(--fbz-color-panel-strong);
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
-  color: var(--fbz-color-text-soft);
+  color: var(--fbz-color-text-muted);
   font-size: var(--fbz-font-size-sm);
   min-width: 200px;
 
@@ -331,9 +354,10 @@ function logout() {
   padding: 6px;
   border: 1px solid var(--fbz-color-line);
   border-radius: 8px;
-  background: rgba(16, 16, 18, 0.98);
+  background: color-mix(in srgb, var(--fbz-color-panel) 98%, transparent);
   box-shadow: var(--fbz-shadow-panel);
   backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
 
@@ -352,7 +376,7 @@ function logout() {
   text-decoration: none;
 
   &:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--fbz-color-panel-strong);
     color: var(--fbz-color-text);
   }
 
@@ -396,6 +420,47 @@ function logout() {
 
   .brand {
     margin-right: auto;
+  }
+}
+
+.site-header.is-hero-transparent {
+  .brand {
+    color: #ffffff;
+  }
+
+  .nav-item {
+    color: rgba(255, 255, 255, 0.7);
+
+    &:hover {
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    &.active {
+      color: #ffffff;
+    }
+  }
+
+  .header-search {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .avatar {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.75);
+
+    &:hover {
+      border-color: rgba(255, 255, 255, 0.3);
+      color: #ffffff;
+    }
+  }
+
+  .hamburger,
+  .icon-search-btn {
+    color: #ffffff;
   }
 }
 </style>

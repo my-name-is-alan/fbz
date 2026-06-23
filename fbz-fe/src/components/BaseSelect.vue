@@ -165,14 +165,23 @@ function onKeydown(e: KeyboardEvent) {
   line-height: 1;
   transition:
     border-color var(--fbz-motion-fast),
-    background var(--fbz-motion-fast);
+    background var(--fbz-motion-fast),
+    box-shadow var(--fbz-motion-fast);
 
   &:hover {
     border-color: var(--fbz-color-line-bright);
+    background: var(--fbz-color-panel-strong);
   }
 
   &.open {
     border-color: var(--fbz-color-brand-500);
+    box-shadow: var(--fbz-shadow-focus);
+  }
+
+  &:focus-visible {
+    outline: none;
+    border-color: var(--fbz-color-brand-500);
+    box-shadow: var(--fbz-shadow-focus);
   }
 }
 
@@ -215,7 +224,7 @@ function onKeydown(e: KeyboardEvent) {
   list-style: none;
   border-radius: var(--fbz-radius-control);
   border: 1px solid var(--fbz-color-line);
-  background: rgba(16, 16, 18, 0.97);
+  background: color-mix(in srgb, var(--fbz-color-panel) 97%, transparent);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
   box-shadow: var(--fbz-shadow-panel);
@@ -238,12 +247,13 @@ function onKeydown(e: KeyboardEvent) {
     color var(--fbz-motion-fast);
 
   &.focus {
-    background: rgba(255, 255, 255, 0.06);
-    color: #fff;
+    background: var(--fbz-color-panel-strong);
+    color: var(--fbz-color-text);
   }
 
   &.active {
     color: var(--fbz-color-brand-500);
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 8%, transparent);
     font-weight: 600;
   }
 }

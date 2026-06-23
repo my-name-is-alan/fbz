@@ -60,13 +60,15 @@ const meta = computed(() => {
 const creators = computed(() => detail.value?.creators.map((c) => c.name).join("、") ?? "");
 const similar = computed(() => detail.value?.similar.map(refToItem) ?? []);
 
-// 演示「继续观看」定位：用 id 稳定地落在某一季某一集
+// 演示「继续观看」定位：偶数 ID 模拟有历史，奇数 ID 模拟无历史，以便能展示/测试季列表和直达集列表两种状态
 const defaultSeason = computed(() => {
+  if (id.value % 2 !== 0) return undefined;
   const seasons = detail.value?.seasons ?? [];
   if (!seasons.length) return undefined;
   return seasons[id.value % seasons.length]?.season_number;
 });
 const watchedEpisode = computed(() => {
+  if (defaultSeason.value == null) return undefined;
   const s = detail.value?.seasons.find((x) => x.season_number === defaultSeason.value);
   if (!s) return undefined;
   return (id.value % s.episode_count) + 1;
@@ -88,7 +90,10 @@ function playTv() {
   });
 }
 
-function toPlaybackPlaylist(tvTitle: string, episodes: EpisodePlayEvent["episodes"]): PlaybackEpisode[] {
+function toPlaybackPlaylist(
+  tvTitle: string,
+  episodes: EpisodePlayEvent["episodes"],
+): PlaybackEpisode[] {
   return episodes.map((episode) => ({
     id: `${tvTitle}-${episode.id}`,
     seasonNumber: episode.seasonNumber,
@@ -106,9 +111,13 @@ function playEpisode(episode: EpisodePlayEvent) {
   if (!tv) return;
 
   const playlist = toPlaybackPlaylist(tv.title, episode.episodes);
-  const episodeId = `${tv.title}-${episode.episodes.find((entry) =>
-    entry.seasonNumber === episode.seasonNumber && entry.episodeNumber === episode.episodeNumber
-  )?.id ?? `${tv.id}-s${episode.seasonNumber}-e${episode.episodeNumber}`}`;
+  const episodeId = `${tv.title}-${
+    episode.episodes.find(
+      (entry) =>
+        entry.seasonNumber === episode.seasonNumber &&
+        entry.episodeNumber === episode.episodeNumber,
+    )?.id ?? `${tv.id}-s${episode.seasonNumber}-e${episode.episodeNumber}`
+  }`;
 
   playback.open({
     type: "episode",
