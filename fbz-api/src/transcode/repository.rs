@@ -1,4 +1,4 @@
-use sqlx::{Row, postgres::PgRow};
+use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 
 use crate::db::DbPool;
 
@@ -28,6 +28,21 @@ pub struct TranscodeSessionRecord {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TranscodeSessionFilter {
+    pub status: Option<String>,
+    pub hardware_acceleration: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscodeSessionPage {
+    pub records: Vec<TranscodeSessionRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,46 +279,134 @@ impl TranscodeRepository {
         &self,
         limit: i64,
     ) -> Result<Vec<TranscodeSessionRecord>, sqlx::Error> {
-        let rows = sqlx::query(
+        self.list_sessions_page(TranscodeSessionFilter {
+            status: None,
+            hardware_acceleration: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
+
+    pub async fn list_sessions_page(
+        &self,
+        filter: TranscodeSessionFilter,
+    ) -> Result<TranscodeSessionPage, sqlx::Error> {
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
-            select public_id::text as id,
-                   status,
-                   hardware_acceleration,
-                   input_path,
-                   output_path,
-                   manifest_path,
-                   video_codec,
-                   audio_codec,
-                   container,
-                   bitrate,
-                   worker_id,
-                   lease_expires_at::text as lease_expires_at,
-                   attempts,
-                   max_attempts,
-                   error_message,
-                   created_at::text as created_at,
-                   updated_at::text as updated_at,
-                   started_at::text as started_at,
-                   finished_at::text as finished_at
-            from transcoding_sessions
-            order by case status
+            select sessions.public_id::text as id,
+                   sessions.status,
+                   sessions.hardware_acceleration,
+                   sessions.input_path,
+                   sessions.output_path,
+                   sessions.manifest_path,
+                   sessions.video_codec,
+                   sessions.audio_codec,
+                   sessions.container,
+                   sessions.bitrate,
+                   sessions.worker_id,
+                   sessions.lease_expires_at::text as lease_expires_at,
+                   sessions.attempts,
+                   sessions.max_attempts,
+                   sessions.error_message,
+                   sessions.created_at::text as created_at,
+                   sessions.updated_at::text as updated_at,
+                   sessions.started_at::text as started_at,
+                   sessions.finished_at::text as finished_at
+            from transcoding_sessions sessions
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join transcoding_sessions cursor_session
+                  on cursor_session.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and sessions.status = ");
+            query.push_bind(status);
+        }
+
+        if let Some(hardware_acceleration) = filter.hardware_acceleration.as_deref() {
+            query.push(" and sessions.hardware_acceleration = ");
+            query.push_bind(hardware_acceleration);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                r#"
+                and (
+                    case sessions.status when 'running' then 0 when 'queued' then 1 when 'failed' then 2 else 3 end
+                    >
+                    case cursor_session.status when 'running' then 0 when 'queued' then 1 when 'failed' then 2 else 3 end
+                    or (
+                        case sessions.status when 'running' then 0 when 'queued' then 1 when 'failed' then 2 else 3 end
+                        =
+                        case cursor_session.status when 'running' then 0 when 'queued' then 1 when 'failed' then 2 else 3 end
+                        and (sessions.created_at, sessions.id) < (cursor_session.created_at, cursor_session.id)
+                    )
+                )
+                "#,
+            );
+        }
+
+        query.push(
+            r#"
+            order by case sessions.status
                          when 'running' then 0
                          when 'queued' then 1
                          when 'failed' then 2
                          else 3
                      end,
-                     created_at desc,
-                     id desc
-            limit $1
+                     sessions.created_at desc,
+                     sessions.id desc
+            limit
             "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
+        query.push_bind(fetch_limit);
 
-        rows.into_iter()
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
             .map(TranscodeSessionRecord::from_row)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(TranscodeSessionPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn cancel_session(
@@ -572,6 +675,10 @@ impl HlsTranscodeSessionRecord {
 mod tests {
     use super::*;
 
+    const REPOSITORY_SOURCE: &str = include_str!("repository.rs");
+    const TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION: &str =
+        include_str!("../../migrations/0053_transcode_session_admin_keyset_indexes.sql");
+
     #[test]
     fn output_base_path_trims_trailing_separators() {
         assert_eq!(
@@ -616,6 +723,52 @@ mod tests {
         ));
         assert!(
             TRANSCODE_FIND_HLS_SESSION_SQL.contains("and mi.public_id = requested.item_public_id")
+        );
+    }
+
+    #[test]
+    fn transcode_session_admin_list_uses_keyset_shape() {
+        let offset_token = format!(" {} ", "offset");
+
+        assert!(REPOSITORY_SOURCE.contains("QueryBuilder::<Postgres>"));
+        assert!(REPOSITORY_SOURCE.contains("join transcoding_sessions cursor_session"));
+        assert!(REPOSITORY_SOURCE.contains("cursor_session.public_id = case"));
+        assert!(REPOSITORY_SOURCE.contains("case sessions.status"));
+        assert!(REPOSITORY_SOURCE.contains("case cursor_session.status"));
+        assert!(REPOSITORY_SOURCE.contains(
+            "(sessions.created_at, sessions.id) < (cursor_session.created_at, cursor_session.id)"
+        ));
+        assert!(REPOSITORY_SOURCE.contains("sessions.status = "));
+        assert!(REPOSITORY_SOURCE.contains("sessions.hardware_acceleration = "));
+        assert!(REPOSITORY_SOURCE.contains("sessions.created_at desc"));
+        assert!(REPOSITORY_SOURCE.contains("sessions.id desc"));
+        assert!(
+            !REPOSITORY_SOURCE
+                .to_ascii_lowercase()
+                .contains(&offset_token)
+        );
+
+        assert!(
+            TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION
+                .contains("idx_transcoding_sessions_admin_recent_keyset")
+        );
+        assert!(
+            TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION
+                .contains("idx_transcoding_sessions_admin_status_recent_keyset")
+        );
+        assert!(
+            TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION
+                .contains("idx_transcoding_sessions_admin_hardware_recent_keyset")
+        );
+        assert!(
+            TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION
+                .contains("idx_transcoding_sessions_admin_status_hardware_recent_keyset")
+        );
+        assert!(TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION.contains("created_at desc"));
+        assert!(
+            !TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION
+                .to_ascii_lowercase()
+                .contains(&offset_token)
         );
     }
 }

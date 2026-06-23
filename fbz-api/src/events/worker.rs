@@ -144,8 +144,13 @@ impl EventStreamMirrorService {
             Ok(stream_id) => stream_id,
             Err(err) => {
                 let message = err.to_string();
+                let retry_delay_seconds = stream_mirror_retry_delay_seconds(
+                    event.stream_mirror_attempts,
+                    self.config.event_stream_retry_base_seconds,
+                    self.config.event_stream_retry_max_seconds,
+                );
                 self.repository
-                    .mark_failed(event.id, &self.worker_id, &message)
+                    .mark_failed(event.id, &self.worker_id, &message, retry_delay_seconds)
                     .await?;
                 return Err(EventStreamMirrorError::Redis(err));
             }
@@ -190,5 +195,29 @@ impl From<sqlx::Error> for EventStreamMirrorError {
 impl From<redis::RedisError> for EventStreamMirrorError {
     fn from(value: redis::RedisError) -> Self {
         Self::Redis(value)
+    }
+}
+
+fn stream_mirror_retry_delay_seconds(attempts: i32, base_seconds: u64, max_seconds: u64) -> u64 {
+    let retry_step = u32::try_from(attempts.saturating_sub(1))
+        .unwrap_or_default()
+        .min(20);
+    let multiplier = 1_u64.checked_shl(retry_step).unwrap_or(u64::MAX);
+
+    base_seconds.saturating_mul(multiplier).min(max_seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_mirror_retry_delay_seconds;
+
+    #[test]
+    fn stream_mirror_retry_delay_is_bounded_exponential_backoff() {
+        assert_eq!(stream_mirror_retry_delay_seconds(0, 5, 300), 5);
+        assert_eq!(stream_mirror_retry_delay_seconds(1, 5, 300), 5);
+        assert_eq!(stream_mirror_retry_delay_seconds(2, 5, 300), 10);
+        assert_eq!(stream_mirror_retry_delay_seconds(3, 5, 300), 20);
+        assert_eq!(stream_mirror_retry_delay_seconds(20, 5, 300), 300);
+        assert_eq!(stream_mirror_retry_delay_seconds(i32::MAX, 5, 300), 300);
     }
 }

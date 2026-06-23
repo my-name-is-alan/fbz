@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, postgres::PgRow};
+use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 
 use crate::{
     db::DbPool,
@@ -277,6 +277,21 @@ pub struct AdminUserRecord {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminUserFilter {
+    pub role_name: Option<String>,
+    pub is_disabled: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminUserPage {
+    pub records: Vec<AdminUserRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminUserLibraryPermissionRecord {
     pub library_id: String,
@@ -291,6 +306,21 @@ pub struct AdminUserLibraryPermissionRecord {
     pub effective_can_download: bool,
     pub effective_can_transcode: bool,
     pub permission_updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminUserLibraryPermissionFilter {
+    pub library_type: Option<String>,
+    pub permission_configured: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminUserLibraryPermissionPage {
+    pub records: Vec<AdminUserLibraryPermissionRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -312,6 +342,22 @@ pub struct AdminJobRecord {
     pub created_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminJobFilter {
+    pub status: Option<String>,
+    pub job_type: Option<String>,
+    pub queue_name: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminJobPage {
+    pub records: Vec<AdminJobRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -344,6 +390,34 @@ pub struct AdminJobEventRecord {
     pub created_at: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminJobRunFilter {
+    pub status: Option<String>,
+    pub cursor: Option<i64>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminJobRunPage {
+    pub records: Vec<AdminJobRunRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminJobEventFilter {
+    pub event_level: Option<String>,
+    pub cursor: Option<i64>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminJobEventPage {
+    pub records: Vec<AdminJobEventRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NotificationTargetRecord {
     pub id: String,
@@ -355,6 +429,22 @@ pub struct NotificationTargetRecord {
     pub delivery_count: i64,
     pub failure_count: i64,
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotificationTargetFilter {
+    pub target_type: Option<String>,
+    pub channel: Option<String>,
+    pub is_enabled: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotificationTargetPage {
+    pub records: Vec<NotificationTargetRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -374,6 +464,21 @@ pub struct NotificationRequestRecord {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotificationRequestFilter {
+    pub status: Option<String>,
+    pub channel: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotificationRequestPage {
+    pub records: Vec<NotificationRequestRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NotificationDeliveryAttemptRecord {
     pub id: String,
@@ -389,6 +494,20 @@ pub struct NotificationDeliveryAttemptRecord {
     pub duration_ms: Option<i32>,
     pub created_at: String,
     pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotificationDeliveryAttemptFilter {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotificationDeliveryAttemptPage {
+    pub records: Vec<NotificationDeliveryAttemptRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Debug)]
@@ -419,6 +538,20 @@ pub struct PluginDispatchRecord {
     pub delivered_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginDispatchFilter {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginDispatchPage {
+    pub records: Vec<PluginDispatchRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginExecutionRunRecord {
     pub id: String,
@@ -442,12 +575,34 @@ pub struct PluginExecutionRunRecord {
     pub duration_ms: Option<i32>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginExecutionRunFilter {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginExecutionRunPage {
+    pub records: Vec<PluginExecutionRunRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginHostApiCallFilter {
     pub plugin_id: Option<String>,
     pub execution_run_id: Option<String>,
     pub status_code: Option<i32>,
+    pub cursor: Option<String>,
     pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginHostApiCallPage {
+    pub records: Vec<PluginHostApiCallRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -466,6 +621,19 @@ pub struct PluginHostApiCallRecord {
     pub started_at: String,
     pub finished_at: String,
     pub duration_ms: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventStreamMirrorStatusRecord {
+    pub unmirrored_count: i64,
+    pub claimable_count: i64,
+    pub locked_count: i64,
+    pub backoff_count: i64,
+    pub failed_count: i64,
+    pub max_attempts: i32,
+    pub oldest_unmirrored_created_at: Option<String>,
+    pub next_retry_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -490,6 +658,22 @@ pub struct ScheduledTaskAdminRecord {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScheduledTaskFilter {
+    pub task_type: Option<String>,
+    pub owner_type: Option<String>,
+    pub enabled: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledTaskPage {
+    pub records: Vec<ScheduledTaskAdminRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScheduledTaskRunRecord {
     pub id: String,
@@ -508,12 +692,69 @@ pub struct ScheduledTaskRunRecord {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScheduledTaskRunFilter {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledTaskRunPage {
+    pub records: Vec<ScheduledTaskRunRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
 #[derive(Debug)]
 pub enum PluginDispatchReplayError {
     NotFound,
     InvalidStatus(String),
     Database(sqlx::Error),
 }
+
+const ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL: &str = r#"
+            with unmirrored as (
+                select id,
+                       created_at,
+                       stream_mirror_attempts,
+                       stream_mirror_locked_by,
+                       stream_mirror_locked_until,
+                       stream_mirror_last_error
+                from event_outbox
+                where stream_mirrored_at is null
+            ),
+            newest_error as (
+                select stream_mirror_last_error
+                from unmirrored
+                where stream_mirror_last_error is not null
+                order by id desc
+                limit 1
+            )
+            select count(*)::bigint as unmirrored_count,
+                   count(*) filter (
+                       where stream_mirror_locked_until is null
+                          or stream_mirror_locked_until <= now()
+                   )::bigint as claimable_count,
+                   count(*) filter (
+                       where stream_mirror_locked_by is not null
+                         and stream_mirror_locked_until > now()
+                   )::bigint as locked_count,
+                   count(*) filter (
+                       where stream_mirror_locked_by is null
+                         and stream_mirror_locked_until > now()
+                   )::bigint as backoff_count,
+                   count(*) filter (
+                       where stream_mirror_last_error is not null
+                   )::bigint as failed_count,
+                   coalesce(max(stream_mirror_attempts), 0)::integer as max_attempts,
+                   min(created_at)::text as oldest_unmirrored_created_at,
+                   min(stream_mirror_locked_until) filter (
+                       where stream_mirror_locked_until > now()
+                   )::text as next_retry_at,
+                   (select stream_mirror_last_error from newest_error) as last_error
+            from unmirrored
+            "#;
 
 impl AdminRepository {
     pub fn new(pool: DbPool) -> Self {
@@ -686,7 +927,23 @@ impl AdminRepository {
     }
 
     pub async fn list_admin_users(&self, limit: i64) -> Result<Vec<AdminUserRecord>, sqlx::Error> {
-        let rows = sqlx::query(
+        self.list_admin_users_page(AdminUserFilter {
+            role_name: None,
+            is_disabled: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
+
+    pub async fn list_admin_users_page(
+        &self,
+        filter: AdminUserFilter,
+    ) -> Result<AdminUserPage, sqlx::Error> {
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
             select u.public_id::text as id,
                    u.username,
@@ -714,15 +971,72 @@ impl AdminRepository {
                    u.updated_at::text as updated_at
             from users u
             join roles r on r.id = u.role_id
-            order by u.username_normalized asc, u.id asc
-            limit $1
             "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
 
-        rows.into_iter().map(AdminUserRecord::from_row).collect()
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join users cursor_user
+                  on cursor_user.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(role_name) = filter.role_name.as_deref() {
+            query.push(" and r.name_normalized = ");
+            query.push_bind(role_name);
+        }
+
+        if let Some(is_disabled) = filter.is_disabled {
+            query.push(" and u.is_disabled = ");
+            query.push_bind(is_disabled);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (u.username_normalized, u.id) > (cursor_user.username_normalized, cursor_user.id)",
+            );
+        }
+
+        query.push(" order by u.username_normalized asc, u.id asc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
+            .map(AdminUserRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(AdminUserPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn update_user_policy(
@@ -788,6 +1102,24 @@ impl AdminRepository {
         user_id: &str,
         limit: i64,
     ) -> Result<Option<Vec<AdminUserLibraryPermissionRecord>>, sqlx::Error> {
+        self.list_user_library_permissions_page(
+            user_id,
+            AdminUserLibraryPermissionFilter {
+                library_type: None,
+                permission_configured: None,
+                cursor: None,
+                limit,
+            },
+        )
+        .await
+        .map(|page| page.map(|page| page.records))
+    }
+
+    pub async fn list_user_library_permissions_page(
+        &self,
+        user_id: &str,
+        filter: AdminUserLibraryPermissionFilter,
+    ) -> Result<Option<AdminUserLibraryPermissionPage>, sqlx::Error> {
         let Some(user_row) = sqlx::query(
             r#"
             select id,
@@ -807,7 +1139,9 @@ impl AdminRepository {
         let user_row_id = user_row.try_get::<i64, _>("id")?;
         let allow_download = user_row.try_get::<bool, _>("allow_download")?;
         let allow_transcode = user_row.try_get::<bool, _>("allow_transcode")?;
-        let rows = sqlx::query(
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
             select l.public_id::text as library_id,
                    l.name as library_name,
@@ -818,28 +1152,90 @@ impl AdminRepository {
                    coalesce(lp.can_download, false) as can_download,
                    coalesce(lp.can_transcode, false) as can_transcode,
                    (coalesce(lp.can_view, false) and not l.is_hidden) as effective_can_view,
-                   ($2::boolean and coalesce(lp.can_download, false) and not l.is_hidden) as effective_can_download,
-                   ($3::boolean and coalesce(lp.can_transcode, false) and not l.is_hidden) as effective_can_transcode,
+            "#,
+        );
+        query.push("(");
+        query.push_bind(allow_download);
+        query.push(
+            r#"::boolean and coalesce(lp.can_download, false) and not l.is_hidden) as effective_can_download,
+                   ("#,
+        );
+        query.push_bind(allow_transcode);
+        query.push(
+            r#"::boolean and coalesce(lp.can_transcode, false) and not l.is_hidden) as effective_can_transcode,
                    lp.updated_at::text as permission_updated_at
             from libraries l
             left join library_permissions lp
               on lp.library_id = l.id
-             and lp.user_id = $1
-            order by l.name asc, l.id asc
-            limit $4
             "#,
-        )
-        .bind(user_row_id)
-        .bind(allow_download)
-        .bind(allow_transcode)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
+        query.push(" and lp.user_id = ");
+        query.push_bind(user_row_id);
 
-        rows.into_iter()
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join libraries cursor_library
+                  on cursor_library.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(library_type) = filter.library_type.as_deref() {
+            query.push(" and l.library_type = ");
+            query.push_bind(library_type);
+        }
+
+        if let Some(permission_configured) = filter.permission_configured {
+            if permission_configured {
+                query.push(" and lp.id is not null");
+            } else {
+                query.push(" and lp.id is null");
+            }
+        }
+
+        if filter.cursor.is_some() {
+            query.push(" and (l.name, l.id) > (cursor_library.name, cursor_library.id)");
+        }
+
+        query.push(" order by l.name asc, l.id asc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
             .map(AdminUserLibraryPermissionRecord::from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.library_id.clone()))
+            .flatten();
+
+        Ok(Some(AdminUserLibraryPermissionPage {
+            records,
+            next_cursor,
+            has_more,
+        }))
     }
 
     pub async fn update_user_library_permission(
@@ -918,35 +1314,112 @@ impl AdminRepository {
     }
 
     pub async fn list_admin_jobs(&self, limit: i64) -> Result<Vec<AdminJobRecord>, sqlx::Error> {
-        let rows = sqlx::query(
-            r#"
-            select public_id::text as id,
-                   job_type,
-                   status,
-                   queue_name,
-                   priority,
-                   payload,
-                   dedupe_key,
-                   run_at::text as run_at,
-                   locked_by,
-                   locked_until::text as locked_until,
-                   (status = 'running' and locked_until > now()) as lock_active,
-                   attempts,
-                   max_attempts,
-                   last_error,
-                   created_at::text as created_at,
-                   updated_at::text as updated_at,
-                   finished_at::text as finished_at
-            from jobs
-            order by id desc
-            limit $1
-            "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        self.list_admin_jobs_page(AdminJobFilter {
+            status: None,
+            job_type: None,
+            queue_name: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
 
-        rows.into_iter().map(AdminJobRecord::from_row).collect()
+    pub async fn list_admin_jobs_page(
+        &self,
+        filter: AdminJobFilter,
+    ) -> Result<AdminJobPage, sqlx::Error> {
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select jobs.public_id::text as id,
+                   jobs.job_type,
+                   jobs.status,
+                   jobs.queue_name,
+                   jobs.priority,
+                   jobs.payload,
+                   jobs.dedupe_key,
+                   jobs.run_at::text as run_at,
+                   jobs.locked_by,
+                   jobs.locked_until::text as locked_until,
+                   (jobs.status = 'running' and jobs.locked_until > now()) as lock_active,
+                   jobs.attempts,
+                   jobs.max_attempts,
+                   jobs.last_error,
+                   jobs.created_at::text as created_at,
+                   jobs.updated_at::text as updated_at,
+                   jobs.finished_at::text as finished_at
+            from jobs jobs
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join jobs cursor_job
+                  on cursor_job.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and jobs.status = ");
+            query.push_bind(status);
+        }
+
+        if let Some(job_type) = filter.job_type.as_deref() {
+            query.push(" and jobs.job_type = ");
+            query.push_bind(job_type);
+        }
+
+        if let Some(queue_name) = filter.queue_name.as_deref() {
+            query.push(" and jobs.queue_name = ");
+            query.push_bind(queue_name);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(" and (jobs.created_at, jobs.id) < (cursor_job.created_at, cursor_job.id)");
+        }
+
+        query.push(" order by jobs.created_at desc, jobs.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
+            .map(AdminJobRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(AdminJobPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn get_admin_job_detail(
@@ -1043,33 +1516,265 @@ impl AdminRepository {
         }))
     }
 
+    pub async fn list_admin_job_runs_page(
+        &self,
+        job_id: &str,
+        filter: AdminJobRunFilter,
+    ) -> Result<Option<AdminJobRunPage>, sqlx::Error> {
+        let Some(row_id) = sqlx::query_scalar::<_, i64>(
+            r#"
+            select id
+            from jobs
+            where public_id = $1::uuid
+            "#,
+        )
+        .bind(job_id.trim())
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select runs.id,
+                   runs.worker_id,
+                   runs.status,
+                   runs.started_at::text as started_at,
+                   runs.finished_at::text as finished_at,
+                   floor(extract(epoch from (coalesce(runs.finished_at, now()) - runs.started_at)) * 1000)::bigint as duration_ms,
+                   runs.error_message,
+                   runs.metrics
+            from job_runs runs
+            "#,
+        );
+
+        if let Some(cursor_id) = filter.cursor {
+            query.push(" join job_runs cursor_run on cursor_run.id = ");
+            query.push_bind(cursor_id);
+            query.push(" and cursor_run.job_id = ");
+            query.push_bind(row_id);
+        }
+
+        query.push(" where runs.job_id = ");
+        query.push_bind(row_id);
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and runs.status = ");
+            query.push_bind(status);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(" and (runs.started_at, runs.id) < (cursor_run.started_at, cursor_run.id)");
+        }
+
+        query.push(" order by runs.started_at desc, runs.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
+            .map(AdminJobRunRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.to_string()))
+            .flatten();
+
+        Ok(Some(AdminJobRunPage {
+            records,
+            next_cursor,
+            has_more,
+        }))
+    }
+
+    pub async fn list_admin_job_events_page(
+        &self,
+        job_id: &str,
+        filter: AdminJobEventFilter,
+    ) -> Result<Option<AdminJobEventPage>, sqlx::Error> {
+        let Some(row_id) = sqlx::query_scalar::<_, i64>(
+            r#"
+            select id
+            from jobs
+            where public_id = $1::uuid
+            "#,
+        )
+        .bind(job_id.trim())
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select events.id,
+                   events.job_run_id as run_id,
+                   events.event_type,
+                   events.event_level,
+                   events.message,
+                   events.payload,
+                   events.created_at::text as created_at
+            from job_events events
+            "#,
+        );
+
+        if let Some(cursor_id) = filter.cursor {
+            query.push(" join job_events cursor_event on cursor_event.id = ");
+            query.push_bind(cursor_id);
+            query.push(" and cursor_event.job_id = ");
+            query.push_bind(row_id);
+        }
+
+        query.push(" where events.job_id = ");
+        query.push_bind(row_id);
+
+        if let Some(event_level) = filter.event_level.as_deref() {
+            query.push(" and events.event_level = ");
+            query.push_bind(event_level);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (events.created_at, events.id) < (cursor_event.created_at, cursor_event.id)",
+            );
+        }
+
+        query.push(" order by events.created_at desc, events.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
+            .map(AdminJobEventRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.to_string()))
+            .flatten();
+
+        Ok(Some(AdminJobEventPage {
+            records,
+            next_cursor,
+            has_more,
+        }))
+    }
+
     pub async fn list_notification_targets(
         &self,
         limit: i64,
     ) -> Result<Vec<NotificationTargetRecord>, sqlx::Error> {
-        let rows = sqlx::query(
-            r#"
-            select public_id::text as id,
-                   name,
-                   target_type,
-                   channel,
-                   config,
-                   is_enabled,
-                   delivery_count,
-                   failure_count,
-                   last_error
-            from notification_targets
-            order by target_type, name, id
-            limit $1
-            "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        self.list_notification_targets_page(NotificationTargetFilter {
+            target_type: None,
+            channel: None,
+            is_enabled: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
 
-        rows.into_iter()
+    pub async fn list_notification_targets_page(
+        &self,
+        filter: NotificationTargetFilter,
+    ) -> Result<NotificationTargetPage, sqlx::Error> {
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select targets.public_id::text as id,
+                   targets.name,
+                   targets.target_type,
+                   targets.channel,
+                   targets.config,
+                   targets.is_enabled,
+                   targets.delivery_count,
+                   targets.failure_count,
+                   targets.last_error
+            from notification_targets targets
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join notification_targets cursor_target
+                  on cursor_target.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(target_type) = filter.target_type.as_deref() {
+            query.push(" and targets.target_type = ");
+            query.push_bind(target_type);
+        }
+
+        if let Some(channel) = filter.channel.as_deref() {
+            query.push(" and targets.channel = ");
+            query.push_bind(channel);
+        }
+
+        if let Some(is_enabled) = filter.is_enabled {
+            query.push(" and targets.is_enabled = ");
+            query.push_bind(is_enabled);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (targets.target_type, targets.name, targets.id) > (cursor_target.target_type, cursor_target.name, cursor_target.id)",
+            );
+        }
+
+        query.push(" order by targets.target_type asc, targets.name asc, targets.id asc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
             .map(NotificationTargetRecord::from_row)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(NotificationTargetPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn create_notification_target(
@@ -1207,33 +1912,103 @@ impl AdminRepository {
         &self,
         limit: i64,
     ) -> Result<Vec<NotificationRequestRecord>, sqlx::Error> {
-        let rows = sqlx::query(
-            r#"
-            select public_id::text as id,
-                   plugin_id,
-                   package_id,
-                   title,
-                   message,
-                   level,
-                   channel,
-                   metadata,
-                   status,
-                   outbox_event_id,
-                   last_error,
-                   created_at::text as created_at,
-                   updated_at::text as updated_at
-            from plugin_notification_requests
-            order by created_at desc, id desc
-            limit $1
-            "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        self.list_notification_requests_page(NotificationRequestFilter {
+            status: None,
+            channel: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
 
-        rows.into_iter()
+    pub async fn list_notification_requests_page(
+        &self,
+        filter: NotificationRequestFilter,
+    ) -> Result<NotificationRequestPage, sqlx::Error> {
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select requests.public_id::text as id,
+                   requests.plugin_id,
+                   requests.package_id,
+                   requests.title,
+                   requests.message,
+                   requests.level,
+                   requests.channel,
+                   requests.metadata,
+                   requests.status,
+                   requests.outbox_event_id,
+                   requests.last_error,
+                   requests.created_at::text as created_at,
+                   requests.updated_at::text as updated_at
+            from plugin_notification_requests requests
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join plugin_notification_requests cursor_request
+                  on cursor_request.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and requests.status = ");
+            query.push_bind(status);
+        }
+
+        if let Some(channel) = filter.channel.as_deref() {
+            query.push(" and requests.channel = ");
+            query.push_bind(channel);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (requests.created_at, requests.id) < (cursor_request.created_at, cursor_request.id)",
+            );
+        }
+
+        query.push(" order by requests.created_at desc, requests.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
             .map(NotificationRequestRecord::from_row)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(NotificationRequestPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn list_notification_delivery_attempts(
@@ -1241,6 +2016,23 @@ impl AdminRepository {
         request_id: &str,
         limit: i64,
     ) -> Result<Option<Vec<NotificationDeliveryAttemptRecord>>, sqlx::Error> {
+        self.list_notification_delivery_attempts_page(
+            request_id,
+            NotificationDeliveryAttemptFilter {
+                status: None,
+                cursor: None,
+                limit,
+            },
+        )
+        .await
+        .map(|page| page.map(|page| page.records))
+    }
+
+    pub async fn list_notification_delivery_attempts_page(
+        &self,
+        request_id: &str,
+        filter: NotificationDeliveryAttemptFilter,
+    ) -> Result<Option<NotificationDeliveryAttemptPage>, sqlx::Error> {
         let request_row = sqlx::query(
             r#"
             select id,
@@ -1263,10 +2055,15 @@ impl AdminRepository {
         let internal_request_id = request_row.try_get::<i64, _>("id")?;
         let public_request_id = request_row.try_get::<String, _>("public_id")?;
 
-        let rows = sqlx::query(
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
             select attempts.public_id::text as id,
-                   $2::text as request_id,
+                   "#,
+        );
+        query.push_bind(public_request_id);
+        query.push(
+            r#"::text as request_id,
                    attempts.outbox_event_id,
                    attempts.target_public_id::text as target_id,
                    attempts.target_type,
@@ -1279,21 +2076,68 @@ impl AdminRepository {
                    attempts.created_at::text as created_at,
                    attempts.finished_at::text as finished_at
             from notification_delivery_attempts attempts
-            where attempts.notification_request_id = $1
-            order by attempts.created_at desc, attempts.id desc
-            limit $3
             "#,
-        )
-        .bind(internal_request_id)
-        .bind(public_request_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
 
-        rows.into_iter()
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join notification_delivery_attempts cursor_attempt
+                  on cursor_attempt.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where attempts.notification_request_id = ");
+        query.push_bind(internal_request_id);
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and attempts.status = ");
+            query.push_bind(status);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (attempts.created_at, attempts.id) < (cursor_attempt.created_at, cursor_attempt.id)",
+            );
+        }
+
+        query.push(" order by attempts.created_at desc, attempts.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
             .map(NotificationDeliveryAttemptRecord::from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(Some(NotificationDeliveryAttemptPage {
+            records,
+            next_cursor,
+            has_more,
+        }))
     }
 
     pub async fn retry_notification_request(
@@ -1410,39 +2254,102 @@ impl AdminRepository {
         &self,
         limit: i64,
     ) -> Result<Vec<PluginDispatchRecord>, sqlx::Error> {
-        let rows = sqlx::query(
-            r#"
-            select public_id::text as id,
-                   payload->>'pluginId' as plugin_id,
-                   payload->>'packageId' as package_id,
-                   payload->>'hookId' as hook_id,
-                   payload->>'handler' as handler,
-                   payload->>'hookEvent' as hook_event,
-                   aggregate_type,
-                   aggregate_id,
-                   payload,
-                   status,
-                   attempts,
-                   max_attempts,
-                   available_at::text as available_at,
-                   locked_until::text as locked_until,
-                   last_error,
-                   created_at::text as created_at,
-                   delivered_at::text as delivered_at
-            from event_outbox
-            where event_type = $1
-            order by created_at desc, id desc
-            limit $2
-            "#,
-        )
-        .bind(PLUGIN_HOOK_DISPATCH_EVENT)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        self.list_plugin_dispatches_page(PluginDispatchFilter {
+            status: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
 
-        rows.into_iter()
+    pub async fn list_plugin_dispatches_page(
+        &self,
+        filter: PluginDispatchFilter,
+    ) -> Result<PluginDispatchPage, sqlx::Error> {
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select outbox.public_id::text as id,
+                   outbox.payload->>'pluginId' as plugin_id,
+                   outbox.payload->>'packageId' as package_id,
+                   outbox.payload->>'hookId' as hook_id,
+                   outbox.payload->>'handler' as handler,
+                   outbox.payload->>'hookEvent' as hook_event,
+                   outbox.aggregate_type,
+                   outbox.aggregate_id,
+                   outbox.payload,
+                   outbox.status,
+                   outbox.attempts,
+                   outbox.max_attempts,
+                   outbox.available_at::text as available_at,
+                   outbox.locked_until::text as locked_until,
+                   outbox.last_error,
+                   outbox.created_at::text as created_at,
+                   outbox.delivered_at::text as delivered_at
+            from event_outbox outbox
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join event_outbox cursor_outbox
+                  on cursor_outbox.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where outbox.event_type = ");
+        query.push_bind(PLUGIN_HOOK_DISPATCH_EVENT);
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and outbox.status = ");
+            query.push_bind(status);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (outbox.created_at, outbox.id) < (cursor_outbox.created_at, cursor_outbox.id)",
+            );
+        }
+
+        query.push(" order by outbox.created_at desc, outbox.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
             .map(PluginDispatchRecord::from_row)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(PluginDispatchPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn list_plugin_execution_runs(
@@ -1450,6 +2357,23 @@ impl AdminRepository {
         dispatch_id: &str,
         limit: i64,
     ) -> Result<Option<Vec<PluginExecutionRunRecord>>, sqlx::Error> {
+        self.list_plugin_execution_runs_page(
+            dispatch_id,
+            PluginExecutionRunFilter {
+                status: None,
+                cursor: None,
+                limit,
+            },
+        )
+        .await
+        .map(|page| page.map(|page| page.records))
+    }
+
+    pub async fn list_plugin_execution_runs_page(
+        &self,
+        dispatch_id: &str,
+        filter: PluginExecutionRunFilter,
+    ) -> Result<Option<PluginExecutionRunPage>, sqlx::Error> {
         let dispatch_exists = sqlx::query_scalar::<_, bool>(
             r#"
             select exists (
@@ -1473,49 +2397,106 @@ impl AdminRepository {
             return Ok(None);
         }
 
-        let rows = sqlx::query(
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
-            select public_id::text as id,
-                   outbox_event_public_id as dispatch_id,
-                   outbox_event_id,
-                   attempt,
-                   plugin_id,
-                   package_id,
-                   hook_id,
-                   handler,
-                   event_key,
-                   runtime,
-                   entrypoint,
-                   status,
-                   request_payload,
-                   response_status,
-                   response_body,
-                   error_message,
-                   started_at::text as started_at,
-                   finished_at::text as finished_at,
-                   duration_ms
-            from plugin_execution_runs
-            where outbox_event_public_id = $1
-            order by started_at desc, id desc
-            limit $2
+            select runs.public_id::text as id,
+                   runs.outbox_event_public_id as dispatch_id,
+                   runs.outbox_event_id,
+                   runs.attempt,
+                   runs.plugin_id,
+                   runs.package_id,
+                   runs.hook_id,
+                   runs.handler,
+                   runs.event_key,
+                   runs.runtime,
+                   runs.entrypoint,
+                   runs.status,
+                   runs.request_payload,
+                   runs.response_status,
+                   runs.response_body,
+                   runs.error_message,
+                   runs.started_at::text as started_at,
+                   runs.finished_at::text as finished_at,
+                   runs.duration_ms
+            from plugin_execution_runs runs
             "#,
-        )
-        .bind(dispatch_id.trim())
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
 
-        rows.into_iter()
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join plugin_execution_runs cursor_run
+                  on cursor_run.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where runs.outbox_event_public_id = ");
+        query.push_bind(dispatch_id.trim());
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and runs.status = ");
+            query.push_bind(status);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(" and (runs.started_at, runs.id) < (cursor_run.started_at, cursor_run.id)");
+        }
+
+        query.push(" order by runs.started_at desc, runs.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
             .map(PluginExecutionRunRecord::from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(Some(PluginExecutionRunPage {
+            records,
+            next_cursor,
+            has_more,
+        }))
     }
 
     pub async fn list_plugin_host_api_calls(
         &self,
         filter: PluginHostApiCallFilter,
     ) -> Result<Vec<PluginHostApiCallRecord>, sqlx::Error> {
-        let rows = sqlx::query(
+        self.list_plugin_host_api_calls_page(filter)
+            .await
+            .map(|page| page.records)
+    }
+
+    pub async fn list_plugin_host_api_calls_page(
+        &self,
+        filter: PluginHostApiCallFilter,
+    ) -> Result<PluginHostApiCallPage, sqlx::Error> {
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
             select calls.public_id::text as id,
                    calls.plugin_id,
@@ -1532,32 +2513,103 @@ impl AdminRepository {
                    calls.finished_at::text as finished_at,
                    calls.duration_ms
             from plugin_host_api_calls calls
-            left join plugin_host_tokens token on token.id = calls.host_token_id
-            left join plugin_execution_runs run on run.id = calls.execution_run_id
-            where ($1::text is null or calls.plugin_id = $1)
-              and (
-                  $2::text is null
-                  or run.public_id = case
-                      when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                      then $2::uuid
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join plugin_host_api_calls cursor_call
+                  on cursor_call.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
                       else null::uuid
                   end
-              )
-              and ($3::integer is null or calls.status_code = $3)
-            order by calls.finished_at desc, calls.id desc
-            limit $4
-            "#,
-        )
-        .bind(filter.plugin_id.as_deref())
-        .bind(filter.execution_run_id.as_deref())
-        .bind(filter.status_code)
-        .bind(filter.limit)
-        .fetch_all(&self.pool)
-        .await?;
+                "#,
+            );
+        }
 
-        rows.into_iter()
+        query.push(
+            r#"
+            left join plugin_host_tokens token on token.id = calls.host_token_id
+            left join plugin_execution_runs run on run.id = calls.execution_run_id
+            where true
+            "#,
+        );
+
+        if let Some(plugin_id) = filter.plugin_id.as_deref() {
+            query.push(" and calls.plugin_id = ");
+            query.push_bind(plugin_id);
+        }
+
+        if let Some(execution_run_id) = filter.execution_run_id.as_deref() {
+            query.push(
+                r#"
+                and calls.execution_run_id = (
+                    select id
+                    from plugin_execution_runs
+                    where public_id = case
+                        when
+                "#,
+            );
+            query.push_bind(execution_run_id);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        then
+                "#,
+            );
+            query.push_bind(execution_run_id);
+            query.push(
+                r#"::uuid
+                        else null::uuid
+                    end
+                )
+                "#,
+            );
+        }
+
+        if let Some(status_code) = filter.status_code {
+            query.push(" and calls.status_code = ");
+            query.push_bind(status_code);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (calls.finished_at, calls.id) < (cursor_call.finished_at, cursor_call.id)",
+            );
+        }
+
+        query.push(" order by calls.finished_at desc, calls.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
             .map(PluginHostApiCallRecord::from_row)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(PluginHostApiCallPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn list_plugin_host_api_calls_for_run(
@@ -1565,6 +2617,17 @@ impl AdminRepository {
         execution_run_id: &str,
         limit: i64,
     ) -> Result<Option<Vec<PluginHostApiCallRecord>>, sqlx::Error> {
+        self.list_plugin_host_api_calls_for_run_page(execution_run_id, None, limit)
+            .await
+            .map(|page| page.map(|page| page.records))
+    }
+
+    pub async fn list_plugin_host_api_calls_for_run_page(
+        &self,
+        execution_run_id: &str,
+        cursor: Option<String>,
+        limit: i64,
+    ) -> Result<Option<PluginHostApiCallPage>, sqlx::Error> {
         let run_exists = sqlx::query_scalar::<_, bool>(
             r#"
             select exists (
@@ -1586,14 +2649,25 @@ impl AdminRepository {
             return Ok(None);
         }
 
-        self.list_plugin_host_api_calls(PluginHostApiCallFilter {
+        self.list_plugin_host_api_calls_page(PluginHostApiCallFilter {
             plugin_id: None,
             execution_run_id: Some(execution_run_id.trim().to_owned()),
             status_code: None,
+            cursor,
             limit,
         })
         .await
         .map(Some)
+    }
+
+    pub async fn event_stream_mirror_status(
+        &self,
+    ) -> Result<EventStreamMirrorStatusRecord, sqlx::Error> {
+        let row = sqlx::query(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL)
+            .fetch_one(&self.pool)
+            .await?;
+
+        EventStreamMirrorStatusRecord::from_row(row)
     }
 
     pub async fn replay_plugin_dispatch(
@@ -1680,53 +2754,159 @@ impl AdminRepository {
         &self,
         limit: i64,
     ) -> Result<Vec<ScheduledTaskAdminRecord>, sqlx::Error> {
-        let rows = sqlx::query(
+        self.list_scheduled_tasks_page(ScheduledTaskFilter {
+            task_type: None,
+            owner_type: None,
+            enabled: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
+
+    pub async fn list_scheduled_tasks_page(
+        &self,
+        filter: ScheduledTaskFilter,
+    ) -> Result<ScheduledTaskPage, sqlx::Error> {
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
-            select public_id::text as id,
-                   task_key,
-                   task_type,
-                   owner_type,
-                   owner_id,
-                   enabled,
-                   schedule_kind,
-                   schedule_value,
-                   next_run_at::text as next_run_at,
-                   last_run_at::text as last_run_at,
-                   timeout_seconds,
-                   max_concurrency,
+            select tasks.public_id::text as id,
+                   tasks.task_key,
+                   tasks.task_type,
+                   tasks.owner_type,
+                   tasks.owner_id,
+                   tasks.enabled,
+                   tasks.schedule_kind,
+                   tasks.schedule_value,
+                   tasks.next_run_at::text as next_run_at,
+                   tasks.last_run_at::text as last_run_at,
+                   tasks.timeout_seconds,
+                   tasks.max_concurrency,
                    (
                        select count(*)::bigint
                        from scheduled_task_runs runs
-                       where runs.task_id = scheduled_tasks.id
+                       where runs.task_id = tasks.id
                          and runs.status = 'running'
                          and runs.lease_expires_at > now()
                    ) as active_run_count,
                    (
                        select runs.public_id::text
                        from scheduled_task_runs runs
-                       where runs.task_id = scheduled_tasks.id
+                       where runs.task_id = tasks.id
                        order by runs.started_at desc, runs.id desc
                        limit 1
                    ) as last_run_id,
-                   failure_count,
-                   last_error,
-                   created_at::text as created_at,
-                   updated_at::text as updated_at
-            from scheduled_tasks
-            order by enabled desc,
-                     next_run_at asc nulls last,
-                     updated_at desc,
-                     id desc
-            limit $1
+                   tasks.failure_count,
+                   tasks.last_error,
+                   tasks.created_at::text as created_at,
+                   tasks.updated_at::text as updated_at
+            from scheduled_tasks tasks
             "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
 
-        rows.into_iter()
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join scheduled_tasks cursor_task
+                  on cursor_task.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(task_type) = filter.task_type.as_deref() {
+            query.push(" and tasks.task_type = ");
+            query.push_bind(task_type);
+        }
+
+        if let Some(owner_type) = filter.owner_type.as_deref() {
+            query.push(" and tasks.owner_type = ");
+            query.push_bind(owner_type);
+        }
+
+        if let Some(enabled) = filter.enabled {
+            query.push(" and tasks.enabled = ");
+            query.push_bind(enabled);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                r#"
+                and (
+                    tasks.enabled < cursor_task.enabled
+                    or (
+                        tasks.enabled = cursor_task.enabled
+                        and (
+                            (
+                                cursor_task.next_run_at is null
+                                and tasks.next_run_at is null
+                                and (tasks.updated_at, tasks.id) < (cursor_task.updated_at, cursor_task.id)
+                            )
+                            or (
+                                cursor_task.next_run_at is not null
+                                and (
+                                    tasks.next_run_at > cursor_task.next_run_at
+                                    or tasks.next_run_at is null
+                                    or (
+                                        tasks.next_run_at = cursor_task.next_run_at
+                                        and (tasks.updated_at, tasks.id) < (cursor_task.updated_at, cursor_task.id)
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+                "#,
+            );
+        }
+
+        query.push(
+            r#"
+            order by tasks.enabled desc,
+                     tasks.next_run_at asc nulls last,
+                     tasks.updated_at desc,
+                     tasks.id desc
+            limit
+            "#,
+        );
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
             .map(ScheduledTaskAdminRecord::from_row)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(ScheduledTaskPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn find_scheduled_task(
@@ -1788,6 +2968,23 @@ impl AdminRepository {
         task_key: &str,
         limit: i64,
     ) -> Result<Option<Vec<ScheduledTaskRunRecord>>, sqlx::Error> {
+        self.list_scheduled_task_runs_page(
+            task_key,
+            ScheduledTaskRunFilter {
+                status: None,
+                cursor: None,
+                limit,
+            },
+        )
+        .await
+        .map(|page| page.map(|page| page.records))
+    }
+
+    pub async fn list_scheduled_task_runs_page(
+        &self,
+        task_key: &str,
+        filter: ScheduledTaskRunFilter,
+    ) -> Result<Option<ScheduledTaskRunPage>, sqlx::Error> {
         let Some(task_id) = sqlx::query_scalar::<_, i64>(
             r#"
             select id
@@ -1802,37 +2999,84 @@ impl AdminRepository {
             return Ok(None);
         };
 
-        let rows = sqlx::query(
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
-            select public_id::text as id,
-                   task_key,
-                   trigger_type,
-                   worker_id,
-                   status,
-                   lease_expires_at::text as lease_expires_at,
-                   (status = 'running' and lease_expires_at > now()) as lease_active,
-                   queued_jobs,
-                   error_message,
-                   started_at::text as started_at,
-                   finished_at::text as finished_at,
-                   floor(extract(epoch from (coalesce(finished_at, now()) - started_at)) * 1000)::bigint as duration_ms,
-                   created_at::text as created_at,
-                   updated_at::text as updated_at
-            from scheduled_task_runs
-            where task_id = $1
-            order by started_at desc, id desc
-            limit $2
+            select runs.public_id::text as id,
+                   runs.task_key,
+                   runs.trigger_type,
+                   runs.worker_id,
+                   runs.status,
+                   runs.lease_expires_at::text as lease_expires_at,
+                   (runs.status = 'running' and runs.lease_expires_at > now()) as lease_active,
+                   runs.queued_jobs,
+                   runs.error_message,
+                   runs.started_at::text as started_at,
+                   runs.finished_at::text as finished_at,
+                   floor(extract(epoch from (coalesce(runs.finished_at, now()) - runs.started_at)) * 1000)::bigint as duration_ms,
+                   runs.created_at::text as created_at,
+                   runs.updated_at::text as updated_at
+            from scheduled_task_runs runs
             "#,
-        )
-        .bind(task_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
 
-        rows.into_iter()
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join scheduled_task_runs cursor_run
+                  on cursor_run.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where runs.task_id = ");
+        query.push_bind(task_id);
+
+        if let Some(status) = filter.status.as_deref() {
+            query.push(" and runs.status = ");
+            query.push_bind(status);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(" and (runs.started_at, runs.id) < (cursor_run.started_at, cursor_run.id)");
+        }
+
+        query.push(" order by runs.started_at desc, runs.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
             .map(ScheduledTaskRunRecord::from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(Some(ScheduledTaskRunPage {
+            records,
+            next_cursor,
+            has_more,
+        }))
     }
 }
 
@@ -2208,6 +3452,22 @@ impl ScheduledTaskRunRecord {
     }
 }
 
+impl EventStreamMirrorStatusRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            unmirrored_count: row.try_get("unmirrored_count")?,
+            claimable_count: row.try_get("claimable_count")?,
+            locked_count: row.try_get("locked_count")?,
+            backoff_count: row.try_get("backoff_count")?,
+            failed_count: row.try_get("failed_count")?,
+            max_attempts: row.try_get("max_attempts")?,
+            oldest_unmirrored_created_at: row.try_get("oldest_unmirrored_created_at")?,
+            next_retry_at: row.try_get("next_retry_at")?,
+            last_error: row.try_get("last_error")?,
+        })
+    }
+}
+
 impl NotificationRequestRecord {
     fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
@@ -2281,15 +3541,184 @@ mod tests {
     #[test]
     fn scheduled_task_recent_index_matches_admin_queries() {
         let migration = include_str!("../../migrations/0038_scheduled_task_run_recent_index.sql");
+        let status_migration =
+            include_str!("../../migrations/0049_scheduled_task_run_admin_keyset_indexes.sql");
         let repository = include_str!("repository.rs");
 
         assert!(migration.contains("idx_scheduled_task_runs_task_recent"));
         assert!(migration.contains("task_id, started_at desc, id desc"));
         assert!(migration.contains("include (public_id)"));
+        assert!(status_migration.contains("idx_scheduled_task_runs_task_status_recent_keyset"));
+        assert!(status_migration.contains("task_id, status, started_at desc, id desc"));
         assert!(repository.contains("from scheduled_task_runs runs"));
         assert!(repository.contains("order by runs.started_at desc, runs.id desc"));
-        assert!(repository.contains("from scheduled_task_runs"));
-        assert!(repository.contains("order by started_at desc, id desc"));
+
+        let query_start = repository
+            .find("pub async fn list_scheduled_task_runs_page")
+            .expect("scheduled task run page query should exist");
+        let query_end = repository[query_start..]
+            .find("}\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\nstruct StoredLibraryPath")
+            .map(|offset| query_start + offset)
+            .expect("scheduled task run page query should be near repository impl end");
+        let run_query = &repository[query_start..query_end];
+
+        assert!(run_query.contains("QueryBuilder::<Postgres>"));
+        assert!(run_query.contains("cursor_run.public_id = case"));
+        assert!(run_query.contains("(runs.started_at, runs.id) <"));
+        assert!(run_query.contains("runs.task_id ="));
+        assert!(run_query.contains("runs.status ="));
+        assert!(run_query.contains("order by runs.started_at desc, runs.id desc"));
+        assert!(!run_query.contains("offset "));
+    }
+
+    #[test]
+    fn admin_job_run_event_keyset_indexes_match_query_shape() {
+        let migration =
+            include_str!("../../migrations/0050_admin_job_run_event_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_job_runs_job_started_keyset"));
+        assert!(migration.contains("job_id, started_at desc, id desc"));
+        assert!(migration.contains("idx_job_runs_job_status_started_keyset"));
+        assert!(migration.contains("job_id, status, started_at desc, id desc"));
+        assert!(migration.contains("idx_job_events_job_created_keyset"));
+        assert!(migration.contains("job_id, created_at desc, id desc"));
+        assert!(migration.contains("idx_job_events_job_level_created_keyset"));
+        assert!(migration.contains("job_id, event_level, created_at desc, id desc"));
+
+        let run_query_start = repository
+            .find("pub async fn list_admin_job_runs_page")
+            .expect("admin job run page query should exist");
+        let run_query_end = repository[run_query_start..]
+            .find("pub async fn list_admin_job_events_page")
+            .map(|offset| run_query_start + offset)
+            .expect("job event page query should follow job run page query");
+        let run_query = &repository[run_query_start..run_query_end];
+
+        assert!(run_query.contains("QueryBuilder::<Postgres>"));
+        assert!(run_query.contains("join job_runs cursor_run on cursor_run.id ="));
+        assert!(run_query.contains("cursor_run.job_id ="));
+        assert!(run_query.contains("(runs.started_at, runs.id) <"));
+        assert!(run_query.contains("runs.job_id ="));
+        assert!(run_query.contains("runs.status ="));
+        assert!(run_query.contains("order by runs.started_at desc, runs.id desc"));
+        assert!(!run_query.contains("offset "));
+
+        let event_query_start = repository
+            .find("pub async fn list_admin_job_events_page")
+            .expect("admin job event page query should exist");
+        let event_query_end = repository[event_query_start..]
+            .find("pub async fn list_notification_targets")
+            .map(|offset| event_query_start + offset)
+            .expect("notification target query should follow job event page query");
+        let event_query = &repository[event_query_start..event_query_end];
+
+        assert!(event_query.contains("QueryBuilder::<Postgres>"));
+        assert!(event_query.contains("join job_events cursor_event on cursor_event.id ="));
+        assert!(event_query.contains("cursor_event.job_id ="));
+        assert!(event_query.contains("(events.created_at, events.id) <"));
+        assert!(event_query.contains("events.job_id ="));
+        assert!(event_query.contains("events.event_level ="));
+        assert!(event_query.contains("order by events.created_at desc, events.id desc"));
+        assert!(!event_query.contains("offset "));
+    }
+
+    #[test]
+    fn admin_job_list_keyset_indexes_match_query_shape() {
+        let migration = include_str!("../../migrations/0054_admin_job_list_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_jobs_admin_recent_keyset"));
+        assert!(migration.contains("created_at desc, id desc"));
+        assert!(migration.contains("idx_jobs_admin_status_recent_keyset"));
+        assert!(migration.contains("status, created_at desc, id desc"));
+        assert!(migration.contains("idx_jobs_admin_type_recent_keyset"));
+        assert!(migration.contains("job_type, created_at desc, id desc"));
+        assert!(migration.contains("idx_jobs_admin_queue_recent_keyset"));
+        assert!(migration.contains("queue_name, created_at desc, id desc"));
+
+        let query_start = repository
+            .find("pub async fn list_admin_jobs_page")
+            .expect("admin job page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn get_admin_job_detail")
+            .map(|offset| query_start + offset)
+            .expect("admin job detail query should follow job page query");
+        let job_query = &repository[query_start..query_end];
+
+        assert!(job_query.contains("QueryBuilder::<Postgres>"));
+        assert!(job_query.contains("join jobs cursor_job"));
+        assert!(job_query.contains("cursor_job.public_id = case"));
+        assert!(job_query.contains("(jobs.created_at, jobs.id) <"));
+        assert!(job_query.contains("jobs.status ="));
+        assert!(job_query.contains("jobs.job_type ="));
+        assert!(job_query.contains("jobs.queue_name ="));
+        assert!(job_query.contains("order by jobs.created_at desc, jobs.id desc"));
+        assert!(!job_query.contains("offset "));
+    }
+
+    #[test]
+    fn admin_user_list_keyset_indexes_match_query_shape() {
+        let migration = include_str!("../../migrations/0055_admin_user_list_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_users_admin_username_keyset"));
+        assert!(migration.contains("username_normalized asc, id asc"));
+        assert!(migration.contains("idx_users_admin_role_username_keyset"));
+        assert!(migration.contains("role_id, username_normalized asc, id asc"));
+        assert!(migration.contains("idx_users_admin_disabled_username_keyset"));
+        assert!(migration.contains("is_disabled, username_normalized asc, id asc"));
+        assert!(migration.contains("idx_users_admin_role_disabled_username_keyset"));
+        assert!(migration.contains("role_id, is_disabled, username_normalized asc, id asc"));
+
+        let query_start = repository
+            .find("pub async fn list_admin_users_page")
+            .expect("admin user page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn update_user_policy")
+            .map(|offset| query_start + offset)
+            .expect("update user policy should follow admin user page query");
+        let user_query = &repository[query_start..query_end];
+
+        assert!(user_query.contains("QueryBuilder::<Postgres>"));
+        assert!(user_query.contains("join users cursor_user"));
+        assert!(user_query.contains("cursor_user.public_id = case"));
+        assert!(user_query.contains("(u.username_normalized, u.id) >"));
+        assert!(user_query.contains("r.name_normalized ="));
+        assert!(user_query.contains("u.is_disabled ="));
+        assert!(user_query.contains("order by u.username_normalized asc, u.id asc"));
+        assert!(!user_query.contains("offset "));
+    }
+
+    #[test]
+    fn admin_user_library_permission_keyset_indexes_match_query_shape() {
+        let migration =
+            include_str!("../../migrations/0056_admin_user_library_permission_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_libraries_admin_name_keyset"));
+        assert!(migration.contains("name asc, id asc"));
+        assert!(migration.contains("idx_libraries_admin_type_name_keyset"));
+        assert!(migration.contains("library_type, name asc, id asc"));
+
+        let query_start = repository
+            .find("pub async fn list_user_library_permissions_page")
+            .expect("admin user library permission page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn update_user_library_permission")
+            .map(|offset| query_start + offset)
+            .expect("update user library permission should follow page query");
+        let permission_query = &repository[query_start..query_end];
+
+        assert!(permission_query.contains("QueryBuilder::<Postgres>"));
+        assert!(permission_query.contains("join libraries cursor_library"));
+        assert!(permission_query.contains("cursor_library.public_id = case"));
+        assert!(permission_query.contains("(l.name, l.id) >"));
+        assert!(permission_query.contains("l.library_type ="));
+        assert!(permission_query.contains("lp.id is not null"));
+        assert!(permission_query.contains("lp.id is null"));
+        assert!(permission_query.contains("order by l.name asc, l.id asc"));
+        assert!(!permission_query.contains("offset "));
     }
 
     #[test]
@@ -2308,6 +3737,232 @@ mod tests {
     }
 
     #[test]
+    fn notification_target_admin_keyset_indexes_match_query_shape() {
+        let migration =
+            include_str!("../../migrations/0057_notification_target_admin_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_notification_targets_admin_recent_keyset"));
+        assert!(migration.contains("target_type, name asc, id asc"));
+        assert!(migration.contains("idx_notification_targets_admin_enabled_recent_keyset"));
+        assert!(migration.contains("is_enabled, target_type, name asc, id asc"));
+        assert!(migration.contains("idx_notification_targets_admin_channel_recent_keyset"));
+        assert!(migration.contains("channel, target_type, name asc, id asc"));
+        assert!(migration.contains("idx_notification_targets_admin_channel_enabled_recent_keyset"));
+        assert!(migration.contains("channel, is_enabled, target_type, name asc, id asc"));
+
+        let query_start = repository
+            .find("pub async fn list_notification_targets_page")
+            .expect("notification target page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn create_notification_target")
+            .map(|offset| query_start + offset)
+            .expect("create notification target should follow list query");
+        let target_query = &repository[query_start..query_end];
+
+        assert!(target_query.contains("QueryBuilder::<Postgres>"));
+        assert!(target_query.contains("join notification_targets cursor_target"));
+        assert!(target_query.contains("cursor_target.public_id = case"));
+        assert!(target_query.contains("(targets.target_type, targets.name, targets.id) >"));
+        assert!(target_query.contains("targets.target_type ="));
+        assert!(target_query.contains("targets.channel ="));
+        assert!(target_query.contains("targets.is_enabled ="));
+        assert!(
+            target_query
+                .contains("order by targets.target_type asc, targets.name asc, targets.id asc")
+        );
+        assert!(!target_query.contains("offset "));
+    }
+
+    #[test]
+    fn notification_admin_keyset_filter_indexes_match_query_shape() {
+        let migration =
+            include_str!("../../migrations/0047_notification_admin_keyset_filter_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_plugin_notification_requests_status_recent_keyset"));
+        assert!(migration.contains("status, created_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_notification_requests_channel_recent_keyset"));
+        assert!(migration.contains("channel, created_at desc, id desc"));
+        assert!(
+            migration.contains("idx_plugin_notification_requests_channel_status_recent_keyset")
+        );
+        assert!(migration.contains("channel, status, created_at desc, id desc"));
+        assert!(
+            migration.contains("idx_notification_delivery_attempts_request_status_recent_keyset")
+        );
+        assert!(migration.contains("notification_request_id, status, created_at desc, id desc"));
+
+        let request_query_start = repository
+            .find("pub async fn list_notification_requests_page")
+            .expect("notification request page query should exist");
+        let request_query_end = repository[request_query_start..]
+            .find("pub async fn list_notification_delivery_attempts")
+            .map(|offset| request_query_start + offset)
+            .expect("delivery attempt query should follow notification request page query");
+        let request_query = &repository[request_query_start..request_query_end];
+
+        assert!(request_query.contains("QueryBuilder::<Postgres>"));
+        assert!(request_query.contains("cursor_request.public_id = case"));
+        assert!(request_query.contains("(requests.created_at, requests.id) <"));
+        assert!(request_query.contains("requests.status ="));
+        assert!(request_query.contains("requests.channel ="));
+        assert!(request_query.contains("order by requests.created_at desc, requests.id desc"));
+        assert!(!request_query.contains("offset "));
+
+        let attempt_query_start = repository
+            .find("pub async fn list_notification_delivery_attempts_page")
+            .expect("notification delivery attempt page query should exist");
+        let attempt_query_end = repository[attempt_query_start..]
+            .find("pub async fn retry_notification_request")
+            .map(|offset| attempt_query_start + offset)
+            .expect("retry query should follow delivery attempt page query");
+        let attempt_query = &repository[attempt_query_start..attempt_query_end];
+
+        assert!(attempt_query.contains("QueryBuilder::<Postgres>"));
+        assert!(attempt_query.contains("cursor_attempt.public_id = case"));
+        assert!(attempt_query.contains("(attempts.created_at, attempts.id) <"));
+        assert!(attempt_query.contains("attempts.notification_request_id ="));
+        assert!(attempt_query.contains("attempts.status ="));
+        assert!(attempt_query.contains("order by attempts.created_at desc, attempts.id desc"));
+        assert!(!attempt_query.contains("offset "));
+    }
+
+    #[test]
+    fn scheduled_task_admin_keyset_indexes_match_query_shape() {
+        let migration =
+            include_str!("../../migrations/0058_scheduled_task_admin_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_scheduled_tasks_admin_keyset"));
+        assert!(
+            migration
+                .contains("enabled desc, next_run_at asc nulls last, updated_at desc, id desc")
+        );
+        assert!(migration.contains("idx_scheduled_tasks_task_type_admin_keyset"));
+        assert!(migration.contains(
+            "task_type, enabled desc, next_run_at asc nulls last, updated_at desc, id desc"
+        ));
+        assert!(migration.contains("idx_scheduled_tasks_owner_type_admin_keyset"));
+        assert!(migration.contains(
+            "owner_type, enabled desc, next_run_at asc nulls last, updated_at desc, id desc"
+        ));
+
+        let query_start = repository
+            .find("pub async fn list_scheduled_tasks_page")
+            .expect("scheduled task page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn find_scheduled_task")
+            .map(|offset| query_start + offset)
+            .expect("find scheduled task should follow list query");
+        let task_query = &repository[query_start..query_end];
+
+        assert!(task_query.contains("QueryBuilder::<Postgres>"));
+        assert!(task_query.contains("join scheduled_tasks cursor_task"));
+        assert!(task_query.contains("cursor_task.public_id = case"));
+        assert!(task_query.contains("tasks.task_type ="));
+        assert!(task_query.contains("tasks.owner_type ="));
+        assert!(task_query.contains("tasks.enabled ="));
+        assert!(task_query.contains("tasks.enabled < cursor_task.enabled"));
+        assert!(task_query.contains("tasks.next_run_at > cursor_task.next_run_at"));
+        assert!(task_query.contains("(tasks.updated_at, tasks.id) <"));
+        assert!(task_query.contains("order by tasks.enabled desc"));
+        assert!(task_query.contains("tasks.next_run_at asc nulls last"));
+        assert!(!task_query.contains("offset "));
+    }
+
+    #[test]
+    fn plugin_host_api_call_keyset_indexes_match_admin_query_shape() {
+        let migration =
+            include_str!("../../migrations/0045_plugin_host_api_call_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_plugin_host_api_calls_recent_keyset"));
+        assert!(migration.contains("finished_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_host_api_calls_plugin_finished_keyset"));
+        assert!(migration.contains("plugin_id, finished_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_host_api_calls_execution_finished_keyset"));
+        assert!(migration.contains("execution_run_id, finished_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_host_api_calls_status_finished_keyset"));
+        assert!(migration.contains("status_code, finished_at desc, id desc"));
+
+        let query_start = repository
+            .find("pub async fn list_plugin_host_api_calls_page")
+            .expect("host api call page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn list_plugin_host_api_calls_for_run")
+            .map(|offset| query_start + offset)
+            .expect("host api call run query should follow page query");
+        let host_api_call_query = &repository[query_start..query_end];
+
+        assert!(repository.contains("QueryBuilder::<Postgres>"));
+        assert!(host_api_call_query.contains("cursor_call"));
+        assert!(host_api_call_query.contains("(calls.finished_at, calls.id) <"));
+        assert!(host_api_call_query.contains("order by calls.finished_at desc, calls.id desc"));
+        assert!(!host_api_call_query.contains("offset "));
+        assert!(repository.contains("pub async fn list_plugin_host_api_calls_for_run_page"));
+        assert!(repository.contains("list_plugin_host_api_calls(PluginHostApiCallFilter"));
+    }
+
+    #[test]
+    fn plugin_dispatch_keyset_indexes_match_admin_query_shape() {
+        let migration =
+            include_str!("../../migrations/0046_plugin_dispatch_admin_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_event_outbox_plugin_dispatch_recent_keyset"));
+        assert!(migration.contains("created_at desc, id desc"));
+        assert!(migration.contains("idx_event_outbox_plugin_dispatch_status_recent_keyset"));
+        assert!(migration.contains("status, created_at desc, id desc"));
+        assert!(migration.contains("where event_type = 'plugin.hook.dispatch'"));
+
+        let query_start = repository
+            .find("pub async fn list_plugin_dispatches_page")
+            .expect("plugin dispatch page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn list_plugin_execution_runs")
+            .map(|offset| query_start + offset)
+            .expect("plugin execution run query should follow dispatch page query");
+        let dispatch_query = &repository[query_start..query_end];
+
+        assert!(dispatch_query.contains("QueryBuilder::<Postgres>"));
+        assert!(dispatch_query.contains("cursor_outbox.public_id = case"));
+        assert!(dispatch_query.contains("(outbox.created_at, outbox.id) <"));
+        assert!(dispatch_query.contains("outbox.status ="));
+        assert!(dispatch_query.contains("order by outbox.created_at desc, outbox.id desc"));
+        assert!(!dispatch_query.contains("offset "));
+    }
+
+    #[test]
+    fn plugin_execution_run_keyset_indexes_match_admin_query_shape() {
+        let migration =
+            include_str!("../../migrations/0048_plugin_execution_run_admin_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_plugin_execution_runs_dispatch_started_keyset"));
+        assert!(migration.contains("outbox_event_public_id, started_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_execution_runs_dispatch_status_started_keyset"));
+        assert!(migration.contains("outbox_event_public_id, status, started_at desc, id desc"));
+
+        let query_start = repository
+            .find("pub async fn list_plugin_execution_runs_page")
+            .expect("plugin execution run page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn list_plugin_host_api_calls")
+            .map(|offset| query_start + offset)
+            .expect("plugin host api call query should follow execution run page query");
+        let run_query = &repository[query_start..query_end];
+
+        assert!(run_query.contains("QueryBuilder::<Postgres>"));
+        assert!(run_query.contains("cursor_run.public_id = case"));
+        assert!(run_query.contains("(runs.started_at, runs.id) <"));
+        assert!(run_query.contains("runs.outbox_event_public_id ="));
+        assert!(run_query.contains("runs.status ="));
+        assert!(run_query.contains("order by runs.started_at desc, runs.id desc"));
+        assert!(!run_query.contains("offset "));
+    }
+
+    #[test]
     fn admin_public_id_entrypoints_keep_uuid_index_shape() {
         let repository = include_str!("repository.rs");
         let bad_public_id_filter = format!("{}{}", "where public_id::text = ", "$1");
@@ -2320,7 +3975,11 @@ mod tests {
                 .contains("from plugin_notification_requests\n            where public_id = case")
         );
         assert!(repository.contains("from event_outbox\n                where public_id = case"));
-        assert!(repository.contains("or run.public_id = case"));
+        assert!(
+            repository
+                .contains("from plugin_execution_runs\n                    where public_id = case")
+        );
+        assert!(repository.contains("cursor_call.public_id = case"));
         assert!(repository.contains("from scheduled_tasks\n            where public_id = case"));
     }
 
@@ -2345,5 +4004,16 @@ mod tests {
             ADMIN_QUEUE_METADATA_REFRESH_LIBRARY_SQL
                 .contains("j.payload->>'itemId' = mi.public_id::text")
         );
+    }
+
+    #[test]
+    fn event_stream_mirror_status_stays_on_unmirrored_backlog() {
+        assert!(
+            ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL
+                .contains("from event_outbox\n                where stream_mirrored_at is null")
+        );
+        assert!(!ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("stream_mirrored_at is not null"));
+        assert!(!ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("count(stream_mirrored_at"));
+        assert!(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("from unmirrored"));
     }
 }

@@ -1,0 +1,55 @@
+{
+  "id": "dev.fbz.marker.importer",
+  "name": "HTTP Marker Importer",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19092/fbz-plugin",
+  "description": "First-party example HTTP plugin that imports intro and credits markers through the controlled marker Host API.",
+  "permissions": [
+    {
+      "key": "media.read",
+      "reason": "Read public item metadata and external IDs before resolving marker candidates."
+    },
+    {
+      "key": "metadata.write",
+      "reason": "Replace this plugin's own marker source for matched media items."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "metadata.refresh.completed",
+      "handler": "hooks.importMarkers"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "source",
+      "label": "Marker source",
+      "type": "string",
+      "required": false,
+      "helpText": "Optional source suffix stored as plugin:{pluginId}:{source}."
+    },
+    {
+      "key": "marker_source_url",
+      "label": "Marker source URL",
+      "type": "url",
+      "required": false,
+      "helpText": "Optional HTTP endpoint returning marker candidates for provider/externalId."
+    },
+    {
+      "key": "min_confidence",
+      "label": "Minimum confidence",
+      "type": "number",
+      "required": false,
+      "helpText": "Optional 0-1 threshold applied before writing markers."
+    },
+    {
+      "key": "clear_when_missing",
+      "label": "Clear when missing",
+      "type": "boolean",
+      "required": false,
+      "helpText": "When true, clear this plugin source if no marker candidates are found."
+    }
+  ]
+}

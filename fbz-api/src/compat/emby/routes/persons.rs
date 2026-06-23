@@ -6,7 +6,6 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    auth::service::AuthenticatedUser,
     compat::emby::dto::{BaseItemDto, BaseItemSource, QueryResultDto},
     error::AppError,
     library::repository::{
@@ -15,7 +14,7 @@ use crate::{
     state::AppState,
 };
 
-use super::{access::authenticate_request_user, items::normalized_parent_id};
+use super::{access::authenticate_query_user, items::normalized_parent_id};
 
 const DEFAULT_PERSONS_LIMIT: u32 = 100;
 const MAX_PERSONS_LIMIT: u32 = 200;
@@ -102,24 +101,6 @@ pub async fn person_by_name(
     };
 
     Ok(Json(person_to_base_item(record)))
-}
-
-async fn authenticate_query_user(
-    state: &AppState,
-    query_user_id: Option<&str>,
-    headers: &HeaderMap,
-    uri: &Uri,
-) -> Result<AuthenticatedUser, AppError> {
-    let user = authenticate_request_user(state, headers, uri).await?;
-    if let Some(query_user_id) = query_user_id
-        && query_user_id != user.public_id
-    {
-        return Err(AppError::forbidden(
-            "authenticated user does not match query user",
-        ));
-    }
-
-    Ok(user)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

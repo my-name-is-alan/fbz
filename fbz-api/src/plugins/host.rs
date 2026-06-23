@@ -144,6 +144,33 @@ const PLUGIN_LIBRARY_EXISTS_SQL: &str = r#"
                 where l.is_hidden = false
             ) as found
             "#;
+const AUTHENTICATE_PLUGIN_HOST_TOKEN_SQL: &str = r#"
+            update plugin_host_tokens token
+            set last_used_at = now()
+            from plugin_installations pi
+            join plugin_packages pkg on pkg.id = pi.active_package_id
+            cross join plugin_execution_runs run
+            where token.token_hash = $1
+              and token.revoked_at is null
+              and token.expires_at > now()
+              and token.scope = 'execution'
+              and token.plugin_id = pi.plugin_id
+              and token.package_id = pkg.public_id::text
+              and run.id = token.execution_run_id
+              and run.plugin_id = token.plugin_id
+              and run.package_id = token.package_id
+              and run.status = 'running'
+              and run.finished_at is null
+              and pi.enabled = true
+              and pi.approval_status = 'approved'
+              and pkg.package_status = 'approved'
+            returning
+                token.id as token_id,
+                token.plugin_id,
+                token.package_id,
+                token.execution_run_id,
+                token.permission_snapshot
+            "#;
 const NOTIFICATION_REQUESTED_EVENT: &str = "notification.send.requested";
 const MAX_NOTIFICATION_TITLE_LEN: usize = 160;
 const MAX_NOTIFICATION_MESSAGE_LEN: usize = 4000;
@@ -330,6 +357,88 @@ const HOST_API_DELETE_KV: PluginHostApiRoute = PluginHostApiRoute {
     success_status: StatusCode::OK,
 };
 
+#[derive(Clone, Copy)]
+struct PluginPermissionCapability {
+    key: &'static str,
+    category: &'static str,
+    risk_level: &'static str,
+    description: &'static str,
+    manifest_features: &'static [&'static str],
+}
+
+const PLUGIN_PERMISSION_CAPABILITIES: &[PluginPermissionCapability] = &[
+    PluginPermissionCapability {
+        key: "admin.menu",
+        category: "admin",
+        risk_level: "medium",
+        description: "Allows the plugin to add entries to the admin navigation menu under its plugin namespace.",
+        manifest_features: &["menu"],
+    },
+    PluginPermissionCapability {
+        key: "library.read",
+        category: "library",
+        risk_level: "medium",
+        description: "Allows the plugin to read non-hidden media library summaries and paged public item summaries.",
+        manifest_features: &[],
+    },
+    PluginPermissionCapability {
+        key: "library.write",
+        category: "library",
+        risk_level: "high",
+        description: "Reserved for future controlled media library write operations.",
+        manifest_features: &[],
+    },
+    PluginPermissionCapability {
+        key: "media.read",
+        category: "media",
+        risk_level: "high",
+        description: "Allows the plugin to read public media item metadata without exposing file paths or playback URLs.",
+        manifest_features: &[],
+    },
+    PluginPermissionCapability {
+        key: "metadata.read",
+        category: "metadata",
+        risk_level: "medium",
+        description: "Reserved for future read-only metadata provider and enrichment APIs.",
+        manifest_features: &[],
+    },
+    PluginPermissionCapability {
+        key: "metadata.write",
+        category: "metadata",
+        risk_level: "high",
+        description: "Allows the plugin to patch whitelisted metadata fields and replace plugin-scoped artwork or markers.",
+        manifest_features: &[],
+    },
+    PluginPermissionCapability {
+        key: "notification.send",
+        category: "notification",
+        risk_level: "medium",
+        description: "Allows the plugin to enqueue notification requests for administrator-configured delivery targets.",
+        manifest_features: &[],
+    },
+    PluginPermissionCapability {
+        key: "playback.read",
+        category: "playback",
+        risk_level: "medium",
+        description: "Reserved for future read-only playback session and activity APIs.",
+        manifest_features: &[],
+    },
+    PluginPermissionCapability {
+        key: "scheduler.register",
+        category: "scheduler",
+        risk_level: "medium",
+        description: "Allows the plugin manifest to register interval or cron scheduled tasks.",
+        manifest_features: &["schedules"],
+    },
+    PluginPermissionCapability {
+        key: "webhook.emit",
+        category: "webhook",
+        risk_level: "medium",
+        description: "Reserved for future outbound webhook emission through host-managed delivery controls.",
+        manifest_features: &[],
+    },
+];
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PutPluginKvRequestDto {
@@ -358,7 +467,19 @@ pub struct PluginCapabilitiesDto {
     pub executable_runtimes: Vec<String>,
     pub http_schemes: Vec<String>,
     pub permissions: Vec<String>,
+    pub permission_details: Vec<PluginPermissionCapabilityDto>,
     pub hook_events: Vec<String>,
+    pub host_apis: Vec<PluginHostApiCapabilityDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPermissionCapabilityDto {
+    pub key: String,
+    pub category: String,
+    pub risk_level: String,
+    pub description: String,
+    pub manifest_features: Vec<String>,
     pub host_apis: Vec<PluginHostApiCapabilityDto>,
 }
 
@@ -949,37 +1070,10 @@ impl PluginHostRepository {
         &self,
         token: &str,
     ) -> Result<Option<PluginHostContext>, sqlx::Error> {
-        let row = sqlx::query(
-            r#"
-            update plugin_host_tokens token
-            set last_used_at = now()
-            from plugin_installations pi
-            join plugin_packages pkg on pkg.id = pi.active_package_id
-            join plugin_execution_runs run on run.id = token.execution_run_id
-            where token.token_hash = $1
-              and token.revoked_at is null
-              and token.expires_at > now()
-              and token.scope = 'execution'
-              and token.plugin_id = pi.plugin_id
-              and token.package_id = pkg.public_id::text
-              and run.plugin_id = token.plugin_id
-              and run.package_id = token.package_id
-              and run.status = 'running'
-              and run.finished_at is null
-              and pi.enabled = true
-              and pi.approval_status = 'approved'
-              and pkg.package_status = 'approved'
-            returning
-                token.id as token_id,
-                token.plugin_id,
-                token.package_id,
-                token.execution_run_id,
-                token.permission_snapshot
-            "#,
-        )
-        .bind(hash_token(token))
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query(AUTHENTICATE_PLUGIN_HOST_TOKEN_SQL)
+            .bind(hash_token(token))
+            .fetch_optional(&self.pool)
+            .await?;
 
         row.map(|row| {
             let permission_snapshot = row.try_get::<Value, _>("permission_snapshot")?;
@@ -3331,12 +3425,13 @@ pub fn plugin_capabilities() -> PluginCapabilitiesDto {
         executable_runtimes: string_list(EXECUTABLE_PLUGIN_RUNTIMES),
         http_schemes: string_list(HTTP_PLUGIN_SCHEMES),
         permissions: string_list(supported_plugin_permissions()),
+        permission_details: plugin_permission_capabilities(),
         hook_events: string_list(supported_plugin_hook_events()),
         host_apis: plugin_host_api_capabilities(),
     }
 }
 
-fn plugin_host_api_capabilities() -> Vec<PluginHostApiCapabilityDto> {
+fn plugin_host_api_routes() -> [PluginHostApiRoute; 12] {
     [
         HOST_API_CAPABILITIES,
         HOST_API_CONFIG,
@@ -3351,13 +3446,42 @@ fn plugin_host_api_capabilities() -> Vec<PluginHostApiCapabilityDto> {
         HOST_API_PUT_ITEM_MARKERS,
         HOST_API_SEND_NOTIFICATION,
     ]
-    .into_iter()
-    .map(|route| PluginHostApiCapabilityDto {
+}
+
+fn plugin_permission_capabilities() -> Vec<PluginPermissionCapabilityDto> {
+    let host_api_routes = plugin_host_api_routes();
+
+    PLUGIN_PERMISSION_CAPABILITIES
+        .iter()
+        .map(|permission| PluginPermissionCapabilityDto {
+            key: permission.key.to_owned(),
+            category: permission.category.to_owned(),
+            risk_level: permission.risk_level.to_owned(),
+            description: permission.description.to_owned(),
+            manifest_features: string_list(permission.manifest_features),
+            host_apis: host_api_routes
+                .iter()
+                .copied()
+                .filter(|route| route.required_permission == Some(permission.key))
+                .map(plugin_host_api_capability_from_route)
+                .collect(),
+        })
+        .collect()
+}
+
+fn plugin_host_api_capabilities() -> Vec<PluginHostApiCapabilityDto> {
+    plugin_host_api_routes()
+        .into_iter()
+        .map(plugin_host_api_capability_from_route)
+        .collect()
+}
+
+fn plugin_host_api_capability_from_route(route: PluginHostApiRoute) -> PluginHostApiCapabilityDto {
+    PluginHostApiCapabilityDto {
         method: route.method.to_owned(),
         path: route.path.to_owned(),
         required_permission: route.required_permission.map(str::to_owned),
-    })
-    .collect()
+    }
 }
 
 fn string_list(values: &'static [&'static str]) -> Vec<String> {
@@ -3615,6 +3739,14 @@ mod tests {
                 .permissions
                 .contains(&"notification.send".to_owned())
         );
+        assert!(capabilities.permission_details.iter().any(|permission| {
+            permission.key == "notification.send"
+                && permission.risk_level == "medium"
+                && permission
+                    .host_apis
+                    .iter()
+                    .any(|api| api.method == "POST" && api.path == "/api/plugin/notifications")
+        }));
         assert!(
             capabilities
                 .hook_events
@@ -3645,6 +3777,81 @@ mod tests {
                 && api.path == "/api/plugin/items/{itemId}/markers"
                 && api.required_permission.as_deref() == Some("metadata.write")
         }));
+    }
+
+    #[test]
+    fn plugin_permission_details_cover_supported_permissions_and_host_api_requirements() {
+        let capabilities = plugin_capabilities();
+        let supported_permissions = supported_plugin_permissions()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let described_permissions = capabilities
+            .permission_details
+            .iter()
+            .map(|permission| permission.key.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(described_permissions, supported_permissions);
+
+        for permission in &capabilities.permission_details {
+            assert!(!permission.category.trim().is_empty());
+            assert!(!permission.risk_level.trim().is_empty());
+            assert!(!permission.description.trim().is_empty());
+        }
+
+        for api in &capabilities.host_apis {
+            let Some(required_permission) = api.required_permission.as_deref() else {
+                continue;
+            };
+            let permission = capabilities
+                .permission_details
+                .iter()
+                .find(|permission| permission.key == required_permission)
+                .expect("host api permission should be described");
+
+            assert!(
+                permission.host_apis.iter().any(|permission_api| {
+                    permission_api.method == api.method && permission_api.path == api.path
+                }),
+                "permission detail for `{required_permission}` should list {} {}",
+                api.method,
+                api.path
+            );
+        }
+
+        let admin_menu = capabilities
+            .permission_details
+            .iter()
+            .find(|permission| permission.key == "admin.menu")
+            .expect("admin.menu should be described");
+        assert!(admin_menu.manifest_features.contains(&"menu".to_owned()));
+
+        let scheduler = capabilities
+            .permission_details
+            .iter()
+            .find(|permission| permission.key == "scheduler.register")
+            .expect("scheduler.register should be described");
+        assert!(
+            scheduler
+                .manifest_features
+                .contains(&"schedules".to_owned())
+        );
+    }
+
+    #[test]
+    fn host_api_audit_method_constraint_tracks_capabilities() {
+        let upgrade_migration =
+            include_str!("../../migrations/0043_plugin_host_api_patch_method.sql");
+
+        for api in plugin_capabilities().host_apis {
+            let quoted_method = format!("'{}'", api.method);
+            assert!(
+                upgrade_migration.contains(&quoted_method),
+                "upgrade plugin host api audit method constraint is missing {}",
+                api.method
+            );
+        }
     }
 
     #[test]
@@ -4302,6 +4509,19 @@ mod tests {
         assert!(migration.contains("idx_plugin_host_api_calls_execution_plugin_budget"));
         assert!(migration.contains("execution_run_id, plugin_id, id"));
         assert!(migration.contains("where execution_run_id is not null"));
+    }
+
+    #[test]
+    fn authenticate_token_sql_keeps_update_target_alias_out_of_from_join_predicates() {
+        assert!(AUTHENTICATE_PLUGIN_HOST_TOKEN_SQL.contains("update plugin_host_tokens token"));
+        assert!(
+            AUTHENTICATE_PLUGIN_HOST_TOKEN_SQL.contains("cross join plugin_execution_runs run")
+        );
+        assert!(AUTHENTICATE_PLUGIN_HOST_TOKEN_SQL.contains("and run.id = token.execution_run_id"));
+        assert!(
+            !AUTHENTICATE_PLUGIN_HOST_TOKEN_SQL
+                .contains("join plugin_execution_runs run on run.id = token.execution_run_id")
+        );
     }
 
     #[test]

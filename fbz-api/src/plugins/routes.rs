@@ -8,7 +8,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri},
     routing::{get, post},
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -32,10 +32,10 @@ use crate::{
         repository::{
             ActivePluginMenuItemRecord, InstallPluginPackageInput, InstalledPluginPackageRecord,
             PluginConfigRecord, PluginConfigSecretInput, PluginConfigSecretUpdate,
-            PluginConfigUpdateError, PluginHookRecord, PluginMenuItemRecord,
-            PluginPackageDetailRecord, PluginPermissionRecord, PluginRepository,
-            PluginScheduleDefinitionRecord, PluginStateError, PluginStateRecord,
-            PluginSummaryRecord,
+            PluginConfigUpdateError, PluginHookRecord, PluginListFilter, PluginMenuItemRecord,
+            PluginPackageDetailRecord, PluginPackageListFilter, PluginPackageSummaryRecord,
+            PluginPermissionRecord, PluginRepository, PluginScheduleDefinitionRecord,
+            PluginStateError, PluginStateRecord, PluginSummaryRecord,
         },
     },
     state::AppState,
@@ -53,7 +53,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/plugins", get(list_plugins))
         .route("/api/admin/plugins/capabilities", get(admin_capabilities))
         .route("/api/admin/plugins/menu-items", get(list_menu_items))
-        .route("/api/admin/plugins/packages", post(install_package))
+        .route(
+            "/api/admin/plugins/packages",
+            get(list_plugin_packages).post(install_package),
+        )
         .route(
             "/api/admin/plugins/packages/{package_id}",
             get(package_detail),
@@ -116,6 +119,10 @@ pub struct PluginStateDto {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListPluginsQueryDto {
+    pub approval_status: Option<String>,
+    pub enabled: Option<bool>,
+    pub runtime: Option<String>,
+    pub cursor: Option<String>,
     pub limit: Option<u32>,
 }
 
@@ -152,6 +159,34 @@ pub struct PluginPackageDetailDto {
     pub hooks: Vec<PluginHookDto>,
     pub menu: Vec<PluginMenuItemDto>,
     pub schedules: Vec<PluginScheduleDefinitionDto>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPluginPackagesQueryDto {
+    pub plugin_id: Option<String>,
+    pub package_status: Option<String>,
+    pub runtime: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPackageSummaryDto {
+    pub package_id: String,
+    pub plugin_id: String,
+    pub package_version: String,
+    pub api_version: String,
+    pub runtime: String,
+    pub name: String,
+    pub package_status: String,
+    pub signature_present: bool,
+    pub approval_status: Option<String>,
+    pub enabled: Option<bool>,
+    pub active: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -254,20 +289,50 @@ pub async fn list_plugins(
     headers: HeaderMap,
     uri: Uri,
     Query(query): Query<ListPluginsQueryDto>,
-) -> Result<Json<Vec<PluginSummaryDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<PluginSummaryDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let approval_status = query
+        .approval_status
+        .as_deref()
+        .map(validate_plugin_approval_status)
+        .transpose()?
+        .map(str::to_owned);
+    let runtime = query
+        .runtime
+        .as_deref()
+        .map(validate_plugin_runtime_filter)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let plugins = PluginRepository::new(database.clone())
-        .list_plugins(plugin_list_limit(query.limit))
+    let page = PluginRepository::new(database.clone())
+        .list_plugins_page(PluginListFilter {
+            approval_status,
+            enabled: query.enabled,
+            runtime,
+            cursor,
+            limit: plugin_list_limit(query.limit),
+        })
         .await
-        .map_err(plugin_read_error_to_app_error)?
-        .into_iter()
-        .map(PluginSummaryDto::from)
-        .collect();
+        .map_err(plugin_read_error_to_app_error)?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(plugins))
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(PluginSummaryDto::from)
+                .collect(),
+        ),
+    ))
 }
 
 pub async fn admin_capabilities(
@@ -300,6 +365,64 @@ pub async fn package_detail(
     };
 
     Ok(Json(detail.into()))
+}
+
+pub async fn list_plugin_packages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(query): Query<ListPluginPackagesQueryDto>,
+) -> Result<(HeaderMap, Json<Vec<PluginPackageSummaryDto>>), AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let plugin_id = query
+        .plugin_id
+        .as_deref()
+        .map(validate_plugin_id_filter)
+        .transpose()?
+        .map(str::to_owned);
+    let package_status = query
+        .package_status
+        .as_deref()
+        .map(validate_plugin_package_status)
+        .transpose()?
+        .map(str::to_owned);
+    let runtime = query
+        .runtime
+        .as_deref()
+        .map(validate_plugin_runtime_filter)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let page = PluginRepository::new(database.clone())
+        .list_plugin_packages_page(PluginPackageListFilter {
+            plugin_id,
+            package_status,
+            runtime,
+            cursor,
+            limit: plugin_package_list_limit(query.limit),
+        })
+        .await
+        .map_err(plugin_read_error_to_app_error)?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
+
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(PluginPackageSummaryDto::from)
+                .collect(),
+        ),
+    ))
 }
 
 pub async fn list_menu_items(
@@ -832,6 +955,91 @@ fn validate_non_empty_path_param(field: &str, value: &str) -> Result<(), AppErro
     Ok(())
 }
 
+fn validate_bounded_query_text<'a>(
+    field: &str,
+    value: &'a str,
+    max_len: usize,
+) -> Result<&'a str, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::unprocessable(format!("{field} is required")));
+    }
+    if value.len() > max_len {
+        return Err(AppError::unprocessable(format!(
+            "{field} must be at most {max_len} characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_plugin_id_filter(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_query_text("pluginId", value, 128)?;
+    if value.contains(char::is_whitespace) || value.contains('/') || value.contains('\\') {
+        return Err(AppError::unprocessable(
+            "pluginId must not contain whitespace or path separators",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_plugin_package_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_query_text("packageStatus", value, 32)?;
+    if matches!(
+        value,
+        "pending_approval" | "approved" | "rejected" | "disabled"
+    ) {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "packageStatus must be one of pending_approval, approved, rejected, or disabled",
+    ))
+}
+
+fn validate_plugin_approval_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_query_text("approvalStatus", value, 32)?;
+    if matches!(
+        value,
+        "pending_approval" | "approved" | "rejected" | "requires_reapproval"
+    ) {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "approvalStatus must be one of pending_approval, approved, rejected, or requires_reapproval",
+    ))
+}
+
+fn validate_plugin_runtime_filter(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_query_text("runtime", value, 16)?;
+    if matches!(value, "wasi" | "http") {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "runtime must be one of wasi or http",
+    ))
+}
+
+fn validate_uuid_public_id<'a>(field: &str, value: &'a str) -> Result<&'a str, AppError> {
+    let value = validate_bounded_query_text(field, value, 128)?;
+    let bytes = value.as_bytes();
+    let has_uuid_shape = bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit());
+    if !has_uuid_shape {
+        return Err(AppError::unprocessable(format!(
+            "{field} must be a UUID public id"
+        )));
+    }
+    Ok(value)
+}
+
 fn validate_plugin_config_values(
     schema: &[PluginConfigFieldManifest],
     input: &Value,
@@ -980,6 +1188,28 @@ fn is_plugin_config_url(value: &str) -> bool {
 
 fn plugin_list_limit(limit: Option<u32>) -> i64 {
     i64::from(limit.unwrap_or(100).clamp(1, 500))
+}
+
+fn plugin_package_list_limit(limit: Option<u32>) -> i64 {
+    i64::from(limit.unwrap_or(100).clamp(1, 500))
+}
+
+fn pagination_headers(has_more: bool, next_cursor: Option<&str>) -> Result<HeaderMap, AppError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-fbz-has-more",
+        HeaderValue::from_static(if has_more { "true" } else { "false" }),
+    );
+    if let Some(next_cursor) = next_cursor {
+        headers.insert(
+            "x-fbz-next-cursor",
+            HeaderValue::from_str(next_cursor).map_err(|err| {
+                AppError::internal(format!("failed to encode next cursor header: {err}"))
+            })?,
+        );
+    }
+
+    Ok(headers)
 }
 
 fn parse_sha256_hex(value: &str) -> Result<Vec<u8>, AppError> {
@@ -1209,6 +1439,26 @@ impl From<PluginSummaryRecord> for PluginSummaryDto {
             enabled: record.enabled,
             name: record.name,
             runtime: record.runtime,
+        }
+    }
+}
+
+impl From<PluginPackageSummaryRecord> for PluginPackageSummaryDto {
+    fn from(record: PluginPackageSummaryRecord) -> Self {
+        Self {
+            package_id: record.package_id,
+            plugin_id: record.plugin_id,
+            package_version: record.package_version,
+            api_version: record.api_version,
+            runtime: record.runtime,
+            name: record.name,
+            package_status: record.package_status,
+            signature_present: record.signature_present,
+            approval_status: record.approval_status,
+            enabled: record.enabled,
+            active: record.active,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
         }
     }
 }
@@ -1590,6 +1840,95 @@ mod tests {
         assert_eq!(plugin_list_limit(Some(0)), 1);
         assert_eq!(plugin_list_limit(Some(10)), 10);
         assert_eq!(plugin_list_limit(Some(5_000)), 500);
+    }
+
+    #[test]
+    fn plugin_list_filters_are_validated() {
+        assert_eq!(
+            validate_plugin_approval_status("pending_approval").unwrap(),
+            "pending_approval"
+        );
+        assert_eq!(
+            validate_plugin_approval_status("requires_reapproval").unwrap(),
+            "requires_reapproval"
+        );
+        assert!(validate_plugin_approval_status("pending").is_err());
+        assert!(validate_plugin_approval_status("").is_err());
+
+        assert_eq!(validate_plugin_runtime_filter("wasi").unwrap(), "wasi");
+        assert_eq!(validate_plugin_runtime_filter("http").unwrap(), "http");
+        assert!(validate_plugin_runtime_filter("native").is_err());
+
+        assert_eq!(
+            validate_uuid_public_id("cursor", "00000000-0000-0000-0000-000000000001").unwrap(),
+            "00000000-0000-0000-0000-000000000001"
+        );
+        assert!(validate_uuid_public_id("cursor", "plugin-1").is_err());
+    }
+
+    #[test]
+    fn plugin_package_list_limit_is_bounded() {
+        assert_eq!(plugin_package_list_limit(None), 100);
+        assert_eq!(plugin_package_list_limit(Some(0)), 1);
+        assert_eq!(plugin_package_list_limit(Some(10)), 10);
+        assert_eq!(plugin_package_list_limit(Some(5_000)), 500);
+    }
+
+    #[test]
+    fn plugin_package_list_filters_are_validated() {
+        assert_eq!(
+            validate_plugin_id_filter("dev.fbz.notify").unwrap(),
+            "dev.fbz.notify"
+        );
+        assert!(validate_plugin_id_filter("").is_err());
+        assert!(validate_plugin_id_filter("dev fbz notify").is_err());
+        assert!(validate_plugin_id_filter("dev/fbz/notify").is_err());
+
+        assert_eq!(
+            validate_plugin_package_status("pending_approval").unwrap(),
+            "pending_approval"
+        );
+        assert_eq!(
+            validate_plugin_package_status("approved").unwrap(),
+            "approved"
+        );
+        assert!(validate_plugin_package_status("pending").is_err());
+
+        assert_eq!(validate_plugin_runtime_filter("wasi").unwrap(), "wasi");
+        assert_eq!(validate_plugin_runtime_filter("http").unwrap(), "http");
+        assert!(validate_plugin_runtime_filter("native").is_err());
+
+        assert_eq!(
+            validate_uuid_public_id("cursor", "00000000-0000-0000-0000-000000000001").unwrap(),
+            "00000000-0000-0000-0000-000000000001"
+        );
+        assert!(validate_uuid_public_id("cursor", "package-1").is_err());
+    }
+
+    #[test]
+    fn plugin_package_summary_dto_preserves_review_context() {
+        let dto = PluginPackageSummaryDto::from(PluginPackageSummaryRecord {
+            package_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            plugin_id: "dev.fbz.notify".to_owned(),
+            package_version: "1.2.3".to_owned(),
+            api_version: "1".to_owned(),
+            runtime: "http".to_owned(),
+            name: "Notify".to_owned(),
+            package_status: "pending_approval".to_owned(),
+            signature_present: true,
+            approval_status: Some("approved".to_owned()),
+            enabled: Some(false),
+            active: false,
+            created_at: "2026-06-23T00:00:00Z".to_owned(),
+            updated_at: "2026-06-23T00:00:00Z".to_owned(),
+        });
+
+        assert_eq!(dto.plugin_id, "dev.fbz.notify");
+        assert_eq!(dto.package_status, "pending_approval");
+        assert!(dto.signature_present);
+        assert_eq!(dto.approval_status.as_deref(), Some("approved"));
+        assert_eq!(dto.enabled, Some(false));
+        assert!(!dto.active);
     }
 
     #[test]

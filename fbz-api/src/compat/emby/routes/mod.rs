@@ -12,10 +12,14 @@ mod devices;
 mod display_preferences;
 mod genres;
 mod images;
+mod instant_mix;
 mod items;
+mod live_tv;
 mod media_folders;
 mod persons;
 mod playback;
+mod playlists;
+mod prefixes;
 mod scheduled_tasks;
 mod sessions;
 mod shows;
@@ -43,6 +47,37 @@ pub fn router() -> Router<AppState> {
         .route("/System/Configuration", get(system::system_configuration))
         .route("/emby/System/WakeOnLanInfo", get(system::wake_on_lan_info))
         .route("/System/WakeOnLanInfo", get(system::wake_on_lan_info))
+        .route("/emby/LiveTv/Info", get(live_tv::live_tv_info))
+        .route("/LiveTv/Info", get(live_tv::live_tv_info))
+        .route("/emby/LiveTv/Channels", get(live_tv::empty_query))
+        .route("/LiveTv/Channels", get(live_tv::empty_query))
+        .route("/emby/LiveTv/Programs", get(live_tv::empty_query))
+        .route("/LiveTv/Programs", get(live_tv::empty_query))
+        .route(
+            "/emby/LiveTv/RecommendedPrograms",
+            get(live_tv::empty_query),
+        )
+        .route("/LiveTv/RecommendedPrograms", get(live_tv::empty_query))
+        .route("/emby/LiveTv/UpcomingPrograms", get(live_tv::empty_query))
+        .route("/LiveTv/UpcomingPrograms", get(live_tv::empty_query))
+        .route("/emby/LiveTv/Recordings", get(live_tv::empty_query))
+        .route("/LiveTv/Recordings", get(live_tv::empty_query))
+        .route(
+            "/emby/LiveTv/Recordings/Groups",
+            get(live_tv::empty_query),
+        )
+        .route("/LiveTv/Recordings/Groups", get(live_tv::empty_query))
+        .route("/emby/LiveTv/Timers", get(live_tv::empty_query))
+        .route("/LiveTv/Timers", get(live_tv::empty_query))
+        .route("/emby/LiveTv/SeriesTimers", get(live_tv::empty_query))
+        .route("/LiveTv/SeriesTimers", get(live_tv::empty_query))
+        .route("/emby/LiveTv/Timers/{id}", get(live_tv::empty_item))
+        .route("/LiveTv/Timers/{id}", get(live_tv::empty_item))
+        .route(
+            "/emby/LiveTv/SeriesTimers/{id}",
+            get(live_tv::empty_item),
+        )
+        .route("/LiveTv/SeriesTimers/{id}", get(live_tv::empty_item))
         .route(
             "/emby/System/Ping",
             get(system::system_ping).post(system::system_ping),
@@ -260,8 +295,24 @@ pub fn router() -> Router<AppState> {
         .route("/Genres/{name}", get(genres::genre_by_name))
         .route("/emby/MusicGenres", get(genres::music_genres))
         .route("/MusicGenres", get(genres::music_genres))
+        .route(
+            "/emby/MusicGenres/InstantMix",
+            get(instant_mix::empty_instant_mix),
+        )
+        .route(
+            "/MusicGenres/InstantMix",
+            get(instant_mix::empty_instant_mix),
+        )
         .route("/emby/MusicGenres/{name}", get(genres::music_genre_by_name))
         .route("/MusicGenres/{name}", get(genres::music_genre_by_name))
+        .route(
+            "/emby/MusicGenres/{name}/InstantMix",
+            get(instant_mix::empty_instant_mix),
+        )
+        .route(
+            "/MusicGenres/{name}/InstantMix",
+            get(instant_mix::empty_instant_mix),
+        )
         .route("/emby/Persons", get(persons::persons))
         .route("/Persons", get(persons::persons))
         .route("/emby/Persons/{name}", get(persons::person_by_name))
@@ -270,12 +321,49 @@ pub fn router() -> Router<AppState> {
         .route("/Artists", get(artists::artists))
         .route("/emby/Artists/AlbumArtists", get(artists::album_artists))
         .route("/Artists/AlbumArtists", get(artists::album_artists))
+        .route("/emby/Artists/Prefixes", get(prefixes::artist_prefixes))
+        .route("/Artists/Prefixes", get(prefixes::artist_prefixes))
+        .route(
+            "/emby/Artists/InstantMix",
+            get(instant_mix::empty_instant_mix),
+        )
+        .route("/Artists/InstantMix", get(instant_mix::empty_instant_mix))
         .route("/emby/Artists/{item_id}/Similar", get(items::similar_items))
         .route("/Artists/{item_id}/Similar", get(items::similar_items))
         .route("/emby/Artists/{name}", get(artists::artist_by_name))
         .route("/Artists/{name}", get(artists::artist_by_name))
+        .route("/emby/Albums", get(items::albums))
+        .route("/Albums", get(items::albums))
+        .route("/emby/Albums/{item_id}/InstantMix", get(items::similar_items))
+        .route("/Albums/{item_id}/InstantMix", get(items::similar_items))
         .route("/emby/Albums/{item_id}/Similar", get(items::similar_items))
         .route("/Albums/{item_id}/Similar", get(items::similar_items))
+        .route("/emby/Playlists", get(playlists::playlists))
+        .route("/Playlists", get(playlists::playlists))
+        .route(
+            "/emby/Playlists/{playlist_id}/Items",
+            get(playlists::playlist_items),
+        )
+        .route(
+            "/Playlists/{playlist_id}/Items",
+            get(playlists::playlist_items),
+        )
+        .route(
+            "/emby/Playlists/{playlist_id}/InstantMix",
+            get(playlists::playlist_items),
+        )
+        .route(
+            "/Playlists/{playlist_id}/InstantMix",
+            get(playlists::playlist_items),
+        )
+        .route("/emby/Songs", get(items::songs))
+        .route("/Songs", get(items::songs))
+        .route("/emby/Songs/{item_id}/InstantMix", get(items::similar_items))
+        .route("/Songs/{item_id}/InstantMix", get(items::similar_items))
+        .route("/emby/Items/{item_id}/InstantMix", get(items::similar_items))
+        .route("/Items/{item_id}/InstantMix", get(items::similar_items))
+        .route("/emby/Items/Prefixes", get(prefixes::item_prefixes))
+        .route("/Items/Prefixes", get(prefixes::item_prefixes))
         .route(
             "/emby/Users/{user_id}/PlayedItems/{item_id}",
             post(user_data::mark_played).delete(user_data::mark_unplayed),
@@ -447,4 +535,17 @@ pub fn router() -> Router<AppState> {
             "/Users/{user_id}/Items/{item_id}/PlaybackInfo",
             get(playback::user_playback_info).post(playback::post_user_playback_info),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn music_collection_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        assert!(routes.contains(".route(\"/emby/Albums\", get(items::albums))"));
+        assert!(routes.contains(".route(\"/Albums\", get(items::albums))"));
+        assert!(routes.contains(".route(\"/emby/Songs\", get(items::songs))"));
+        assert!(routes.contains(".route(\"/Songs\", get(items::songs))"));
+    }
 }

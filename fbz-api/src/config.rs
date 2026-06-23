@@ -9,14 +9,24 @@ use std::{
 
 const DEFAULT_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const DEFAULT_PORT: u16 = 8080;
+const DEFAULT_READINESS_TIMEOUT_MS: u64 = 500;
+const MAX_READINESS_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_LOG_LEVEL: &str = "fbz_api=info,tower_http=info";
 const DEFAULT_DATABASE_URL: &str = "postgres://fbz:fbz@127.0.0.1:5432/fbz";
+const DEFAULT_DATABASE_ACQUIRE_TIMEOUT_SECONDS: u64 = 5;
+const DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS: u64 = 600;
+const DEFAULT_DATABASE_MAX_LIFETIME_SECONDS: u64 = 1_800;
+const DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379";
 const DEFAULT_REDIS_EVENT_STREAM_KEY: &str = "fbz:events";
 const DEFAULT_REDIS_EVENT_STREAM_MAX_LEN: u64 = 50_000;
 const DEFAULT_REDIS_EVENT_STREAM_BATCH_SIZE: u16 = 100;
 const DEFAULT_REDIS_EVENT_STREAM_INTERVAL_SECONDS: u64 = 5;
 const DEFAULT_REDIS_EVENT_STREAM_LEASE_SECONDS: u64 = 30;
+const DEFAULT_REDIS_EVENT_STREAM_RETRY_BASE_SECONDS: u64 = 5;
+const DEFAULT_REDIS_EVENT_STREAM_RETRY_MAX_SECONDS: u64 = 300;
+const DEFAULT_REDIS_OPERATION_TIMEOUT_MS: u64 = 2_000;
+const MAX_REDIS_OPERATION_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_PLUGIN_HTTP_MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
 const MAX_PLUGIN_HTTP_MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_PLUGIN_WASI_FUEL: u64 = 100_000_000;
@@ -58,6 +68,7 @@ pub struct Config {
 pub struct ServerConfig {
     pub host: IpAddr,
     pub port: u16,
+    pub readiness_timeout_ms: u64,
     pub public_base_url: String,
     pub public_base_url_admin_editable: bool,
 }
@@ -113,17 +124,24 @@ pub struct DatabaseConfig {
     pub url: String,
     pub min_connections: u32,
     pub max_connections: u32,
+    pub acquire_timeout_seconds: u64,
+    pub idle_timeout_seconds: u64,
+    pub max_lifetime_seconds: u64,
+    pub statement_timeout_ms: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RedisConfig {
     pub url: String,
+    pub operation_timeout_ms: u64,
     pub event_streams_enabled: bool,
     pub event_stream_key: String,
     pub event_stream_max_len: u64,
     pub event_stream_batch_size: u16,
     pub event_stream_interval_seconds: u64,
     pub event_stream_lease_seconds: u64,
+    pub event_stream_retry_base_seconds: u64,
+    pub event_stream_retry_max_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -358,6 +376,11 @@ impl Config {
             server: ServerConfig {
                 host,
                 port,
+                readiness_timeout_ms: parse_or(
+                    "FBZ_READINESS_TIMEOUT_MS",
+                    DEFAULT_READINESS_TIMEOUT_MS,
+                    &source,
+                )?,
                 public_base_url,
                 public_base_url_admin_editable: bool_or(
                     "PUBLIC_BASE_URL_ADMIN_EDITABLE",
@@ -372,9 +395,34 @@ impl Config {
                 url: get_or("DATABASE_URL", DEFAULT_DATABASE_URL, &source),
                 min_connections: parse_or("DATABASE_MIN_CONNECTIONS", 1_u32, &source)?,
                 max_connections: parse_or("DATABASE_MAX_CONNECTIONS", 20_u32, &source)?,
+                acquire_timeout_seconds: parse_or(
+                    "DATABASE_ACQUIRE_TIMEOUT_SECONDS",
+                    DEFAULT_DATABASE_ACQUIRE_TIMEOUT_SECONDS,
+                    &source,
+                )?,
+                idle_timeout_seconds: parse_or(
+                    "DATABASE_IDLE_TIMEOUT_SECONDS",
+                    DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
+                    &source,
+                )?,
+                max_lifetime_seconds: parse_or(
+                    "DATABASE_MAX_LIFETIME_SECONDS",
+                    DEFAULT_DATABASE_MAX_LIFETIME_SECONDS,
+                    &source,
+                )?,
+                statement_timeout_ms: parse_or(
+                    "DATABASE_STATEMENT_TIMEOUT_MS",
+                    DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+                    &source,
+                )?,
             },
             redis: RedisConfig {
                 url: get_or("REDIS_URL", DEFAULT_REDIS_URL, &source),
+                operation_timeout_ms: parse_or(
+                    "REDIS_OPERATION_TIMEOUT_MS",
+                    DEFAULT_REDIS_OPERATION_TIMEOUT_MS,
+                    &source,
+                )?,
                 event_streams_enabled: bool_or("REDIS_EVENT_STREAMS_ENABLED", false, &source)?,
                 event_stream_key: get_or(
                     "REDIS_EVENT_STREAM_KEY",
@@ -399,6 +447,16 @@ impl Config {
                 event_stream_lease_seconds: parse_or(
                     "REDIS_EVENT_STREAM_LEASE_SECONDS",
                     DEFAULT_REDIS_EVENT_STREAM_LEASE_SECONDS,
+                    &source,
+                )?,
+                event_stream_retry_base_seconds: parse_or(
+                    "REDIS_EVENT_STREAM_RETRY_BASE_SECONDS",
+                    DEFAULT_REDIS_EVENT_STREAM_RETRY_BASE_SECONDS,
+                    &source,
+                )?,
+                event_stream_retry_max_seconds: parse_or(
+                    "REDIS_EVENT_STREAM_RETRY_MAX_SECONDS",
+                    DEFAULT_REDIS_EVENT_STREAM_RETRY_MAX_SECONDS,
                     &source,
                 )?,
             },
@@ -596,6 +654,18 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         require_url("PUBLIC_BASE_URL", &self.server.public_base_url)?;
+        if self.server.readiness_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "FBZ_READINESS_TIMEOUT_MS",
+                "must be greater than zero",
+            ));
+        }
+        if self.server.readiness_timeout_ms > MAX_READINESS_TIMEOUT_MS {
+            return Err(ConfigError::new(
+                "FBZ_READINESS_TIMEOUT_MS",
+                "must be less than or equal to 60000",
+            ));
+        }
 
         if !self.database.url.starts_with("postgres://")
             && !self.database.url.starts_with("postgresql://")
@@ -606,10 +676,40 @@ impl Config {
             ));
         }
 
+        if self.database.max_connections == 0 {
+            return Err(ConfigError::new(
+                "DATABASE_MAX_CONNECTIONS",
+                "must be greater than zero",
+            ));
+        }
         if self.database.min_connections > self.database.max_connections {
             return Err(ConfigError::new(
                 "DATABASE_MIN_CONNECTIONS",
                 "must be less than or equal to DATABASE_MAX_CONNECTIONS",
+            ));
+        }
+        if self.database.acquire_timeout_seconds == 0 {
+            return Err(ConfigError::new(
+                "DATABASE_ACQUIRE_TIMEOUT_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+        if self.database.idle_timeout_seconds == 0 {
+            return Err(ConfigError::new(
+                "DATABASE_IDLE_TIMEOUT_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+        if self.database.max_lifetime_seconds == 0 {
+            return Err(ConfigError::new(
+                "DATABASE_MAX_LIFETIME_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+        if self.database.statement_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "DATABASE_STATEMENT_TIMEOUT_MS",
+                "must be greater than zero",
             ));
         }
 
@@ -617,6 +717,18 @@ impl Config {
             return Err(ConfigError::new(
                 "REDIS_URL",
                 "must start with redis:// or rediss://",
+            ));
+        }
+        if self.redis.operation_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "REDIS_OPERATION_TIMEOUT_MS",
+                "must be greater than zero",
+            ));
+        }
+        if self.redis.operation_timeout_ms > MAX_REDIS_OPERATION_TIMEOUT_MS {
+            return Err(ConfigError::new(
+                "REDIS_OPERATION_TIMEOUT_MS",
+                "must be less than or equal to 60000",
             ));
         }
         if self.redis.event_stream_key.trim().is_empty()
@@ -655,6 +767,24 @@ impl Config {
             return Err(ConfigError::new(
                 "REDIS_EVENT_STREAM_LEASE_SECONDS",
                 "must be greater than zero",
+            ));
+        }
+        if self.redis.event_stream_retry_base_seconds == 0 {
+            return Err(ConfigError::new(
+                "REDIS_EVENT_STREAM_RETRY_BASE_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+        if self.redis.event_stream_retry_max_seconds == 0 {
+            return Err(ConfigError::new(
+                "REDIS_EVENT_STREAM_RETRY_MAX_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+        if self.redis.event_stream_retry_base_seconds > self.redis.event_stream_retry_max_seconds {
+            return Err(ConfigError::new(
+                "REDIS_EVENT_STREAM_RETRY_BASE_SECONDS",
+                "must be less than or equal to REDIS_EVENT_STREAM_RETRY_MAX_SECONDS",
             ));
         }
 
@@ -1139,9 +1269,34 @@ mod tests {
 
         assert_eq!(config.server.host, DEFAULT_HOST);
         assert_eq!(config.server.port, DEFAULT_PORT);
+        assert_eq!(
+            config.server.readiness_timeout_ms,
+            DEFAULT_READINESS_TIMEOUT_MS
+        );
         assert_eq!(config.database.url, DEFAULT_DATABASE_URL);
+        assert_eq!(config.database.min_connections, 1);
         assert_eq!(config.database.max_connections, 20);
+        assert_eq!(
+            config.database.acquire_timeout_seconds,
+            DEFAULT_DATABASE_ACQUIRE_TIMEOUT_SECONDS
+        );
+        assert_eq!(
+            config.database.idle_timeout_seconds,
+            DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS
+        );
+        assert_eq!(
+            config.database.max_lifetime_seconds,
+            DEFAULT_DATABASE_MAX_LIFETIME_SECONDS
+        );
+        assert_eq!(
+            config.database.statement_timeout_ms,
+            DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS
+        );
         assert_eq!(config.redis.url, DEFAULT_REDIS_URL);
+        assert_eq!(
+            config.redis.operation_timeout_ms,
+            DEFAULT_REDIS_OPERATION_TIMEOUT_MS
+        );
         assert!(!config.redis.event_streams_enabled);
         assert_eq!(
             config.redis.event_stream_key,
@@ -1162,6 +1317,14 @@ mod tests {
         assert_eq!(
             config.redis.event_stream_lease_seconds,
             DEFAULT_REDIS_EVENT_STREAM_LEASE_SECONDS
+        );
+        assert_eq!(
+            config.redis.event_stream_retry_base_seconds,
+            DEFAULT_REDIS_EVENT_STREAM_RETRY_BASE_SECONDS
+        );
+        assert_eq!(
+            config.redis.event_stream_retry_max_seconds,
+            DEFAULT_REDIS_EVENT_STREAM_RETRY_MAX_SECONDS
         );
         assert_eq!(config.secrets.key, None);
         assert_eq!(config.media_tools.ffmpeg_path, "ffmpeg");
@@ -1220,16 +1383,25 @@ mod tests {
         let source = map_source([
             ("FBZ_API_HOST", "0.0.0.0"),
             ("FBZ_API_PORT", "8096"),
+            ("FBZ_READINESS_TIMEOUT_MS", "750"),
             ("PUBLIC_BASE_URL", "https://media.example.test"),
             ("DATABASE_URL", "postgresql://fbz:secret@db/fbz"),
+            ("DATABASE_MIN_CONNECTIONS", "2"),
             ("DATABASE_MAX_CONNECTIONS", "8"),
+            ("DATABASE_ACQUIRE_TIMEOUT_SECONDS", "3"),
+            ("DATABASE_IDLE_TIMEOUT_SECONDS", "300"),
+            ("DATABASE_MAX_LIFETIME_SECONDS", "900"),
+            ("DATABASE_STATEMENT_TIMEOUT_MS", "12000"),
             ("REDIS_URL", "rediss://redis.example.test:6380"),
+            ("REDIS_OPERATION_TIMEOUT_MS", "1500"),
             ("REDIS_EVENT_STREAMS_ENABLED", "true"),
             ("REDIS_EVENT_STREAM_KEY", "fbz:test-events"),
             ("REDIS_EVENT_STREAM_MAX_LEN", "25000"),
             ("REDIS_EVENT_STREAM_BATCH_SIZE", "50"),
             ("REDIS_EVENT_STREAM_INTERVAL_SECONDS", "7"),
             ("REDIS_EVENT_STREAM_LEASE_SECONDS", "45"),
+            ("REDIS_EVENT_STREAM_RETRY_BASE_SECONDS", "4"),
+            ("REDIS_EVENT_STREAM_RETRY_MAX_SECONDS", "64"),
             ("METADATA_PROVIDERS", "tmdb,fanart"),
             ("MEDIA_ROOTS", "/media/movies,/media/tv"),
             ("TRANSCODE_MAX_CONCURRENT", "2"),
@@ -1273,16 +1445,25 @@ mod tests {
 
         assert_eq!(config.server.host, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(config.server.port, 8096);
+        assert_eq!(config.server.readiness_timeout_ms, 750);
         assert_eq!(config.server.public_base_url, "https://media.example.test");
         assert_eq!(config.database.url, "postgresql://fbz:secret@db/fbz");
+        assert_eq!(config.database.min_connections, 2);
         assert_eq!(config.database.max_connections, 8);
+        assert_eq!(config.database.acquire_timeout_seconds, 3);
+        assert_eq!(config.database.idle_timeout_seconds, 300);
+        assert_eq!(config.database.max_lifetime_seconds, 900);
+        assert_eq!(config.database.statement_timeout_ms, 12_000);
         assert_eq!(config.redis.url, "rediss://redis.example.test:6380");
+        assert_eq!(config.redis.operation_timeout_ms, 1_500);
         assert!(config.redis.event_streams_enabled);
         assert_eq!(config.redis.event_stream_key, "fbz:test-events");
         assert_eq!(config.redis.event_stream_max_len, 25_000);
         assert_eq!(config.redis.event_stream_batch_size, 50);
         assert_eq!(config.redis.event_stream_interval_seconds, 7);
         assert_eq!(config.redis.event_stream_lease_seconds, 45);
+        assert_eq!(config.redis.event_stream_retry_base_seconds, 4);
+        assert_eq!(config.redis.event_stream_retry_max_seconds, 64);
         assert_eq!(config.metadata.providers, ["tmdb", "fanart"]);
         assert_eq!(
             config.media.roots,
@@ -1348,12 +1529,70 @@ mod tests {
     }
 
     #[test]
+    fn invalid_readiness_timeout_fails_early() {
+        let source = map_source([("FBZ_READINESS_TIMEOUT_MS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "FBZ_READINESS_TIMEOUT_MS");
+
+        let source = map_source([("FBZ_READINESS_TIMEOUT_MS", "60001")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "FBZ_READINESS_TIMEOUT_MS");
+        assert!(err.to_string().contains("less than or equal to 60000"));
+    }
+
+    #[test]
     fn invalid_database_url_fails_early() {
         let source = map_source([("DATABASE_URL", "mysql://fbz:secret@db/fbz")]);
 
         let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
 
         assert_eq!(err.key(), "DATABASE_URL");
+    }
+
+    #[test]
+    fn invalid_database_pool_config_fails_early() {
+        let source = map_source([
+            ("DATABASE_MIN_CONNECTIONS", "8"),
+            ("DATABASE_MAX_CONNECTIONS", "2"),
+        ]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "DATABASE_MIN_CONNECTIONS");
+
+        let source = map_source([("DATABASE_MAX_CONNECTIONS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "DATABASE_MAX_CONNECTIONS");
+
+        let source = map_source([("DATABASE_ACQUIRE_TIMEOUT_SECONDS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "DATABASE_ACQUIRE_TIMEOUT_SECONDS");
+
+        let source = map_source([("DATABASE_IDLE_TIMEOUT_SECONDS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "DATABASE_IDLE_TIMEOUT_SECONDS");
+
+        let source = map_source([("DATABASE_MAX_LIFETIME_SECONDS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "DATABASE_MAX_LIFETIME_SECONDS");
+
+        let source = map_source([("DATABASE_STATEMENT_TIMEOUT_MS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "DATABASE_STATEMENT_TIMEOUT_MS");
     }
 
     #[test]
@@ -1436,6 +1675,18 @@ mod tests {
 
     #[test]
     fn invalid_redis_event_stream_config_fails_early() {
+        let source = map_source([("REDIS_OPERATION_TIMEOUT_MS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "REDIS_OPERATION_TIMEOUT_MS");
+
+        let source = map_source([("REDIS_OPERATION_TIMEOUT_MS", "60001")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "REDIS_OPERATION_TIMEOUT_MS");
+
         let source = map_source([("REDIS_EVENT_STREAM_KEY", "fbz events")]);
 
         let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
@@ -1453,6 +1704,39 @@ mod tests {
         let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
 
         assert_eq!(err.key(), "REDIS_EVENT_STREAM_MAX_LEN");
+
+        let source = map_source([("REDIS_EVENT_STREAM_INTERVAL_SECONDS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "REDIS_EVENT_STREAM_INTERVAL_SECONDS");
+
+        let source = map_source([("REDIS_EVENT_STREAM_LEASE_SECONDS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "REDIS_EVENT_STREAM_LEASE_SECONDS");
+
+        let source = map_source([("REDIS_EVENT_STREAM_RETRY_BASE_SECONDS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "REDIS_EVENT_STREAM_RETRY_BASE_SECONDS");
+
+        let source = map_source([("REDIS_EVENT_STREAM_RETRY_MAX_SECONDS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "REDIS_EVENT_STREAM_RETRY_MAX_SECONDS");
+
+        let source = map_source([
+            ("REDIS_EVENT_STREAM_RETRY_BASE_SECONDS", "30"),
+            ("REDIS_EVENT_STREAM_RETRY_MAX_SECONDS", "10"),
+        ]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "REDIS_EVENT_STREAM_RETRY_BASE_SECONDS");
     }
 
     #[test]

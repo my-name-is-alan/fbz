@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let mut redis = cache::connect(&config.redis).await?;
-    let redis_ping = cache::ping(&mut redis).await?;
+    let redis_ping = cache::ping(&mut redis, config.redis.operation_timeout_ms).await?;
     info!(redis_ping, "redis connected");
 
     let (shutdown_tx, _) = broadcast::channel(4);

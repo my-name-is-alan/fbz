@@ -40,6 +40,24 @@ pub async fn authenticate_request_user(
         .map_err(|err| AppError::unauthorized(err.to_string()))
 }
 
+pub async fn authenticate_query_user(
+    state: &AppState,
+    query_user_id: Option<&str>,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<AuthenticatedUser, AppError> {
+    let user = authenticate_request_user(state, headers, uri).await?;
+    if let Some(query_user_id) = query_user_id
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    Ok(user)
+}
+
 pub(crate) fn access_token_from_request(
     headers: &HeaderMap,
     query: Option<&str>,

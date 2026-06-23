@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     error::Error,
     fmt::{Display, Formatter},
 };
@@ -361,40 +362,45 @@ impl MetadataService {
         .await
         .map_err(MetadataError::Database)?;
 
-        sqlx::query(
-            r#"
-            insert into media_external_ids (
-                media_item_id,
-                provider,
-                external_id
-            )
-            values ($1, $2, $3)
-            on conflict (media_item_id, provider) do update
-                set external_id = excluded.external_id
-            "#,
-        )
-        .bind(media_item_id)
-        .bind(found.provider.trim())
-        .bind(found.external_id.trim())
-        .execute(&mut *tx)
-        .await
-        .map_err(MetadataError::Database)?;
-
-        if !found.artwork.is_empty() {
+        for external_id in metadata_external_ids_for_match(found) {
             sqlx::query(
                 r#"
-                delete from artwork
-                where media_item_id = $1
-                  and source = $2
+                insert into media_external_ids (
+                    media_item_id,
+                    provider,
+                    external_id
+                )
+                values ($1, $2, $3)
+                on conflict (media_item_id, provider) do update
+                    set external_id = excluded.external_id
                 "#,
             )
             .bind(media_item_id)
-            .bind(found.provider.trim())
+            .bind(&external_id.0)
+            .bind(&external_id.1)
             .execute(&mut *tx)
             .await
             .map_err(MetadataError::Database)?;
+        }
+
+        if !found.artwork.is_empty() {
+            for source in metadata_artwork_sources_for_match(found) {
+                sqlx::query(
+                    r#"
+                    delete from artwork
+                    where media_item_id = $1
+                      and source = $2
+                    "#,
+                )
+                .bind(media_item_id)
+                .bind(source)
+                .execute(&mut *tx)
+                .await
+                .map_err(MetadataError::Database)?;
+            }
 
             for image in &found.artwork {
+                let source = metadata_artwork_source(found, image.source.as_deref());
                 sqlx::query(
                     r#"
                     insert into artwork (
@@ -409,7 +415,7 @@ impl MetadataService {
                 )
                 .bind(media_item_id)
                 .bind(image.artwork_type.trim())
-                .bind(found.provider.trim())
+                .bind(source)
                 .bind(image.remote_url.trim())
                 .bind(image.is_primary)
                 .execute(&mut *tx)
@@ -670,6 +676,61 @@ impl MetadataTarget {
     }
 }
 
+fn metadata_external_ids_for_match(found: &MetadataMatch) -> Vec<(String, String)> {
+    let mut seen_providers = BTreeSet::new();
+    let mut external_ids = Vec::new();
+
+    push_metadata_external_id(
+        &mut external_ids,
+        &mut seen_providers,
+        found.provider.as_str(),
+        found.external_id.as_str(),
+    );
+    for external_id in &found.external_ids {
+        push_metadata_external_id(
+            &mut external_ids,
+            &mut seen_providers,
+            external_id.provider.as_str(),
+            external_id.external_id.as_str(),
+        );
+    }
+
+    external_ids
+}
+
+fn push_metadata_external_id(
+    external_ids: &mut Vec<(String, String)>,
+    seen_providers: &mut BTreeSet<String>,
+    provider: &str,
+    external_id: &str,
+) {
+    let provider = provider.trim().to_ascii_lowercase();
+    let external_id = external_id.trim();
+    if provider.is_empty() || external_id.is_empty() || !seen_providers.insert(provider.clone()) {
+        return;
+    }
+
+    external_ids.push((provider, external_id.to_owned()));
+}
+
+fn metadata_artwork_sources_for_match(found: &MetadataMatch) -> Vec<String> {
+    let mut sources = BTreeSet::new();
+    for image in &found.artwork {
+        sources.insert(metadata_artwork_source(found, image.source.as_deref()));
+    }
+
+    sources.into_iter().collect()
+}
+
+fn metadata_artwork_source(found: &MetadataMatch, source: Option<&str>) -> String {
+    source
+        .and_then(|source| {
+            let source = source.trim().to_ascii_lowercase();
+            (!source.is_empty()).then_some(source)
+        })
+        .unwrap_or_else(|| found.provider.trim().to_ascii_lowercase())
+}
+
 impl Display for MetadataError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -686,7 +747,9 @@ impl Error for MetadataError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::metadata::provider::MetadataProviderAttemptStatus;
+    use crate::metadata::provider::{
+        MetadataArtwork, MetadataExternalId, MetadataProviderAttemptStatus,
+    };
 
     use super::*;
 
@@ -734,6 +797,86 @@ mod tests {
         assert_eq!(event.payload["providerAttempts"][0]["provider"], "tmdb");
         assert_eq!(event.payload["providerAttempts"][0]["status"], "matched");
         assert!(event.payload.get("mediaItemId").is_none());
+    }
+
+    #[test]
+    fn metadata_external_ids_preserve_primary_and_first_additional_provider() {
+        let found = MetadataMatch {
+            provider: " TMDB ".to_owned(),
+            external_id: " 42 ".to_owned(),
+            external_ids: vec![
+                MetadataExternalId {
+                    provider: "imdb".to_owned(),
+                    external_id: " tt1234567 ".to_owned(),
+                },
+                MetadataExternalId {
+                    provider: "IMDB".to_owned(),
+                    external_id: "tt7654321".to_owned(),
+                },
+                MetadataExternalId {
+                    provider: "tvdb".to_owned(),
+                    external_id: "121361".to_owned(),
+                },
+            ],
+            title: "Title".to_owned(),
+            original_title: None,
+            overview: None,
+            production_year: None,
+            premiere_date: None,
+            official_rating: None,
+            community_rating: None,
+            artwork: Vec::new(),
+            genres: Vec::new(),
+            studios: Vec::new(),
+            people: Vec::new(),
+        };
+
+        assert_eq!(
+            metadata_external_ids_for_match(&found),
+            vec![
+                ("tmdb".to_owned(), "42".to_owned()),
+                ("imdb".to_owned(), "tt1234567".to_owned()),
+                ("tvdb".to_owned(), "121361".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_artwork_sources_fallback_to_provider_and_keep_explicit_sources() {
+        let found = MetadataMatch {
+            provider: " TMDB ".to_owned(),
+            external_id: "42".to_owned(),
+            external_ids: Vec::new(),
+            title: "Title".to_owned(),
+            original_title: None,
+            overview: None,
+            production_year: None,
+            premiere_date: None,
+            official_rating: None,
+            community_rating: None,
+            artwork: vec![
+                MetadataArtwork {
+                    artwork_type: "poster".to_owned(),
+                    source: None,
+                    remote_url: "https://image.example/poster.jpg".to_owned(),
+                    is_primary: true,
+                },
+                MetadataArtwork {
+                    artwork_type: "backdrop".to_owned(),
+                    source: Some(" Fanart ".to_owned()),
+                    remote_url: "https://image.example/backdrop.jpg".to_owned(),
+                    is_primary: true,
+                },
+            ],
+            genres: Vec::new(),
+            studios: Vec::new(),
+            people: Vec::new(),
+        };
+
+        assert_eq!(
+            metadata_artwork_sources_for_match(&found),
+            vec!["fanart".to_owned(), "tmdb".to_owned()]
+        );
     }
 
     #[test]

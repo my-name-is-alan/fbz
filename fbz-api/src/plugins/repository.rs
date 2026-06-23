@@ -4,7 +4,7 @@ use std::{
 };
 
 use serde_json::Value;
-use sqlx::{Row, postgres::PgRow};
+use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 
 use crate::{
     db::DbPool,
@@ -47,6 +47,7 @@ pub struct PluginStateRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginSummaryRecord {
+    pub installation_id: String,
     pub plugin_id: String,
     pub package_id: Option<String>,
     pub package_version: Option<String>,
@@ -55,6 +56,22 @@ pub struct PluginSummaryRecord {
     pub enabled: bool,
     pub name: Option<String>,
     pub runtime: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginListFilter {
+    pub approval_status: Option<String>,
+    pub enabled: Option<bool>,
+    pub runtime: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginListPage {
+    pub records: Vec<PluginSummaryRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +93,39 @@ pub struct PluginPackageDetailRecord {
     pub hooks: Vec<PluginHookRecord>,
     pub menu: Vec<PluginMenuItemRecord>,
     pub schedules: Vec<PluginScheduleDefinitionRecord>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginPackageListFilter {
+    pub plugin_id: Option<String>,
+    pub package_status: Option<String>,
+    pub runtime: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginPackageListPage {
+    pub records: Vec<PluginPackageSummaryRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginPackageSummaryRecord {
+    pub package_id: String,
+    pub plugin_id: String,
+    pub package_version: String,
+    pub api_version: String,
+    pub runtime: String,
+    pub name: String,
+    pub package_status: String,
+    pub signature_present: bool,
+    pub approval_status: Option<String>,
+    pub enabled: Option<bool>,
+    pub active: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,9 +310,26 @@ impl PluginRepository {
     }
 
     pub async fn list_plugins(&self, limit: i64) -> Result<Vec<PluginSummaryRecord>, sqlx::Error> {
-        let rows = sqlx::query(
+        self.list_plugins_page(PluginListFilter {
+            approval_status: None,
+            enabled: None,
+            runtime: None,
+            cursor: None,
+            limit,
+        })
+        .await
+        .map(|page| page.records)
+    }
+
+    pub async fn list_plugins_page(
+        &self,
+        filter: PluginListFilter,
+    ) -> Result<PluginListPage, sqlx::Error> {
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
             select
+                pi.public_id::text as installation_id,
                 pi.plugin_id,
                 pi.enabled,
                 pi.approval_status,
@@ -272,18 +339,182 @@ impl PluginRepository {
                 pkg.name,
                 pkg.runtime
             from plugin_installations pi
-            left join plugin_packages pkg on pkg.id = pi.active_package_id
-            order by pi.updated_at desc, pi.id desc
-            limit $1
             "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        );
 
-        rows.into_iter()
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join plugin_installations cursor_installation
+                  on cursor_installation.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(
+            r#"
+            left join plugin_packages pkg on pkg.id = pi.active_package_id
+            where true
+            "#,
+        );
+
+        if let Some(approval_status) = filter.approval_status.as_deref() {
+            query.push(" and pi.approval_status = ");
+            query.push_bind(approval_status);
+        }
+
+        if let Some(enabled) = filter.enabled {
+            query.push(" and pi.enabled = ");
+            query.push_bind(enabled);
+        }
+
+        if let Some(runtime) = filter.runtime.as_deref() {
+            query.push(" and pkg.runtime = ");
+            query.push_bind(runtime);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (pi.updated_at, pi.id) < (cursor_installation.updated_at, cursor_installation.id)",
+            );
+        }
+
+        query.push(" order by pi.updated_at desc, pi.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
             .map(PluginSummaryRecord::from_row)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.installation_id.clone()))
+            .flatten();
+
+        Ok(PluginListPage {
+            records,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    pub async fn list_plugin_packages_page(
+        &self,
+        filter: PluginPackageListFilter,
+    ) -> Result<PluginPackageListPage, sqlx::Error> {
+        let fetch_limit = filter.limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select
+                pkg.public_id::text as package_id,
+                pkg.plugin_id,
+                pkg.package_version,
+                pkg.api_version,
+                pkg.runtime,
+                pkg.name,
+                pkg.package_status,
+                pkg.signature is not null as signature_present,
+                pi.approval_status,
+                pi.enabled,
+                (pi.active_package_id = pkg.id) as active,
+                pkg.created_at::text as created_at,
+                pkg.updated_at::text as updated_at
+            from plugin_packages pkg
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join plugin_packages cursor_package
+                  on cursor_package.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(
+            r#"
+            left join plugin_installations pi on pi.plugin_id = pkg.plugin_id
+            where true
+            "#,
+        );
+
+        if let Some(plugin_id) = filter.plugin_id.as_deref() {
+            query.push(" and pkg.plugin_id = ");
+            query.push_bind(plugin_id);
+        }
+
+        if let Some(package_status) = filter.package_status.as_deref() {
+            query.push(" and pkg.package_status = ");
+            query.push_bind(package_status);
+        }
+
+        if let Some(runtime) = filter.runtime.as_deref() {
+            query.push(" and pkg.runtime = ");
+            query.push_bind(runtime);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (pkg.created_at, pkg.id) < (cursor_package.created_at, cursor_package.id)",
+            );
+        }
+
+        query.push(" order by pkg.created_at desc, pkg.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > filter.limit;
+        let mut records = rows
+            .into_iter()
+            .map(PluginPackageSummaryRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(filter.limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.package_id.clone()))
+            .flatten();
+
+        Ok(PluginPackageListPage {
+            records,
+            next_cursor,
+            has_more,
+        })
     }
 
     pub async fn get_package_detail(
@@ -1364,6 +1595,7 @@ impl PluginStateRecord {
 impl PluginSummaryRecord {
     fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
+            installation_id: row.try_get("installation_id")?,
             plugin_id: row.try_get("plugin_id")?,
             package_id: row.try_get("package_id")?,
             package_version: row.try_get("package_version")?,
@@ -1372,6 +1604,26 @@ impl PluginSummaryRecord {
             enabled: row.try_get("enabled")?,
             name: row.try_get("name")?,
             runtime: row.try_get("runtime")?,
+        })
+    }
+}
+
+impl PluginPackageSummaryRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            package_id: row.try_get("package_id")?,
+            plugin_id: row.try_get("plugin_id")?,
+            package_version: row.try_get("package_version")?,
+            api_version: row.try_get("api_version")?,
+            runtime: row.try_get("runtime")?,
+            name: row.try_get("name")?,
+            package_status: row.try_get("package_status")?,
+            signature_present: row.try_get("signature_present")?,
+            approval_status: row.try_get("approval_status")?,
+            enabled: row.try_get("enabled")?,
+            active: row.try_get("active")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
         })
     }
 }
@@ -1532,6 +1784,72 @@ mod tests {
         assert!(PLUGIN_PACKAGE_LIFECYCLE_RULE.approve_switches_active_package);
         assert!(PLUGIN_PACKAGE_LIFECYCLE_RULE.activate_requires_approved_package);
         assert!(PLUGIN_PACKAGE_LIFECYCLE_RULE.reject_preserves_other_active_package);
+    }
+
+    #[test]
+    fn plugin_installation_admin_keyset_indexes_match_query_shape() {
+        let migration =
+            include_str!("../../migrations/0052_plugin_installation_admin_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_plugin_installations_recent_keyset"));
+        assert!(migration.contains("updated_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_installations_approval_recent_keyset"));
+        assert!(migration.contains("approval_status, updated_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_installations_enabled_recent_keyset"));
+        assert!(migration.contains("enabled, updated_at desc, id desc"));
+
+        let query_start = repository
+            .find("pub async fn list_plugins_page")
+            .expect("plugin page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn list_plugin_packages_page")
+            .map(|offset| query_start + offset)
+            .expect("plugin package list query should follow plugin list query");
+        let plugin_query = &repository[query_start..query_end];
+
+        assert!(plugin_query.contains("QueryBuilder::<Postgres>"));
+        assert!(plugin_query.contains("join plugin_installations cursor_installation"));
+        assert!(plugin_query.contains("(pi.updated_at, pi.id) <"));
+        assert!(plugin_query.contains("pi.approval_status ="));
+        assert!(plugin_query.contains("pi.enabled ="));
+        assert!(plugin_query.contains("pkg.runtime ="));
+        assert!(plugin_query.contains("order by pi.updated_at desc, pi.id desc"));
+        assert!(!plugin_query.contains("offset "));
+    }
+
+    #[test]
+    fn plugin_package_admin_keyset_indexes_match_query_shape() {
+        let migration =
+            include_str!("../../migrations/0051_plugin_package_admin_keyset_indexes.sql");
+        let repository = include_str!("repository.rs");
+
+        assert!(migration.contains("idx_plugin_packages_recent_keyset"));
+        assert!(migration.contains("created_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_packages_status_recent_keyset"));
+        assert!(migration.contains("package_status, created_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_packages_plugin_recent_keyset"));
+        assert!(migration.contains("plugin_id, created_at desc, id desc"));
+        assert!(migration.contains("idx_plugin_packages_runtime_recent_keyset"));
+        assert!(migration.contains("runtime, created_at desc, id desc"));
+
+        let query_start = repository
+            .find("pub async fn list_plugin_packages_page")
+            .expect("plugin package page query should exist");
+        let query_end = repository[query_start..]
+            .find("pub async fn get_package_detail")
+            .map(|offset| query_start + offset)
+            .expect("package detail query should follow package list query");
+        let package_query = &repository[query_start..query_end];
+
+        assert!(package_query.contains("QueryBuilder::<Postgres>"));
+        assert!(package_query.contains("join plugin_packages cursor_package"));
+        assert!(package_query.contains("(pkg.created_at, pkg.id) <"));
+        assert!(package_query.contains("pkg.plugin_id ="));
+        assert!(package_query.contains("pkg.package_status ="));
+        assert!(package_query.contains("pkg.runtime ="));
+        assert!(package_query.contains("order by pkg.created_at desc, pkg.id desc"));
+        assert!(!package_query.contains("offset "));
     }
 
     #[test]

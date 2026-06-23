@@ -6,14 +6,16 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    auth::service::AuthenticatedUser,
     compat::emby::dto::{BaseItemDto, BaseItemSource, QueryResultDto},
     error::AppError,
     library::repository::{ArtistListInput, ArtistRecord, LibraryRepository, SortDirection},
     state::AppState,
 };
 
-use super::{access::authenticate_request_user, items::normalized_parent_id};
+use super::{
+    access::authenticate_query_user,
+    items::{id_list_filter, normalized_parent_id, pipe_name_list_filter},
+};
 
 const DEFAULT_ARTISTS_LIMIT: u32 = 100;
 const MAX_ARTISTS_LIMIT: u32 = 200;
@@ -39,6 +41,8 @@ pub struct ArtistsQuery {
     pub name_starts_with_or_greater: Option<String>,
     pub artist_starts_with_or_greater: Option<String>,
     pub album_artist_starts_with_or_greater: Option<String>,
+    pub albums: Option<String>,
+    pub album_ids: Option<String>,
     pub fields: Option<String>,
     pub enable_images: Option<bool>,
 }
@@ -119,6 +123,8 @@ async fn list_artists(
             search_term: normalized_text_filter(query.search_term),
             name_starts_with: normalized_text_filter(query.name_starts_with),
             name_starts_with_or_greater,
+            album_names: pipe_name_list_filter(query.albums.as_deref()),
+            album_ids: id_list_filter(query.album_ids.as_deref()),
             sort_direction: sort_direction_from_query(query.sort_order.as_deref()),
         })
         .await
@@ -130,24 +136,6 @@ async fn list_artists(
         result.total_record_count,
         window.start_index as u32,
     )))
-}
-
-async fn authenticate_query_user(
-    state: &AppState,
-    query_user_id: Option<&str>,
-    headers: &HeaderMap,
-    uri: &Uri,
-) -> Result<AuthenticatedUser, AppError> {
-    let user = authenticate_request_user(state, headers, uri).await?;
-    if let Some(query_user_id) = query_user_id
-        && query_user_id != user.public_id
-    {
-        return Err(AppError::forbidden(
-            "authenticated user does not match query user",
-        ));
-    }
-
-    Ok(user)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +220,8 @@ mod tests {
             "NameStartsWith": "B",
             "ArtistStartsWithOrGreater": "A",
             "AlbumArtistStartsWithOrGreater": "C",
+            "Albums": "Low|Heroes",
+            "AlbumIds": "bbbbbbbb-0000-0000-0000-000000000001|invalid",
             "Fields": "PrimaryImageAspectRatio",
             "EnableImages": true
         }))
@@ -246,9 +236,34 @@ mod tests {
         assert_eq!(query.search_term.as_deref(), Some("bow"));
         assert!(is_album_artist_query(query.artist_type.as_deref()));
         assert_eq!(artist_prefix_filter(&query).as_deref(), Some("A"),);
+        assert_eq!(query.albums.as_deref(), Some("Low|Heroes"));
+        assert_eq!(
+            query.album_ids.as_deref(),
+            Some("bbbbbbbb-0000-0000-0000-000000000001|invalid")
+        );
         assert_eq!(
             sort_direction_from_query(query.sort_order.as_deref()),
             SortDirection::Desc
+        );
+    }
+
+    #[test]
+    fn artists_query_album_filters_reuse_item_filter_parsing() {
+        let query = ArtistsQuery {
+            albums: Some(" Low | Heroes |LOW ".to_owned()),
+            album_ids: Some("BBBBBBBB-0000-0000-0000-000000000001|bad".to_owned()),
+            ..ArtistsQuery::default()
+        };
+
+        let album_names = pipe_name_list_filter(query.albums.as_deref());
+        let album_ids = id_list_filter(query.album_ids.as_deref());
+
+        assert!(album_names.enabled);
+        assert_eq!(album_names.values, ["low", "heroes"]);
+        assert!(album_ids.enabled);
+        assert_eq!(
+            album_ids.values,
+            ["bbbbbbbb-0000-0000-0000-000000000001", "bad"]
         );
     }
 

@@ -3,6 +3,16 @@ use sqlx::Row;
 
 use crate::db::DbPool;
 
+const MARK_STREAM_MIRROR_FAILED_SQL: &str = r#"
+            update event_outbox
+            set stream_mirror_locked_by = null,
+                stream_mirror_locked_until = now() + ($4::bigint * interval '1 second'),
+                stream_mirror_last_error = $3
+            where id = $1
+              and stream_mirror_locked_by = $2
+              and stream_mirrored_at is null
+            "#;
+
 #[derive(Clone)]
 pub struct EventOutboxMirrorRepository {
     pool: DbPool,
@@ -115,23 +125,15 @@ impl EventOutboxMirrorRepository {
         event_id: i64,
         worker_id: &str,
         error: &str,
+        retry_delay_seconds: u64,
     ) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(
-            r#"
-            update event_outbox
-            set stream_mirror_locked_by = null,
-                stream_mirror_locked_until = null,
-                stream_mirror_last_error = $3
-            where id = $1
-              and stream_mirror_locked_by = $2
-              and stream_mirrored_at is null
-            "#,
-        )
-        .bind(event_id)
-        .bind(worker_id)
-        .bind(truncate_error(error))
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query(MARK_STREAM_MIRROR_FAILED_SQL)
+            .bind(event_id)
+            .bind(worker_id)
+            .bind(truncate_error(error))
+            .bind(i64::try_from(retry_delay_seconds).unwrap_or(i64::MAX))
+            .execute(&self.pool)
+            .await?;
 
         Ok(result.rows_affected())
     }
@@ -169,5 +171,21 @@ mod tests {
         let truncated = truncate_error(&error);
 
         assert_eq!(truncated.len(), 2_000);
+    }
+
+    #[test]
+    fn stream_mirror_failure_defers_retry_with_locked_until() {
+        let normalized = MARK_STREAM_MIRROR_FAILED_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(normalized.contains("stream_mirror_locked_by = null"));
+        assert!(
+            normalized.contains(
+                "stream_mirror_locked_until = now() + ($4::bigint * interval '1 second')"
+            )
+        );
+        assert!(!normalized.contains("stream_mirror_locked_until = null"));
     }
 }

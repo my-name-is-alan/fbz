@@ -2,11 +2,14 @@ use std::{
     collections::BTreeSet,
     error::Error,
     fmt::{Display, Formatter},
+    sync::Arc,
     time::Duration,
+    time::Instant,
 };
 
-use reqwest::{Client, Proxy};
+use reqwest::{Client, Proxy, Url};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config::{MetadataConfig, ProxyConfig};
 
@@ -17,11 +20,46 @@ const MAX_METADATA_PEOPLE_ITEMS: usize = 512;
 const MAX_METADATA_PERSON_NAME_LEN: usize = 256;
 const MAX_METADATA_PERSON_ROLE_NAME_LEN: usize = 128;
 const MAX_METADATA_PERSON_SORT_ORDER: i32 = 1_000_000;
+const MAX_METADATA_EXTERNAL_ID_LEN: usize = 128;
+const TVDB_TOKEN_CACHE_SECONDS: u64 = 25 * 24 * 60 * 60;
+const MAX_FANART_IMAGES: usize = 64;
+const FANART_MOVIE_FIELDS: &[(&str, &str)] = &[
+    ("movieposter", "poster"),
+    ("moviebackground", "backdrop"),
+    ("hdmovielogo", "logo"),
+    ("movielogo", "logo"),
+    ("moviethumb", "thumb"),
+    ("moviebanner", "banner"),
+    ("moviedisc", "disc"),
+    ("hdmovieclearart", "thumb"),
+    ("movieart", "thumb"),
+];
+const FANART_TV_FIELDS: &[(&str, &str)] = &[
+    ("tvposter", "poster"),
+    ("seasonposter", "poster"),
+    ("showbackground", "backdrop"),
+    ("hdtvlogo", "logo"),
+    ("clearlogo", "logo"),
+    ("tvthumb", "thumb"),
+    ("seasonthumb", "thumb"),
+    ("tvbanner", "banner"),
+    ("seasonbanner", "banner"),
+    ("hdclearart", "thumb"),
+    ("characterart", "thumb"),
+];
 
 #[derive(Clone)]
 pub struct MetadataProviderClient {
     client: Client,
     metadata: MetadataConfig,
+    tvdb_token: Arc<std::sync::RwLock<Option<CachedTvdbToken>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedTvdbToken {
+    api_key: String,
+    token: String,
+    expires_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +75,7 @@ pub struct MetadataLookup {
 pub struct MetadataMatch {
     pub provider: String,
     pub external_id: String,
+    pub external_ids: Vec<MetadataExternalId>,
     pub title: String,
     pub original_title: Option<String>,
     pub overview: Option<String>,
@@ -53,8 +92,15 @@ pub struct MetadataMatch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MetadataArtwork {
     pub artwork_type: String,
+    pub source: Option<String>,
     pub remote_url: String,
     pub is_primary: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetadataExternalId {
+    pub provider: String,
+    pub external_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +170,11 @@ impl MetadataProviderClient {
             .build()
             .map_err(|err| MetadataProviderError::Client(err.to_string()))?;
 
-        Ok(Self { client, metadata })
+        Ok(Self {
+            client,
+            metadata,
+            tvdb_token: Arc::new(std::sync::RwLock::new(None)),
+        })
     }
 
     pub async fn match_item(
@@ -141,10 +191,18 @@ impl MetadataProviderClient {
         input: &MetadataLookup,
     ) -> Result<MetadataLookupReport, MetadataProviderError> {
         let mut attempts = Vec::new();
+        let mut matched = None;
 
         for provider in normalized_providers(&self.metadata.providers) {
             match provider.as_str() {
                 "tmdb" => {
+                    if matched.is_some() {
+                        attempts.push(MetadataProviderAttempt::skipped(
+                            provider,
+                            "base metadata match already exists",
+                        ));
+                        continue;
+                    }
                     let Some(token) = self.metadata.tmdb_access_token.as_deref() else {
                         attempts.push(MetadataProviderAttempt::skipped(
                             provider,
@@ -163,13 +221,10 @@ impl MetadataProviderClient {
                     match self.search_tmdb(input, token, search_kind).await {
                         Ok(Some(found)) => {
                             attempts.push(MetadataProviderAttempt::matched(
-                                provider,
+                                provider.clone(),
                                 found.external_id.clone(),
                             ));
-                            return Ok(MetadataLookupReport {
-                                matched: Some(found),
-                                attempts,
-                            });
+                            matched = Some(found);
                         }
                         Ok(None) => attempts.push(MetadataProviderAttempt::not_matched(
                             provider,
@@ -182,14 +237,85 @@ impl MetadataProviderClient {
                         }
                     }
                 }
-                "tvdb" => attempts.push(MetadataProviderAttempt::skipped(
-                    provider,
-                    "TVDB provider execution is not implemented yet",
-                )),
-                "fanart" => attempts.push(MetadataProviderAttempt::skipped(
-                    provider,
-                    "Fanart provider execution is not implemented yet",
-                )),
+                "tvdb" => {
+                    if matched.is_some() {
+                        attempts.push(MetadataProviderAttempt::skipped(
+                            provider,
+                            "base metadata match already exists",
+                        ));
+                        continue;
+                    }
+                    let Some(api_key) = self.metadata.tvdb_api_key.as_deref() else {
+                        attempts.push(MetadataProviderAttempt::skipped(
+                            provider,
+                            "missing TVDB API key",
+                        ));
+                        continue;
+                    };
+                    let Some(search_kind) = tvdb_search_kind(&input.item_type) else {
+                        attempts.push(MetadataProviderAttempt::skipped(
+                            provider,
+                            format!("unsupported item type `{}`", input.item_type),
+                        ));
+                        continue;
+                    };
+
+                    match self.search_tvdb(input, api_key, search_kind).await {
+                        Ok(Some(found)) => {
+                            attempts.push(MetadataProviderAttempt::matched(
+                                provider.clone(),
+                                found.external_id.clone(),
+                            ));
+                            matched = Some(found);
+                        }
+                        Ok(None) => attempts.push(MetadataProviderAttempt::not_matched(
+                            provider,
+                            "no TVDB search result",
+                        )),
+                        Err(err) => {
+                            attempts
+                                .push(MetadataProviderAttempt::failed(provider, err.to_string()));
+                            return Err(err);
+                        }
+                    }
+                }
+                "fanart" => {
+                    let Some(token) = self.metadata.fanart_api_key.as_deref() else {
+                        attempts.push(MetadataProviderAttempt::skipped(
+                            provider,
+                            "missing Fanart API key",
+                        ));
+                        continue;
+                    };
+                    let Some(found) = matched.as_mut() else {
+                        attempts.push(MetadataProviderAttempt::skipped(
+                            provider,
+                            "requires a matched metadata item",
+                        ));
+                        continue;
+                    };
+
+                    match self.search_fanart(input, found, token).await {
+                        Ok(FanartSearchOutcome::Matched {
+                            external_id,
+                            artwork,
+                        }) => {
+                            attempts.push(MetadataProviderAttempt::matched(provider, external_id));
+                            found.artwork.extend(artwork);
+                        }
+                        Ok(FanartSearchOutcome::NotMatched(message)) => {
+                            attempts.push(MetadataProviderAttempt::not_matched(provider, message))
+                        }
+                        Ok(FanartSearchOutcome::Skipped(message)) => {
+                            attempts.push(MetadataProviderAttempt::skipped(provider, message))
+                        }
+                        Err(err) => {
+                            attempts
+                                .push(MetadataProviderAttempt::failed(provider, err.to_string()));
+                            return Err(err);
+                        }
+                    }
+                }
                 _ => attempts.push(MetadataProviderAttempt::skipped(
                     provider,
                     "unsupported metadata provider",
@@ -197,10 +323,7 @@ impl MetadataProviderClient {
             }
         }
 
-        Ok(MetadataLookupReport {
-            matched: None,
-            attempts,
-        })
+        Ok(MetadataLookupReport { matched, attempts })
     }
 
     async fn search_tmdb(
@@ -292,6 +415,139 @@ impl MetadataProviderClient {
             .await
             .map_err(MetadataProviderError::Http)
     }
+
+    async fn search_tvdb(
+        &self,
+        input: &MetadataLookup,
+        api_key: &str,
+        search_kind: TvdbSearchKind,
+    ) -> Result<Option<MetadataMatch>, MetadataProviderError> {
+        let token = self.tvdb_bearer_token(api_key).await?;
+        let mut query = vec![
+            ("query", input.title.clone()),
+            ("type", search_kind.as_query_value().to_owned()),
+            ("limit", "10".to_owned()),
+        ];
+        if let Some(year) = input.production_year {
+            query.push(("year", year.to_string()));
+        }
+
+        let response = self
+            .client
+            .get(tvdb_search_url(&self.metadata.tvdb_api_base_url))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(MetadataProviderError::Http)?
+            .error_for_status()
+            .map_err(MetadataProviderError::Http)?
+            .json::<TvdbSearchResponse>()
+            .await
+            .map_err(MetadataProviderError::Http)?;
+
+        Ok(response
+            .data
+            .into_iter()
+            .filter(|result| tvdb_search_result_matches_kind(result, search_kind))
+            .find_map(tvdb_result_to_match))
+    }
+
+    async fn tvdb_bearer_token(&self, api_key: &str) -> Result<String, MetadataProviderError> {
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(MetadataProviderError::Client(
+                "TVDB API key is empty".to_owned(),
+            ));
+        }
+
+        if let Ok(cache) = self.tvdb_token.read() {
+            if let Some(cache) = cache.as_ref() {
+                if cache.api_key == api_key && cache.expires_at > Instant::now() {
+                    return Ok(cache.token.clone());
+                }
+            }
+        }
+
+        let response = self
+            .client
+            .post(tvdb_login_url(&self.metadata.tvdb_api_base_url))
+            .json(&TvdbLoginRequest { apikey: api_key })
+            .send()
+            .await
+            .map_err(MetadataProviderError::Http)?
+            .error_for_status()
+            .map_err(MetadataProviderError::Http)?
+            .json::<TvdbLoginResponse>()
+            .await
+            .map_err(MetadataProviderError::Http)?;
+
+        let token = response
+            .data
+            .and_then(|data| normalize_bounded_text(data.token.as_deref(), 4096))
+            .ok_or_else(|| {
+                MetadataProviderError::Client("TVDB login response missing token".to_owned())
+            })?;
+
+        if let Ok(mut cache) = self.tvdb_token.write() {
+            *cache = Some(CachedTvdbToken {
+                api_key: api_key.to_owned(),
+                token: token.clone(),
+                expires_at: Instant::now() + Duration::from_secs(TVDB_TOKEN_CACHE_SECONDS),
+            });
+        }
+
+        Ok(token)
+    }
+
+    async fn search_fanart(
+        &self,
+        input: &MetadataLookup,
+        found: &MetadataMatch,
+        token: &str,
+    ) -> Result<FanartSearchOutcome, MetadataProviderError> {
+        let Some(kind) = fanart_kind(&input.item_type) else {
+            return Ok(FanartSearchOutcome::Skipped(format!(
+                "unsupported item type `{}`",
+                input.item_type
+            )));
+        };
+        let Some(external_id) = fanart_external_id(found, kind) else {
+            return Ok(FanartSearchOutcome::Skipped(format!(
+                "missing {} external id",
+                kind.required_provider()
+            )));
+        };
+
+        let response = self
+            .client
+            .get(fanart_url(
+                &self.metadata.fanart_api_base_url,
+                kind,
+                &external_id,
+            ))
+            .query(&[("api_key", token)])
+            .send()
+            .await
+            .map_err(MetadataProviderError::Http)?
+            .error_for_status()
+            .map_err(MetadataProviderError::Http)?
+            .json::<Value>()
+            .await
+            .map_err(MetadataProviderError::Http)?;
+
+        let artwork = fanart_artwork(response, kind, input.language.as_deref());
+        if artwork.is_empty() {
+            return Ok(FanartSearchOutcome::NotMatched(
+                "no supported Fanart artwork".to_owned(),
+            ));
+        }
+
+        Ok(FanartSearchOutcome::Matched {
+            external_id,
+            artwork,
+        })
+    }
 }
 
 impl MetadataProviderAttempt {
@@ -359,8 +615,8 @@ fn tmdb_detail_url(base_url: &str, search_kind: TmdbSearchKind, id: i64) -> Stri
 
 fn tmdb_detail_appends(search_kind: TmdbSearchKind) -> String {
     match search_kind {
-        TmdbSearchKind::Movie => "credits,release_dates",
-        TmdbSearchKind::Tv => "credits,content_ratings",
+        TmdbSearchKind::Movie => "credits,release_dates,external_ids",
+        TmdbSearchKind::Tv => "credits,content_ratings,external_ids",
     }
     .to_owned()
 }
@@ -399,6 +655,7 @@ fn tmdb_result_to_match(result: TmdbSearchResult, image_base_url: &str) -> Optio
     if let Some(remote_url) = tmdb_image_url(image_base_url, result.poster_path.as_deref()) {
         artwork.push(MetadataArtwork {
             artwork_type: "poster".to_owned(),
+            source: None,
             remote_url,
             is_primary: true,
         });
@@ -406,6 +663,7 @@ fn tmdb_result_to_match(result: TmdbSearchResult, image_base_url: &str) -> Optio
     if let Some(remote_url) = tmdb_image_url(image_base_url, result.backdrop_path.as_deref()) {
         artwork.push(MetadataArtwork {
             artwork_type: "backdrop".to_owned(),
+            source: None,
             remote_url,
             is_primary: true,
         });
@@ -414,6 +672,7 @@ fn tmdb_result_to_match(result: TmdbSearchResult, image_base_url: &str) -> Optio
     Some(MetadataMatch {
         provider: "tmdb".to_owned(),
         external_id: result.id.to_string(),
+        external_ids: Vec::new(),
         title,
         original_title,
         overview: result
@@ -470,6 +729,7 @@ fn apply_tmdb_detail(
         found.community_rating = Some(rating.clamp(0.0, 10.0));
     }
     found.official_rating = official_rating;
+    add_tmdb_external_ids(found, detail.external_ids.as_ref(), search_kind);
 
     let detail_artwork = tmdb_artwork(
         image_base_url,
@@ -485,6 +745,29 @@ fn apply_tmdb_detail(
     found.people = tmdb_people(detail.credits);
 }
 
+fn add_tmdb_external_ids(
+    found: &mut MetadataMatch,
+    external_ids: Option<&TmdbExternalIds>,
+    search_kind: TmdbSearchKind,
+) {
+    let Some(external_ids) = external_ids else {
+        return;
+    };
+
+    if let Some(imdb_id) = external_ids
+        .imdb_id
+        .as_deref()
+        .and_then(|value| normalize_external_id("imdb", value))
+    {
+        push_metadata_external_id(&mut found.external_ids, "imdb", imdb_id);
+    }
+    if matches!(search_kind, TmdbSearchKind::Tv) {
+        if let Some(tvdb_id) = external_ids.tvdb_id.filter(|id| *id > 0) {
+            push_metadata_external_id(&mut found.external_ids, "tvdb", tvdb_id.to_string());
+        }
+    }
+}
+
 fn tmdb_artwork(
     image_base_url: &str,
     poster_path: Option<&str>,
@@ -494,6 +777,7 @@ fn tmdb_artwork(
     if let Some(remote_url) = tmdb_image_url(image_base_url, poster_path) {
         artwork.push(MetadataArtwork {
             artwork_type: "poster".to_owned(),
+            source: None,
             remote_url,
             is_primary: true,
         });
@@ -501,6 +785,7 @@ fn tmdb_artwork(
     if let Some(remote_url) = tmdb_image_url(image_base_url, backdrop_path) {
         artwork.push(MetadataArtwork {
             artwork_type: "backdrop".to_owned(),
+            source: None,
             remote_url,
             is_primary: true,
         });
@@ -522,6 +807,322 @@ fn tmdb_image_url(base_url: &str, path: Option<&str>) -> Option<String> {
         base_url.trim_end_matches('/'),
         path
     ))
+}
+
+fn tvdb_login_url(base_url: &str) -> String {
+    format!("{}/login", base_url.trim_end_matches('/'))
+}
+
+fn tvdb_search_url(base_url: &str) -> String {
+    format!("{}/search", base_url.trim_end_matches('/'))
+}
+
+fn tvdb_search_kind(item_type: &str) -> Option<TvdbSearchKind> {
+    match item_type {
+        "movie" => Some(TvdbSearchKind::Movie),
+        "series" | "season" | "episode" => Some(TvdbSearchKind::Series),
+        _ => None,
+    }
+}
+
+fn tvdb_search_result_matches_kind(result: &TvdbSearchResult, search_kind: TvdbSearchKind) -> bool {
+    result
+        .entity_type
+        .as_deref()
+        .map(|value| {
+            value
+                .trim()
+                .eq_ignore_ascii_case(search_kind.as_query_value())
+        })
+        .unwrap_or(true)
+}
+
+fn tvdb_result_to_match(result: TvdbSearchResult) -> Option<MetadataMatch> {
+    let external_id = result
+        .tvdb_id
+        .as_deref()
+        .or(result.id.as_deref())
+        .and_then(|value| normalize_external_id("tvdb", value))?;
+    let title = result
+        .title
+        .or(result.name_translated)
+        .or(result.name)
+        .and_then(normalize_text_title)?;
+    let premiere_date = result.first_air_time.and_then(normalize_tvdb_date);
+    let production_year = premiere_date
+        .as_deref()
+        .and_then(|date| date.get(..4))
+        .and_then(|year| year.parse::<i32>().ok())
+        .or_else(|| result.year.and_then(normalize_tvdb_year));
+
+    Some(MetadataMatch {
+        provider: "tvdb".to_owned(),
+        external_id,
+        external_ids: tvdb_remote_external_ids(result.remote_ids),
+        title,
+        original_title: None,
+        overview: result.overview.and_then(normalize_overview),
+        production_year,
+        premiere_date,
+        official_rating: None,
+        community_rating: None,
+        artwork: tvdb_artwork(result.image_url, result.poster, result.thumbnail),
+        genres: Vec::new(),
+        studios: Vec::new(),
+        people: Vec::new(),
+    })
+}
+
+fn tvdb_artwork(
+    image_url: Option<String>,
+    poster: Option<String>,
+    thumbnail: Option<String>,
+) -> Vec<MetadataArtwork> {
+    let mut seen_urls = BTreeSet::new();
+    let mut artwork: Vec<MetadataArtwork> = Vec::new();
+    for (artwork_type, url) in [
+        ("poster", image_url),
+        ("poster", poster),
+        ("thumb", thumbnail),
+    ] {
+        let Some(remote_url) = url.as_deref().and_then(safe_remote_image_url) else {
+            continue;
+        };
+        if !seen_urls.insert(remote_url.clone()) {
+            continue;
+        }
+        artwork.push(MetadataArtwork {
+            artwork_type: artwork_type.to_owned(),
+            source: None,
+            remote_url,
+            is_primary: !artwork.iter().any(|item| item.artwork_type == artwork_type),
+        });
+    }
+    artwork
+}
+
+fn tvdb_remote_external_ids(remote_ids: Vec<TvdbRemoteId>) -> Vec<MetadataExternalId> {
+    let mut external_ids = Vec::new();
+    for remote_id in remote_ids {
+        let Some(provider) = tvdb_remote_id_provider(remote_id.source_name.as_deref()) else {
+            continue;
+        };
+        let Some(external_id) = remote_id
+            .id
+            .as_deref()
+            .and_then(|value| normalize_external_id(provider, value))
+        else {
+            continue;
+        };
+        push_metadata_external_id(&mut external_ids, provider, external_id);
+    }
+    external_ids
+}
+
+fn tvdb_remote_id_provider(source_name: Option<&str>) -> Option<&'static str> {
+    let source_name = source_name?.trim().to_ascii_lowercase();
+    if source_name.contains("imdb") {
+        Some("imdb")
+    } else if source_name.contains("tmdb")
+        || source_name.contains("themoviedb")
+        || source_name.contains("the movie db")
+    {
+        Some("tmdb")
+    } else if source_name.contains("eidr") {
+        Some("eidr")
+    } else {
+        None
+    }
+}
+
+fn normalize_tvdb_date(value: String) -> Option<String> {
+    let value = value.trim();
+    value
+        .get(..10)
+        .map(str::to_owned)
+        .filter(|date| normalize_tmdb_date(date.clone()).is_some())
+}
+
+fn normalize_tvdb_year(value: String) -> Option<i32> {
+    let value = value.trim();
+    (value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<i32>().ok())
+        .flatten()
+}
+
+fn safe_remote_image_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(char::is_whitespace) {
+        return None;
+    }
+    let url = Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+
+    Some(url.to_string())
+}
+
+fn fanart_url(base_url: &str, kind: FanartKind, external_id: &str) -> String {
+    format!(
+        "{}/{}/{}",
+        base_url.trim_end_matches('/'),
+        kind.as_path(),
+        external_id.trim()
+    )
+}
+
+fn fanart_kind(item_type: &str) -> Option<FanartKind> {
+    match item_type {
+        "movie" => Some(FanartKind::Movie),
+        "series" | "season" | "episode" => Some(FanartKind::Tv),
+        _ => None,
+    }
+}
+
+fn fanart_external_id(found: &MetadataMatch, kind: FanartKind) -> Option<String> {
+    metadata_external_id(found, kind.required_provider())
+}
+
+fn metadata_external_id(found: &MetadataMatch, provider: &str) -> Option<String> {
+    if found.provider.trim().eq_ignore_ascii_case(provider) {
+        return normalize_external_id(provider, &found.external_id);
+    }
+
+    found
+        .external_ids
+        .iter()
+        .find(|external_id| external_id.provider.trim().eq_ignore_ascii_case(provider))
+        .and_then(|external_id| normalize_external_id(provider, &external_id.external_id))
+}
+
+fn fanart_artwork(
+    response: Value,
+    kind: FanartKind,
+    language: Option<&str>,
+) -> Vec<MetadataArtwork> {
+    let Some(response) = response.as_object() else {
+        return Vec::new();
+    };
+    let preferred_language = language.and_then(fanart_preferred_language);
+    let mut seen_urls = BTreeSet::new();
+    let mut primary_types = BTreeSet::new();
+    let mut artwork = Vec::new();
+
+    for (field, artwork_type) in kind.fields() {
+        let Some(values) = response.get(*field).and_then(Value::as_array) else {
+            continue;
+        };
+        let mut candidates = fanart_candidates(values, preferred_language.as_deref());
+        for candidate in candidates.drain(..) {
+            if artwork.len() >= MAX_FANART_IMAGES {
+                return artwork;
+            }
+            let Some(remote_url) = fanart_image_url(candidate.url.as_str()) else {
+                continue;
+            };
+            if !seen_urls.insert(remote_url.clone()) {
+                continue;
+            }
+            let is_primary = primary_types.insert((*artwork_type).to_owned());
+            artwork.push(MetadataArtwork {
+                artwork_type: (*artwork_type).to_owned(),
+                source: Some("fanart".to_owned()),
+                remote_url,
+                is_primary,
+            });
+        }
+    }
+
+    artwork
+}
+
+fn fanart_candidates(values: &[Value], preferred_language: Option<&str>) -> Vec<FanartCandidate> {
+    let mut candidates = values
+        .iter()
+        .filter_map(|value| {
+            let url = value.get("url").and_then(Value::as_str)?.trim();
+            (!url.is_empty()).then(|| FanartCandidate {
+                url: url.to_owned(),
+                language_rank: fanart_language_rank(
+                    value.get("lang").and_then(Value::as_str),
+                    preferred_language,
+                ),
+                likes: fanart_likes(value.get("likes").and_then(Value::as_str)),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        left.language_rank
+            .cmp(&right.language_rank)
+            .then_with(|| right.likes.cmp(&left.likes))
+            .then_with(|| left.url.cmp(&right.url))
+    });
+    candidates
+}
+
+fn fanart_image_url(value: &str) -> Option<String> {
+    safe_remote_image_url(value)
+}
+
+fn fanart_preferred_language(value: &str) -> Option<String> {
+    normalize_language(value).and_then(|language| {
+        language
+            .split('-')
+            .next()
+            .map(|language| language.to_ascii_lowercase())
+            .filter(|language| !language.is_empty())
+    })
+}
+
+fn fanart_language_rank(language: Option<&str>, preferred_language: Option<&str>) -> i32 {
+    let language = language.unwrap_or_default().trim().to_ascii_lowercase();
+    if preferred_language.is_some_and(|preferred| language == preferred) {
+        return 0;
+    }
+    match language.as_str() {
+        "en" => 1,
+        "" | "00" => 2,
+        _ => 3,
+    }
+}
+
+fn fanart_likes(value: Option<&str>) -> i32 {
+    value
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or_default()
+        .max(0)
+}
+
+fn push_metadata_external_id(
+    external_ids: &mut Vec<MetadataExternalId>,
+    provider: &str,
+    external_id: String,
+) {
+    let provider = provider.trim().to_ascii_lowercase();
+    let Some(external_id) = normalize_external_id(&provider, external_id.as_str()) else {
+        return;
+    };
+    if external_ids
+        .iter()
+        .any(|value| value.provider == provider && value.external_id == external_id)
+    {
+        return;
+    }
+
+    external_ids.push(MetadataExternalId {
+        provider,
+        external_id,
+    });
+}
+
+fn normalize_external_id(_provider: &str, value: &str) -> Option<String> {
+    normalize_bounded_text(Some(value), MAX_METADATA_EXTERNAL_ID_LEN)
 }
 
 fn tmdb_genres(values: Vec<TmdbGenre>) -> Vec<MetadataNamedValue> {
@@ -836,6 +1437,67 @@ impl TmdbSearchKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TvdbSearchKind {
+    Movie,
+    Series,
+}
+
+impl TvdbSearchKind {
+    fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Movie => "movie",
+            Self::Series => "series",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FanartKind {
+    Movie,
+    Tv,
+}
+
+impl FanartKind {
+    fn as_path(self) -> &'static str {
+        match self {
+            Self::Movie => "movies",
+            Self::Tv => "tv",
+        }
+    }
+
+    fn required_provider(self) -> &'static str {
+        match self {
+            Self::Movie => "tmdb",
+            Self::Tv => "tvdb",
+        }
+    }
+
+    fn fields(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Movie => FANART_MOVIE_FIELDS,
+            Self::Tv => FANART_TV_FIELDS,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FanartCandidate {
+    url: String,
+    language_rank: i32,
+    likes: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum FanartSearchOutcome {
+    Matched {
+        external_id: String,
+        artwork: Vec<MetadataArtwork>,
+    },
+    NotMatched(String),
+    Skipped(String),
+}
+
 #[derive(Debug, Deserialize)]
 struct TmdbSearchResponse {
     #[serde(default)]
@@ -876,6 +1538,7 @@ struct TmdbDetailResponse {
     credits: Option<TmdbCredits>,
     release_dates: Option<TmdbMovieReleaseDates>,
     content_ratings: Option<TmdbTvContentRatings>,
+    external_ids: Option<TmdbExternalIds>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -942,6 +1605,59 @@ struct TmdbTvContentRating {
     rating: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TmdbExternalIds {
+    imdb_id: Option<String>,
+    tvdb_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TvdbLoginRequest<'a> {
+    apikey: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvdbLoginResponse {
+    data: Option<TvdbLoginData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvdbLoginData {
+    token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvdbSearchResponse {
+    #[serde(default)]
+    data: Vec<TvdbSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvdbSearchResult {
+    id: Option<String>,
+    tvdb_id: Option<String>,
+    title: Option<String>,
+    name: Option<String>,
+    name_translated: Option<String>,
+    overview: Option<String>,
+    first_air_time: Option<String>,
+    image_url: Option<String>,
+    poster: Option<String>,
+    thumbnail: Option<String>,
+    #[serde(default)]
+    remote_ids: Vec<TvdbRemoteId>,
+    #[serde(rename = "type")]
+    entity_type: Option<String>,
+    year: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvdbRemoteId {
+    id: Option<String>,
+    #[serde(rename = "sourceName")]
+    source_name: Option<String>,
+}
+
 impl Display for MetadataProviderError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -977,11 +1693,27 @@ mod tests {
         );
         assert_eq!(
             tmdb_detail_appends(TmdbSearchKind::Movie),
-            "credits,release_dates"
+            "credits,release_dates,external_ids"
         );
         assert_eq!(
             tmdb_detail_appends(TmdbSearchKind::Tv),
-            "credits,content_ratings"
+            "credits,content_ratings,external_ids"
+        );
+        assert_eq!(
+            tvdb_login_url("https://tvdb.example.test/v4/"),
+            "https://tvdb.example.test/v4/login"
+        );
+        assert_eq!(
+            tvdb_search_url("https://tvdb.example.test/v4"),
+            "https://tvdb.example.test/v4/search"
+        );
+        assert_eq!(
+            fanart_url("https://fanart.example.test/v3/", FanartKind::Movie, "42"),
+            "https://fanart.example.test/v3/movies/42"
+        );
+        assert_eq!(
+            fanart_url("https://fanart.example.test/v3", FanartKind::Tv, "121361"),
+            "https://fanart.example.test/v3/tv/121361"
         );
     }
 
@@ -1027,10 +1759,98 @@ mod tests {
     }
 
     #[test]
+    fn tvdb_result_maps_series_metadata_and_remote_ids() {
+        let mapped = tvdb_result_to_match(TvdbSearchResult {
+            id: Some("series-121361".to_owned()),
+            tvdb_id: Some("121361".to_owned()),
+            title: None,
+            name: Some("Fallback Title".to_owned()),
+            name_translated: Some(" Translated Title ".to_owned()),
+            overview: Some(" Overview ".to_owned()),
+            first_air_time: Some("2011-04-17T00:00:00Z".to_owned()),
+            image_url: Some("https://art.example.test/poster.jpg".to_owned()),
+            poster: Some("https://art.example.test/poster.jpg".to_owned()),
+            thumbnail: Some("https://art.example.test/thumb.jpg".to_owned()),
+            remote_ids: vec![
+                TvdbRemoteId {
+                    id: Some("tt0944947".to_owned()),
+                    source_name: Some("IMDB".to_owned()),
+                },
+                TvdbRemoteId {
+                    id: Some("1399".to_owned()),
+                    source_name: Some("TheMovieDB.com".to_owned()),
+                },
+                TvdbRemoteId {
+                    id: Some("ignored".to_owned()),
+                    source_name: Some("Unknown".to_owned()),
+                },
+            ],
+            entity_type: Some("series".to_owned()),
+            year: Some("2010".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(mapped.provider, "tvdb");
+        assert_eq!(mapped.external_id, "121361");
+        assert_eq!(mapped.title, "Translated Title");
+        assert_eq!(mapped.overview.as_deref(), Some("Overview"));
+        assert_eq!(mapped.production_year, Some(2011));
+        assert_eq!(mapped.premiere_date.as_deref(), Some("2011-04-17"));
+        assert_eq!(
+            mapped.external_ids,
+            vec![
+                MetadataExternalId {
+                    provider: "imdb".to_owned(),
+                    external_id: "tt0944947".to_owned(),
+                },
+                MetadataExternalId {
+                    provider: "tmdb".to_owned(),
+                    external_id: "1399".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(mapped.artwork.len(), 2);
+        assert_eq!(mapped.artwork[0].artwork_type, "poster");
+        assert_eq!(
+            mapped.artwork[0].remote_url,
+            "https://art.example.test/poster.jpg"
+        );
+        assert_eq!(mapped.artwork[1].artwork_type, "thumb");
+    }
+
+    #[test]
+    fn tvdb_result_rejects_wrong_kind_and_unsafe_artwork() {
+        let result = TvdbSearchResult {
+            id: Some("movie-42".to_owned()),
+            tvdb_id: Some("42".to_owned()),
+            title: Some("Movie".to_owned()),
+            name: None,
+            name_translated: None,
+            overview: None,
+            first_air_time: None,
+            image_url: Some("https://user:pass@art.example.test/poster.jpg".to_owned()),
+            poster: Some("file:///tmp/poster.jpg".to_owned()),
+            thumbnail: Some("https://art.example.test/has space.jpg".to_owned()),
+            remote_ids: Vec::new(),
+            entity_type: Some("movie".to_owned()),
+            year: Some("2026".to_owned()),
+        };
+
+        assert!(!tvdb_search_result_matches_kind(
+            &result,
+            TvdbSearchKind::Series
+        ));
+        let mapped = tvdb_result_to_match(result).unwrap();
+        assert_eq!(mapped.production_year, Some(2026));
+        assert!(mapped.artwork.is_empty());
+    }
+
+    #[test]
     fn tmdb_detail_enriches_genres_people_and_artwork() {
         let mut mapped = MetadataMatch {
             provider: "tmdb".to_owned(),
             external_id: "42".to_owned(),
+            external_ids: Vec::new(),
             title: "Search Title".to_owned(),
             original_title: None,
             overview: None,
@@ -1076,6 +1896,10 @@ mod tests {
                     ],
                 }),
                 content_ratings: None,
+                external_ids: Some(TmdbExternalIds {
+                    imdb_id: Some(" tt1234567 ".to_owned()),
+                    tvdb_id: Some(98765),
+                }),
                 genres: vec![
                     TmdbGenre {
                         name: Some("Drama".to_owned()),
@@ -1142,6 +1966,9 @@ mod tests {
         assert_eq!(mapped.premiere_date.as_deref(), Some("2026-06-21"));
         assert_eq!(mapped.official_rating.as_deref(), Some("13+"));
         assert_eq!(mapped.community_rating, Some(8.4));
+        assert_eq!(mapped.external_ids.len(), 1);
+        assert_eq!(mapped.external_ids[0].provider, "imdb");
+        assert_eq!(mapped.external_ids[0].external_id, "tt1234567");
         assert_eq!(mapped.artwork.len(), 2);
         assert_eq!(
             mapped.artwork[0].remote_url,
@@ -1183,6 +2010,109 @@ mod tests {
         assert_eq!(
             tv_content_rating(&ratings, Some("CN")).as_deref(),
             Some("TV-MA")
+        );
+    }
+
+    #[test]
+    fn tmdb_tv_detail_records_tvdb_external_id() {
+        let mut mapped = MetadataMatch {
+            provider: "tmdb".to_owned(),
+            external_id: "77".to_owned(),
+            external_ids: Vec::new(),
+            title: "Show".to_owned(),
+            original_title: None,
+            overview: None,
+            production_year: None,
+            premiere_date: None,
+            official_rating: None,
+            community_rating: None,
+            artwork: Vec::new(),
+            genres: Vec::new(),
+            studios: Vec::new(),
+            people: Vec::new(),
+        };
+
+        add_tmdb_external_ids(
+            &mut mapped,
+            Some(&TmdbExternalIds {
+                imdb_id: Some("tt7654321".to_owned()),
+                tvdb_id: Some(121361),
+            }),
+            TmdbSearchKind::Tv,
+        );
+
+        assert_eq!(mapped.external_ids.len(), 2);
+        assert_eq!(mapped.external_ids[0].provider, "imdb");
+        assert_eq!(mapped.external_ids[1].provider, "tvdb");
+        assert_eq!(mapped.external_ids[1].external_id, "121361");
+    }
+
+    #[test]
+    fn fanart_artwork_maps_supported_fields_and_prefers_requested_language() {
+        let artwork = fanart_artwork(
+            serde_json::json!({
+                "movieposter": [
+                    {"url": "https://assets.fanart.tv/fanart/movies/42/movieposter/en.jpg", "lang": "en", "likes": "9"},
+                    {"url": "https://assets.fanart.tv/fanart/movies/42/movieposter/zh.jpg", "lang": "zh", "likes": "1"},
+                    {"url": "ftp://assets.fanart.tv/bad.jpg", "lang": "zh", "likes": "99"}
+                ],
+                "moviebackground": [
+                    {"url": "https://assets.fanart.tv/fanart/movies/42/moviebackground/bg.jpg", "lang": "00", "likes": "3"}
+                ],
+                "unsupported": [
+                    {"url": "https://assets.fanart.tv/fanart/movies/42/other/ignored.jpg", "lang": "zh", "likes": "100"}
+                ]
+            }),
+            FanartKind::Movie,
+            Some("zh-CN"),
+        );
+
+        assert_eq!(artwork.len(), 3);
+        assert_eq!(artwork[0].artwork_type, "poster");
+        assert_eq!(
+            artwork[0].remote_url,
+            "https://assets.fanart.tv/fanart/movies/42/movieposter/zh.jpg"
+        );
+        assert_eq!(artwork[0].source.as_deref(), Some("fanart"));
+        assert!(artwork[0].is_primary);
+        assert_eq!(
+            artwork[1].remote_url,
+            "https://assets.fanart.tv/fanart/movies/42/movieposter/en.jpg"
+        );
+        assert!(!artwork[1].is_primary);
+        assert_eq!(artwork[2].artwork_type, "backdrop");
+        assert!(artwork[2].is_primary);
+    }
+
+    #[test]
+    fn fanart_external_id_uses_tmdb_for_movies_and_tvdb_for_tv() {
+        let matched = MetadataMatch {
+            provider: "tmdb".to_owned(),
+            external_id: "42".to_owned(),
+            external_ids: vec![MetadataExternalId {
+                provider: "tvdb".to_owned(),
+                external_id: "121361".to_owned(),
+            }],
+            title: "Title".to_owned(),
+            original_title: None,
+            overview: None,
+            production_year: None,
+            premiere_date: None,
+            official_rating: None,
+            community_rating: None,
+            artwork: Vec::new(),
+            genres: Vec::new(),
+            studios: Vec::new(),
+            people: Vec::new(),
+        };
+
+        assert_eq!(
+            fanart_external_id(&matched, FanartKind::Movie).as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            fanart_external_id(&matched, FanartKind::Tv).as_deref(),
+            Some("121361")
         );
     }
 

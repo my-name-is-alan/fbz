@@ -1,0 +1,32 @@
+{
+  "tmdb:550": [
+    {
+      "markerType": "intro_start",
+      "startTicks": 900000000,
+      "endTicks": 930000000,
+      "confidence": 0.98
+    },
+    {
+      "markerType": "intro_end",
+      "startTicks": 930000000,
+      "confidence": 0.98
+    },
+    {
+      "markerType": "credits_start",
+      "startTicks": 7200000000,
+      "confidence": 0.95
+    }
+  ],
+  "tvdb:series-123:season-1:episode-1": [
+    {
+      "markerType": "intro_start",
+      "startTicks": 600000000,
+      "confidence": 0.92
+    },
+    {
+      "markerType": "intro_end",
+      "startTicks": 690000000,
+      "confidence": 0.92
+    }
+  ]
+}

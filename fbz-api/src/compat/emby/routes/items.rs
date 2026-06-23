@@ -10,18 +10,23 @@ use crate::{
     compat::emby::dto::{
         BaseItemDto, BaseItemSource, ItemCountsDto, MediaSourceDto, QueryResultDto, UserItemDataDto,
     },
+    db::DbPool,
     error::AppError,
     library::repository::{
         BrowseItemsInput, IntListFilter, ItemAssociationFilter, ItemCountsRecord, ItemImageFilter,
         ItemMediaFilter, ItemProviderFilter, ItemQueryOptions, ItemScalarFilter, ItemSortField,
         ItemStructureFilter, ItemTypeFilter, ItemUserDataFilter, LibraryRepository,
-        MediaItemBrowseRecord, MediaQueryInput, PersonRoleFilter, SimilarItemsInput, SortDirection,
-        StringListFilter, UserItemAncestorRecord, UserLibraryViewRecord,
+        MediaItemBrowseRecord, MediaQueryInput, PersonRoleFilter, PlaylistListInput,
+        SimilarItemsInput, SortDirection, StringListFilter, UserItemAncestorRecord,
+        UserLibraryViewRecord,
     },
     state::AppState,
 };
 
-use super::access::{authenticate_request_user, authenticate_route_user};
+use super::{
+    access::{authenticate_query_user, authenticate_request_user, authenticate_route_user},
+    playlists::playlist_to_base_item,
+};
 
 const DEFAULT_ITEMS_LIMIT: u32 = 100;
 const MAX_ITEMS_LIMIT: u32 = 200;
@@ -77,11 +82,36 @@ pub struct ItemsQuery {
     pub person_types: Option<String>,
     pub artists: Option<String>,
     pub artist_ids: Option<String>,
+    pub albums: Option<String>,
+    pub album_ids: Option<String>,
     pub media_types: Option<String>,
     pub containers: Option<String>,
     pub audio_codecs: Option<String>,
     pub video_codecs: Option<String>,
     pub subtitle_codecs: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MusicItemsQuery {
+    pub user_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    pub fields: Option<String>,
+    pub search_term: Option<String>,
+    pub years: Option<String>,
+    pub genres: Option<String>,
+    pub genre_ids: Option<String>,
+    pub artists: Option<String>,
+    pub artist_ids: Option<String>,
+    pub albums: Option<String>,
+    pub album_ids: Option<String>,
+    pub enable_images: Option<bool>,
+    pub image_type_limit: Option<u32>,
+    pub enable_image_types: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -143,8 +173,84 @@ pub async fn user_items(
     };
 
     let authenticated_user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
-    let repository = LibraryRepository::new(database.clone());
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, query).await?;
+
+    Ok(Json(result))
+}
+
+pub async fn albums(
+    State(state): State<AppState>,
+    Query(query): Query<MusicItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let items_query = music_items_query(query, "MusicAlbum", None);
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
+            .await?;
+
+    Ok(Json(result))
+}
+
+pub async fn songs(
+    State(state): State<AppState>,
+    Query(query): Query<MusicItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let items_query = music_items_query(query, "Audio", Some("Audio"));
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
+            .await?;
+
+    Ok(Json(result))
+}
+
+async fn list_items_for_authenticated_user(
+    database: DbPool,
+    authenticated_user: AuthenticatedUser,
+    query: ItemsQuery,
+) -> Result<QueryResultDto<BaseItemDto>, AppError> {
+    let repository = LibraryRepository::new(database);
     let window = ItemWindow::from_query(&query);
+    if include_item_types_requests_playlists_only(query.include_item_types.as_deref()) {
+        let result = repository
+            .list_user_playlists(PlaylistListInput {
+                user_id: authenticated_user.id,
+                parent_id: normalized_parent_id(query.parent_id),
+                start_index: window.start_index,
+                limit: window.limit,
+                search_term: normalized_text_filter(query.search_term.as_deref()),
+                sort_direction: sort_direction_from_query(
+                    query.sort_order.as_deref(),
+                    SortDirection::Asc,
+                ),
+            })
+            .await
+            .map_err(|err| AppError::internal(format!("failed to list playlists: {err}")))?;
+        let items = result
+            .items
+            .into_iter()
+            .map(playlist_to_base_item)
+            .collect();
+        return Ok(QueryResultDto::new(
+            items,
+            result.total_record_count,
+            window.start_index as u32,
+        ));
+    }
+
     let scalar_filter = scalar_filter_from_query(&query);
     let user_data_filter = user_data_filter_from_query(&query);
     let structure_filter = structure_filter_from_query(&query);
@@ -178,7 +284,7 @@ pub async fn user_items(
             .list_user_views(authenticated_user.id)
             .await
             .map_err(|err| AppError::internal(format!("failed to list user views: {err}")))?;
-        return Ok(Json(library_views_to_items(views, window)));
+        return Ok(library_views_to_items(views, window));
     }
 
     let result = repository
@@ -200,11 +306,41 @@ pub async fn user_items(
         .map(|record| media_item_to_base_item_with_images(record, &requested_images))
         .collect::<Vec<_>>();
 
-    Ok(Json(QueryResultDto::new(
+    Ok(QueryResultDto::new(
         items,
         result.total_record_count,
         window.start_index as u32,
-    )))
+    ))
+}
+
+fn music_items_query(
+    query: MusicItemsQuery,
+    include_item_type: &str,
+    media_type: Option<&str>,
+) -> ItemsQuery {
+    ItemsQuery {
+        parent_id: query.parent_id,
+        start_index: query.start_index,
+        limit: query.limit,
+        recursive: Some(true),
+        include_item_types: Some(include_item_type.to_owned()),
+        sort_by: query.sort_by,
+        sort_order: query.sort_order,
+        fields: query.fields,
+        search_term: query.search_term,
+        years: query.years,
+        genres: query.genres,
+        genre_ids: query.genre_ids,
+        artists: query.artists,
+        artist_ids: query.artist_ids,
+        albums: query.albums,
+        album_ids: query.album_ids,
+        media_types: media_type.map(str::to_owned),
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types,
+        ..ItemsQuery::default()
+    }
 }
 
 pub async fn resume_items(
@@ -691,6 +827,8 @@ fn association_filter_from_query(query: &ItemsQuery) -> ItemAssociationFilter {
         person_role_types: person_role_filter(query.person_types.as_deref()),
         artist_names: pipe_name_list_filter(query.artists.as_deref()),
         artist_ids: id_list_filter(query.artist_ids.as_deref()),
+        album_names: pipe_name_list_filter(query.albums.as_deref()),
+        album_ids: id_list_filter(query.album_ids.as_deref()),
     }
 }
 
@@ -919,11 +1057,11 @@ fn push_unique_string(values: &mut Vec<String>, value: &str) {
     }
 }
 
-fn pipe_name_list_filter(value: Option<&str>) -> StringListFilter {
+pub(super) fn pipe_name_list_filter(value: Option<&str>) -> StringListFilter {
     string_list_filter(value, &['|'], true)
 }
 
-fn id_list_filter(value: Option<&str>) -> StringListFilter {
+pub(super) fn id_list_filter(value: Option<&str>) -> StringListFilter {
     string_list_filter(value, &[',', '|'], true)
 }
 
@@ -952,7 +1090,7 @@ fn year_list_filter(value: Option<&str>) -> IntListFilter {
     IntListFilter::enabled(values)
 }
 
-fn normalized_text_filter(value: Option<&str>) -> Option<String> {
+pub(super) fn normalized_text_filter(value: Option<&str>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -1051,7 +1189,7 @@ fn emby_person_type_to_role(value: &str) -> Option<&'static str> {
     }
 }
 
-fn include_item_types_filter(value: Option<&str>) -> ItemTypeFilter {
+pub(super) fn include_item_types_filter(value: Option<&str>) -> ItemTypeFilter {
     let Some(value) = value else {
         return ItemTypeFilter::default();
     };
@@ -1076,6 +1214,31 @@ fn include_item_types_filter(value: Option<&str>) -> ItemTypeFilter {
     ItemTypeFilter::enabled(item_types)
 }
 
+fn include_item_types_requests_playlists_only(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let mut saw_playlist = false;
+    let mut saw_other_known_type = false;
+    let mut saw_unknown_type = false;
+
+    for token in value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        if emby_filter_playlist_type(token) {
+            saw_playlist = true;
+        } else if emby_filter_item_type(token).is_some() {
+            saw_other_known_type = true;
+        } else {
+            saw_unknown_type = true;
+        }
+    }
+
+    saw_playlist && !saw_other_known_type && !saw_unknown_type
+}
+
 fn emby_filter_item_type(item_type: &str) -> Option<&'static str> {
     match item_type.to_ascii_lowercase().as_str() {
         "movie" => Some("movie"),
@@ -1089,6 +1252,19 @@ fn emby_filter_item_type(item_type: &str) -> Option<&'static str> {
         "folder" | "collectionfolder" => Some("folder"),
         _ => None,
     }
+}
+
+fn emby_filter_playlist_type(item_type: &str) -> bool {
+    matches!(
+        item_type
+            .trim()
+            .chars()
+            .filter(|character| !matches!(character, ' ' | '_' | '-'))
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+            .as_str(),
+        "playlist" | "playlists" | "audioplaylist"
+    )
 }
 
 fn sort_field_from_query(value: Option<&str>, default_sort: ItemSortField) -> ItemSortField {
@@ -1318,7 +1494,7 @@ fn root_folder_item() -> BaseItemDto {
     })
 }
 
-fn media_item_to_base_item(record: MediaItemBrowseRecord) -> BaseItemDto {
+pub(super) fn media_item_to_base_item(record: MediaItemBrowseRecord) -> BaseItemDto {
     let requested_images = RequestedItemImages::disabled();
     media_item_to_base_item_with_images(record, &requested_images)
 }
@@ -1503,6 +1679,8 @@ mod tests {
             person_types: None,
             artists: None,
             artist_ids: None,
+            albums: None,
+            album_ids: None,
             media_types: None,
             containers: None,
             audio_codecs: None,
@@ -1563,6 +1741,65 @@ mod tests {
 
         assert!(options.type_filter.enabled);
         assert!(options.type_filter.item_types.is_empty());
+    }
+
+    #[test]
+    fn include_item_types_playlist_only_uses_collection_playlists() {
+        assert!(include_item_types_requests_playlists_only(Some("Playlist")));
+        assert!(include_item_types_requests_playlists_only(Some(
+            " audio-playlist "
+        )));
+        assert!(!include_item_types_requests_playlists_only(Some(
+            "Playlist,Audio"
+        )));
+        assert!(!include_item_types_requests_playlists_only(Some(
+            "Playlist,Unknown"
+        )));
+        assert!(!include_item_types_requests_playlists_only(None));
+    }
+
+    #[test]
+    fn music_item_queries_map_to_existing_item_filters() {
+        let query = MusicItemsQuery {
+            user_id: Some("user-1".to_owned()),
+            parent_id: Some("library-1".to_owned()),
+            start_index: Some(10),
+            limit: Some(25),
+            sort_by: Some("SortName".to_owned()),
+            sort_order: Some("Ascending".to_owned()),
+            fields: Some("PrimaryImageAspectRatio".to_owned()),
+            search_term: Some("blue".to_owned()),
+            years: Some("1999,2000".to_owned()),
+            genres: Some("Jazz".to_owned()),
+            genre_ids: Some("genre-1".to_owned()),
+            artists: Some("Artist A".to_owned()),
+            artist_ids: Some("artist-1".to_owned()),
+            albums: Some("Album A".to_owned()),
+            album_ids: Some("album-1".to_owned()),
+            enable_images: Some(true),
+            image_type_limit: Some(2),
+            enable_image_types: Some("Primary,Backdrop".to_owned()),
+        };
+
+        let albums = music_items_query(query.clone(), "MusicAlbum", None);
+        assert_eq!(albums.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(albums.start_index, Some(10));
+        assert_eq!(albums.limit, Some(25));
+        assert_eq!(albums.recursive, Some(true));
+        assert_eq!(albums.include_item_types.as_deref(), Some("MusicAlbum"));
+        assert_eq!(albums.media_types, None);
+        assert_eq!(albums.search_term.as_deref(), Some("blue"));
+        assert_eq!(albums.genres.as_deref(), Some("Jazz"));
+        assert_eq!(albums.artist_ids.as_deref(), Some("artist-1"));
+        assert_eq!(albums.albums.as_deref(), Some("Album A"));
+        assert_eq!(albums.album_ids.as_deref(), Some("album-1"));
+        assert_eq!(albums.enable_images, Some(true));
+        assert_eq!(albums.image_type_limit, Some(2));
+
+        let songs = music_items_query(query, "Audio", Some("Audio"));
+        assert_eq!(songs.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(songs.media_types.as_deref(), Some("Audio"));
+        assert_eq!(songs.recursive, Some(true));
     }
 
     #[test]
@@ -1791,6 +2028,8 @@ mod tests {
             person_types: Some("Actor,Guest Star".to_owned()),
             artists: Some("David Bowie|Queen".to_owned()),
             artist_ids: Some("AAAAAAAA-0000-0000-0000-000000000001|2".to_owned()),
+            albums: Some("Low|Heroes".to_owned()),
+            album_ids: Some("BBBBBBBB-0000-0000-0000-000000000001|3".to_owned()),
             ..ItemsQuery::default()
         };
 
@@ -1817,6 +2056,11 @@ mod tests {
         assert_eq!(
             filter.artist_ids.values,
             ["aaaaaaaa-0000-0000-0000-000000000001", "2"]
+        );
+        assert_eq!(filter.album_names.values, ["low", "heroes"]);
+        assert_eq!(
+            filter.album_ids.values,
+            ["bbbbbbbb-0000-0000-0000-000000000001", "3"]
         );
     }
 

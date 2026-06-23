@@ -54,7 +54,11 @@ The manifest JSON is kept for audit/debugging, while normalized tables support f
 
 The current admin API supports installing a plugin package, listing plugins, reviewing a package's normalized declarations, approving or rejecting a package, and enabling or disabling a plugin installation. Approval and enablement are deliberately separate:
 
-Administrators can also call `GET /api/admin/plugins/capabilities` before installing a package. It returns the same host contract that running plugins see through `GET /api/plugin/capabilities`: supported manifest API version, accepted and executable runtimes, HTTP schemes, permission keys, hook event keys, and Host API route requirements. This lets the web admin, packaging tools, and CI checks reject incompatible manifests before writing package rows.
+Administrators can also call `GET /api/admin/plugins/capabilities` before installing a package. It returns the same host contract that running plugins see through `GET /api/plugin/capabilities`: supported manifest API version, accepted and executable runtimes, HTTP schemes, permission keys, structured permission details, hook event keys, and Host API route requirements. `permissionDetails` keeps the stable key list compatible while adding category, risk level, description, manifest feature bindings, and the Host API routes opened by each permission. This lets the web admin, packaging tools, and CI checks reject incompatible manifests and explain permission risk before writing package rows.
+
+Administrators can list plugin installations with `GET /api/admin/plugins`. The list supports `approvalStatus`, `enabled`, `runtime`, `cursor`, and `limit`; its JSON body remains a plain array for compatibility, while `x-fbz-has-more` and `x-fbz-next-cursor` expose keyset pagination over `(updated_at desc, id desc)`. The route is intentionally installation-oriented: package history belongs to the package list, while this view tells the web admin which plugin is approved, enabled, and currently active.
+
+Administrators can list package versions with `GET /api/admin/plugins/packages`. The list supports `pluginId`, `packageStatus`, `runtime`, `cursor`, and `limit`; its JSON body remains a plain array for compatibility, while `x-fbz-has-more` and `x-fbz-next-cursor` expose keyset pagination over `(created_at desc, id desc)`. Each row includes the immutable package id, plugin id, version, runtime, signature presence, package status, installation approval status, enabled state when present, and whether that package is the active installation target. This gives the web admin a stable review and rollback surface without scanning package history by offset.
 
 - install writes package declarations and keeps the package in `pending_approval`;
 - installing a new package for an existing plugin does not replace `plugin_installations.active_package_id`, does not disable the current active package, and does not rewrite the active permission fingerprint;
@@ -86,6 +90,10 @@ Approved and enabled plugins can receive declared hook events through the core `
 
 The dispatcher writes one `plugin.hook.dispatch` outbox row per matching enabled hook. The payload includes the target plugin, package, hook id, handler name, hook event key, and source event payload. This keeps core scanning decoupled from plugin runtime execution.
 
+Administrators can inspect plugin dispatch outbox rows with `GET /api/admin/plugin-dispatches`. The list supports `status`, `cursor`, and `limit`; its JSON body remains a plain array for compatibility, while `x-fbz-has-more` and `x-fbz-next-cursor` expose keyset pagination over `(created_at desc, id desc)`. This keeps long-running hook histories browsable without offset scans.
+
+Execution attempts for a dispatch are visible through `GET /api/admin/plugin-dispatches/{dispatchId}/runs`. The list supports `status`, `cursor`, and `limit`, uses the same pagination headers, and orders by `(started_at desc, id desc)` under the target dispatch id.
+
 When `REDIS_EVENT_STREAMS_ENABLED=true`, a separate mirror worker publishes committed `event_outbox` rows into the configured Redis Stream. The mirror worker uses PostgreSQL lease columns and `FOR UPDATE SKIP LOCKED`, so multiple worker nodes can share the work and an expired lease can be picked up by another node. PostgreSQL remains the source of truth for plugin dispatch and notification delivery; Redis Streams are an external distribution layer for cross-node subscribers, observability, and future realtime fan-out. Stream entries include the public outbox event id, event type, aggregate boundary, serialized payload, delivery status, timestamps, and the internal outbox id for idempotent consumers.
 
 When an approved plugin is enabled, its manifest `schedules` are synchronized into `scheduled_tasks` with `owner_type = 'plugin'`. Schedules marked `enabledByDefault` are enabled automatically; disabling, rejecting, or installing a replacement package disables the plugin's existing scheduled tasks in the same transaction. Interval schedules and a standard five-field cron subset are executable. Supported cron fields include `*`, numeric values, comma lists, ranges, and step values such as `*/5`. When due, the scheduler writes a `plugin.hook.dispatch` outbox row with `hookEvent = 'scheduler.tick'`, `hookId = null`, and a `plugin_schedule` source payload. PostgreSQL computes the next cron run through `fbz_next_cron_run_at`. Due and manual executions create `scheduled_task_runs` leases before work starts, enforce each task's `max_concurrency`, and mark late unfinished leases as `expired` before a later claim. Administrators can inspect scheduled tasks, manually trigger enabled tasks without changing `next_run_at`, and cancel active scheduled-task leases; manual execution uses the same scheduler task handlers as due execution.
@@ -95,6 +103,8 @@ Scheduled task operations are visible through Admin API routes:
 - `GET /api/admin/scheduled-tasks`
 - `GET /api/admin/scheduled-tasks/{taskKey}/runs`
 - `POST /api/admin/scheduled-tasks/{taskKey}/run`
+
+Scheduled task lists support `taskType`, `ownerType`, `enabled`, `cursor`, and `limit`, keep a plain array response body for compatibility, and expose `x-fbz-has-more` / `x-fbz-next-cursor` response headers for keyset pagination over enabled state, `next_run_at`, `updated_at`, and id. Scheduled task run history supports `status`, `cursor`, and `limit` with the same response headers and keyset pagination over `(started_at desc, id desc)`.
 
 The plugin worker is disabled by default and can be enabled with `FBZ_PLUGIN_WORKER_ENABLED=true`. It claims `plugin.hook.dispatch` rows with PostgreSQL row locking, writes one `plugin_execution_runs` audit record per attempt, and marks outbox rows as `delivered`, `failed`, or `discarded`. Dispatch leases are at least five minutes and grow with `PLUGIN_TIMEOUT_MS` plus a grace window, so long-running plugins are not retried while still inside their configured timeout. Before each drain loop, the worker marks stale `running` execution runs as `failed` when their dispatch lease has expired or their outbox row is already terminal, and revokes any still-active Host API tokens for those runs. Each worker process runs dispatches in bounded batches capped by `PLUGIN_MAX_CONCURRENCY`; PostgreSQL `FOR UPDATE SKIP LOCKED` keeps concurrent workers from claiming the same outbox row.
 
@@ -107,6 +117,7 @@ Plugin execution operations are visible through Admin API routes:
 - `GET /api/admin/plugin-dispatches`
 - `GET /api/admin/plugin-dispatches/{dispatchId}/runs`
 - `POST /api/admin/plugin-dispatches/{dispatchId}/replay`
+- `GET /api/admin/event-stream-mirror/status`
 
 The replay route only accepts dispatches in `failed` or `discarded` status. It creates a fresh `plugin.hook.dispatch` outbox row with the same payload and leaves the original failed row unchanged for audit. Dispatches in `pending`, `delivering`, or `delivered` status are rejected to avoid accidental duplicate hook side effects.
 
@@ -126,7 +137,7 @@ When `PLUGIN_SECRET_KEY` is configured, HTTP plugin requests also include signat
 
 The v1 canonical string is `v1 + "\n" + timestamp + "\n" + pluginId + "\n" + idempotencyKey + "\n" + bodySha256`, signed with `PLUGIN_SECRET_KEY`. External plugin services should reject stale timestamps and mismatched signatures before executing side effects, and should use the idempotency key to dedupe side effects across host retries.
 
-Plugins can call `GET /api/plugin/capabilities` with the short-lived host token to discover the current host contract. The response includes the supported manifest `apiVersion`, Host API version, accepted manifest runtimes, currently executable runtimes, accepted HTTP schemes, permission keys, hook event keys, and each Host API route with its additional permission requirement.
+Plugins can call `GET /api/plugin/capabilities` with the short-lived host token to discover the current host contract. The response includes the supported manifest `apiVersion`, Host API version, accepted manifest runtimes, currently executable runtimes, accepted HTTP schemes, permission keys, structured `permissionDetails`, hook event keys, and each Host API route with its additional permission requirement.
 
 Host tokens are scoped to a single plugin execution run. A token is valid only while its `plugin_execution_runs` row is still `running`, the package is still the approved active package, the installation remains enabled, the token has not expired, and it has not been revoked. At issue time the host stores a JSON permission snapshot on `plugin_host_tokens`; Host API permission checks use that snapshot instead of re-reading live package permissions on every call. This keeps a running dispatch on the permissions it was launched with and prevents a stale token from gaining capabilities after package state changes.
 
@@ -138,6 +149,8 @@ Host API audit records are visible through Admin API routes:
 
 - `GET /api/admin/plugin-host-api-calls`
 - `GET /api/admin/plugin-execution-runs/{runId}/host-api-calls`
+
+The global Host API audit list supports `pluginId`, `executionRunId`, `statusCode`, `cursor`, and `limit`. The run-scoped audit route supports `cursor` and `limit`. Both JSON bodies remain plain arrays for compatibility, while `x-fbz-has-more` and `x-fbz-next-cursor` response headers expose keyset pagination. The cursor is the last returned call public id and the query orders by `(finished_at desc, id desc)`, so admin pages can browse large audit tables without offset scans.
 
 The first Host API is plugin-private KV storage under `/api/plugin/kv/{key}`. KV access is always scoped to the authenticated plugin id and never exposes another plugin's keys.
 
@@ -168,7 +181,14 @@ Plugins can choose a logical channel, but they cannot choose target URLs, bot to
 
 ## First-Party Examples
 
+Plugin author workflow, manifest examples, HTTP dispatch signing, idempotency, Host API usage, packaging, and local smoke guidance are documented in `docs/plugin-development.md`.
+
 - `examples/plugins/http-notification-bridge`: HTTP runtime plugin that subscribes to selected host events, verifies signed dispatches when `PLUGIN_SECRET_KEY` is configured, reads its `channel` config through `GET /api/plugin/config`, dedupes by dispatch idempotency key, and forwards notifications through `POST /api/plugin/notifications`.
+- `examples/plugins/http-marker-importer`: HTTP runtime plugin that subscribes to `metadata.refresh.completed`, reads public item details through `GET /api/plugin/items/{itemId}`, resolves marker candidates by external provider ID, and replaces only its own plugin-scoped intro/credits marker source through `PUT /api/plugin/items/{itemId}/markers`.
+
+Use `scripts/package-plugin.ps1 -PluginDir examples/plugins/http-notification-bridge -Force` or pass another example plugin directory such as `examples/plugins/http-marker-importer` to build a ZIP whose root contains `manifest.json`. The helper writes to `var/plugin-packages` by default, refuses output paths inside the plugin source directory, and prints the `packagePath`, `checksumSha256`, and manifest object expected by `POST /api/admin/plugins/packages`.
+
+Use `scripts/smoke-plugin-lifecycle.ps1 -StartServer` for a local lifecycle smoke. It generates a one-off HTTP plugin, starts the API against local PostgreSQL and Redis, then verifies login, package install, approval, enablement, config persistence, active menu visibility, and package detail normalization through the real Admin API.
 
 Notification targets are managed through Admin API routes:
 
@@ -185,6 +205,8 @@ Notification delivery operations are visible through Admin API routes:
 - `GET /api/admin/notification-requests`
 - `GET /api/admin/notification-requests/{requestId}/attempts`
 - `POST /api/admin/notification-requests/{requestId}/retry`
+
+The notification request list supports `status`, `channel`, `cursor`, and `limit`; per-request delivery attempts support `status`, `cursor`, and `limit`. Both endpoints keep a plain array response body for compatibility and expose `x-fbz-has-more` / `x-fbz-next-cursor` response headers for keyset pagination over `(created_at desc, id desc)`.
 
 The retry route only accepts requests in `failed` or `discarded` status. It inserts a fresh `notification.send.requested` outbox row for the same notification request and moves the request back to `queued`. During delivery, targets with an existing `succeeded` attempt for that request are skipped, so retrying a partial failure does not resend to targets that already accepted the notification.
 
@@ -213,7 +235,7 @@ Plugins must not:
 
 ## Next Implementation Steps
 
-1. Add first-party plugin SDK templates and packaging helpers.
+1. Add more first-party plugin SDK templates for WASI and metadata/marker imports.
 2. Add WASIp2/component support and native Host API imports.
 3. Add stronger stale temp-dir scavenging for interrupted WASI runs.
 4. Expand hook coverage as new Emby-compatible domains land.

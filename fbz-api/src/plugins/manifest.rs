@@ -779,6 +779,39 @@ mod tests {
     }
 
     #[test]
+    fn first_party_http_marker_importer_manifest_is_valid() {
+        let manifest: PluginManifest = serde_json::from_str(include_str!(
+            "../../examples/plugins/http-marker-importer/manifest.json"
+        ))
+        .unwrap();
+
+        let validated = manifest.validate().unwrap();
+
+        assert_eq!(validated.manifest.id, "dev.fbz.marker.importer");
+        assert!(
+            validated
+                .manifest
+                .permissions
+                .iter()
+                .any(|permission| permission.key == "media.read")
+        );
+        assert!(
+            validated
+                .manifest
+                .permissions
+                .iter()
+                .any(|permission| permission.key == "metadata.write")
+        );
+        assert!(
+            validated
+                .manifest
+                .hooks
+                .iter()
+                .any(|hook| hook.event == "metadata.refresh.completed")
+        );
+    }
+
+    #[test]
     fn menu_requires_admin_menu_permission() {
         let manifest: PluginManifest = serde_json::from_value(json!({
             "id": "dev.fbz.menu",

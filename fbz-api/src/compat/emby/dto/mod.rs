@@ -89,9 +89,32 @@ pub struct WakeOnLanInfoDto {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
+pub struct LiveTvInfoDto {
+    pub is_enabled: bool,
+    pub enabled_users: Vec<String>,
+}
+
+impl LiveTvInfoDto {
+    pub fn disabled() -> Self {
+        Self {
+            is_enabled: false,
+            enabled_users: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub struct NameIdPairDto {
     pub name: String,
     pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct NameValuePairDto {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

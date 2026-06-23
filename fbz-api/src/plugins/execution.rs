@@ -34,6 +34,34 @@ const MAX_ERROR_BYTES: usize = 2048;
 const MIN_DISPATCH_LEASE_SECONDS: u64 = 300;
 const DISPATCH_LEASE_GRACE_SECONDS: u64 = 60;
 const STALE_EXECUTION_MESSAGE: &str = "plugin execution lease expired; dispatch will retry";
+const CLAIM_NEXT_PLUGIN_DISPATCH_SQL: &str = r#"
+            update event_outbox
+            set status = 'delivering',
+                attempts = attempts + 1,
+                locked_by = $2,
+                locked_until = now() + ($3::bigint * interval '1 second'),
+                last_error = null
+            where id = (
+                select id
+                from event_outbox
+                where event_type = $1
+                  and available_at <= now()
+                  and attempts < max_attempts
+                  and (
+                      status in ('pending', 'failed')
+                      or (status = 'delivering' and locked_until <= now())
+                  )
+                order by available_at asc, id asc
+                for update skip locked
+                limit 1
+            )
+            returning
+                id,
+                public_id::text as public_id,
+                payload,
+                attempts,
+                max_attempts
+            "#;
 const EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL: &str = r#"
 with expired_runs as (
     update plugin_execution_runs run
@@ -277,42 +305,13 @@ impl PluginExecutionService {
     async fn claim_next_dispatch(
         &self,
     ) -> Result<Option<ClaimedPluginDispatch>, PluginExecutionError> {
-        let row = sqlx::query(
-            r#"
-            update event_outbox
-            set status = 'delivering',
-                attempts = attempts + 1,
-                locked_by = $2,
-                locked_until = now() + ($3::bigint * interval '1 second'),
-                last_error = null
-            where id = (
-                select id
-                from event_outbox
-                where event_type = $1
-                  and available_at <= now()
-                  and attempts < max_attempts
-                  and (
-                      status in ('pending', 'failed')
-                      or (status = 'delivering' and locked_until <= now())
-                  )
-                order by available_at asc, id asc
-                for update skip locked
-                limit 1
-            )
-            returning
-                id,
-                public_id::text as public_id,
-                payload,
-                attempts,
-                max_attempts
-            "#,
-        )
-        .bind(PLUGIN_HOOK_DISPATCH_EVENT)
-        .bind(PLUGIN_EXECUTOR_ID)
-        .bind(dispatch_lease_seconds(self.config.timeout_ms) as i64)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(PluginExecutionError::from)?;
+        let row = sqlx::query(CLAIM_NEXT_PLUGIN_DISPATCH_SQL)
+            .bind(PLUGIN_HOOK_DISPATCH_EVENT)
+            .bind(PLUGIN_EXECUTOR_ID)
+            .bind(dispatch_lease_seconds(self.config.timeout_ms) as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PluginExecutionError::from)?;
 
         row.map(|row| -> Result<ClaimedPluginDispatch, sqlx::Error> {
             Ok(ClaimedPluginDispatch {
@@ -1102,6 +1101,26 @@ mod tests {
                 .contains("outbox.status in ('delivered', 'failed', 'discarded')")
         );
         assert!(EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL.contains("token.revoked_at is null"));
+    }
+
+    #[test]
+    fn plugin_dispatch_claim_query_matches_scale_indexes() {
+        let migration = include_str!("../../migrations/0044_plugin_dispatch_claim_indexes.sql");
+
+        assert!(CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("where event_type = $1"));
+        assert!(CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("status in ('pending', 'failed')"));
+        assert!(
+            CLAIM_NEXT_PLUGIN_DISPATCH_SQL
+                .contains("status = 'delivering' and locked_until <= now()")
+        );
+        assert!(CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("attempts < max_attempts"));
+        assert!(CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("for update skip locked"));
+        assert!(migration.contains("idx_event_outbox_plugin_dispatch_available"));
+        assert!(migration.contains("idx_event_outbox_plugin_dispatch_expired_lease"));
+        assert!(migration.contains("event_type = 'plugin.hook.dispatch'"));
+        assert!(migration.contains("status in ('pending', 'failed')"));
+        assert!(migration.contains("status = 'delivering'"));
+        assert!(migration.contains("attempts < max_attempts"));
     }
 
     #[test]

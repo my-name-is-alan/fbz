@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri},
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
@@ -11,16 +11,21 @@ use crate::{
     admin::{
         access::authenticate_admin,
         repository::{
-            AddLibraryPathInput, AdminJobDetailRecord, AdminJobEventRecord, AdminJobRecord,
-            AdminJobRunRecord, AdminRepository, AdminUserLibraryPermissionRecord, AdminUserRecord,
-            CreateLibraryInput, LibraryMetadataRefreshQueueRecord, LibraryPathRecord,
-            ManagedLibraryRecord, MetadataRefreshJobRecord, NotificationDeliveryAttemptRecord,
-            NotificationRequestRecord, NotificationRetryError, NotificationTargetRecord,
-            PluginDispatchRecord, PluginDispatchReplayError, PluginExecutionRunRecord,
+            AddLibraryPathInput, AdminJobDetailRecord, AdminJobEventFilter, AdminJobEventRecord,
+            AdminJobFilter, AdminJobRecord, AdminJobRunFilter, AdminJobRunRecord, AdminRepository,
+            AdminUserFilter, AdminUserLibraryPermissionFilter, AdminUserLibraryPermissionRecord,
+            AdminUserRecord, CreateLibraryInput, EventStreamMirrorStatusRecord,
+            LibraryMetadataRefreshQueueRecord, LibraryPathRecord, ManagedLibraryRecord,
+            MetadataRefreshJobRecord, NotificationDeliveryAttemptFilter,
+            NotificationDeliveryAttemptRecord, NotificationRequestFilter,
+            NotificationRequestRecord, NotificationRetryError, NotificationTargetFilter,
+            NotificationTargetRecord, PluginDispatchFilter, PluginDispatchRecord,
+            PluginDispatchReplayError, PluginExecutionRunFilter, PluginExecutionRunRecord,
             PluginHostApiCallFilter, PluginHostApiCallRecord, QueueLibraryMetadataRefreshInput,
             QueueLibraryScanInput, QueueMetadataRefreshInput, ScanJobRecord,
-            ScheduledTaskAdminRecord, ScheduledTaskRunRecord, UpdateUserLibraryPermissionInput,
-            UpdateUserPolicyInput, UpsertNotificationTargetInput,
+            ScheduledTaskAdminRecord, ScheduledTaskFilter, ScheduledTaskRunFilter,
+            ScheduledTaskRunRecord, UpdateUserLibraryPermissionInput, UpdateUserPolicyInput,
+            UpsertNotificationTargetInput,
         },
     },
     config::{Config, MetadataConfig},
@@ -34,7 +39,7 @@ use crate::{
         SchedulerError, SchedulerRunSummary, SchedulerService, default_worker_id,
     },
     state::AppState,
-    transcode::repository::{TranscodeRepository, TranscodeSessionRecord},
+    transcode::repository::{TranscodeRepository, TranscodeSessionFilter, TranscodeSessionRecord},
 };
 
 const MAX_NOTIFICATION_TARGETS_LIST_LIMIT: i64 = 200;
@@ -56,7 +61,10 @@ const MAX_LIBRARY_METADATA_REFRESH_LIMIT: i64 = 50_000;
 const MAX_NOTIFICATION_TARGET_NAME_LEN: usize = 128;
 const MAX_NOTIFICATION_TARGET_CHANNEL_LEN: usize = 64;
 const MAX_USER_DISPLAY_NAME_LEN: usize = 128;
+const MAX_ADMIN_USER_ROLE_NAME_LEN: usize = 128;
 const MAX_SCHEDULED_TASK_KEY_LEN: usize = 256;
+const MAX_ADMIN_JOB_FILTER_TEXT_LEN: usize = 128;
+const MAX_TRANSCODE_HARDWARE_ACCELERATION_LEN: usize = 64;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -87,6 +95,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/admin/jobs", get(list_jobs))
         .route("/api/admin/jobs/{job_id}", get(get_job_detail))
+        .route("/api/admin/jobs/{job_id}/runs", get(list_job_runs))
+        .route("/api/admin/jobs/{job_id}/events", get(list_job_events))
         .route("/api/admin/jobs/{job_id}/run", post(run_job))
         .route("/api/admin/scheduled-tasks", get(list_scheduled_tasks))
         .route(
@@ -145,6 +155,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/admin/plugin-host-api-calls",
             get(list_plugin_host_api_calls),
+        )
+        .route(
+            "/api/admin/event-stream-mirror/status",
+            get(event_stream_mirror_status),
         )
         .route(
             "/api/admin/plugin-dispatches/{dispatch_id}/replay",
@@ -307,6 +321,15 @@ pub struct AdminUserDto {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserQueryDto {
+    pub role_name: Option<String>,
+    pub is_disabled: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminUserLibraryPermissionDto {
@@ -322,6 +345,15 @@ pub struct AdminUserLibraryPermissionDto {
     pub effective_can_download: bool,
     pub effective_can_transcode: bool,
     pub permission_updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserLibraryPermissionQueryDto {
+    pub library_type: Option<String>,
+    pub permission_configured: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -344,6 +376,16 @@ pub struct AdminJobDto {
     pub created_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminJobQueryDto {
+    pub status: Option<String>,
+    pub job_type: Option<String>,
+    pub queue_name: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -377,6 +419,22 @@ pub struct AdminJobEventDto {
     pub message: Option<String>,
     pub payload: Value,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminJobRunQueryDto {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminJobEventQueryDto {
+    pub event_level: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -429,6 +487,16 @@ pub struct NotificationTargetDto {
     pub last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationTargetQueryDto {
+    pub target_type: Option<String>,
+    pub channel: Option<String>,
+    pub enabled: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationRequestDto {
@@ -447,6 +515,15 @@ pub struct NotificationRequestDto {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationRequestQueryDto {
+    pub status: Option<String>,
+    pub channel: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationDeliveryAttemptDto {
@@ -463,6 +540,14 @@ pub struct NotificationDeliveryAttemptDto {
     pub duration_ms: Option<i32>,
     pub created_at: String,
     pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationDeliveryAttemptQueryDto {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -485,6 +570,14 @@ pub struct PluginDispatchDto {
     pub last_error: Option<String>,
     pub created_at: String,
     pub delivered_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDispatchQueryDto {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -513,10 +606,26 @@ pub struct PluginExecutionRunDto {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct PluginExecutionRunQueryDto {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginHostApiCallQueryDto {
     pub plugin_id: Option<String>,
     pub execution_run_id: Option<String>,
     pub status_code: Option<i32>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHostApiCallRunQueryDto {
+    pub cursor: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -541,6 +650,28 @@ pub struct PluginHostApiCallDto {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct EventStreamMirrorStatusDto {
+    pub enabled: bool,
+    pub stream_key: String,
+    pub batch_size: u16,
+    pub interval_seconds: u64,
+    pub lease_seconds: u64,
+    pub operation_timeout_ms: u64,
+    pub retry_base_seconds: u64,
+    pub retry_max_seconds: u64,
+    pub unmirrored_count: i64,
+    pub claimable_count: i64,
+    pub locked_count: i64,
+    pub backoff_count: i64,
+    pub failed_count: i64,
+    pub max_attempts: i32,
+    pub oldest_unmirrored_created_at: Option<String>,
+    pub next_retry_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ScheduledTaskDto {
     pub id: String,
     pub task_key: String,
@@ -560,6 +691,16 @@ pub struct ScheduledTaskDto {
     pub last_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskQueryDto {
+    pub task_type: Option<String>,
+    pub owner_type: Option<String>,
+    pub enabled: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -589,6 +730,14 @@ pub struct ScheduledTaskRunHistoryDto {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskRunQueryDto {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscodeSessionDto {
@@ -611,6 +760,15 @@ pub struct TranscodeSessionDto {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscodeSessionQueryDto {
+    pub status: Option<String>,
+    pub hardware_acceleration: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 pub async fn create_library(
@@ -771,20 +929,42 @@ pub async fn list_metadata_providers(
 
 pub async fn list_users(
     State(state): State<AppState>,
+    Query(query): Query<AdminUserQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<AdminUserDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<AdminUserDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let role_name = query
+        .role_name
+        .as_deref()
+        .map(validate_admin_user_role_name)
+        .transpose()?
+        .map(str::to_ascii_lowercase);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
 
-    let users = AdminRepository::new(database.clone())
-        .list_admin_users(MAX_ADMIN_USERS_LIST_LIMIT)
+    let page = AdminRepository::new(database.clone())
+        .list_admin_users_page(AdminUserFilter {
+            role_name,
+            is_disabled: query.is_disabled,
+            cursor,
+            limit: admin_user_list_limit(query.limit),
+        })
         .await
         .map_err(|err| AppError::internal(format!("failed to list users: {err}")))?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(users.into_iter().map(AdminUserDto::from).collect()))
+    Ok((
+        response_headers,
+        Json(page.records.into_iter().map(AdminUserDto::from).collect()),
+    ))
 }
 
 pub async fn update_user_policy(
@@ -820,17 +1000,38 @@ pub async fn update_user_policy(
 pub async fn list_user_library_permissions(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
+    Query(query): Query<AdminUserLibraryPermissionQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<AdminUserLibraryPermissionDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<AdminUserLibraryPermissionDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let user_id = validate_uuid_public_id("userId", &user_id)?;
+    let library_type = query
+        .library_type
+        .as_deref()
+        .map(normalize_library_type)
+        .map(|value| validate_library_type(&value).map(|_| value))
+        .transpose()?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
 
-    let Some(permissions) = AdminRepository::new(database.clone())
-        .list_user_library_permissions(user_id, MAX_ADMIN_USER_LIBRARY_PERMISSIONS_LIMIT)
+    let Some(page) = AdminRepository::new(database.clone())
+        .list_user_library_permissions_page(
+            user_id,
+            AdminUserLibraryPermissionFilter {
+                library_type,
+                permission_configured: query.permission_configured,
+                cursor,
+                limit: admin_user_library_permission_list_limit(query.limit),
+            },
+        )
         .await
         .map_err(|err| {
             AppError::internal(format!("failed to list user library permissions: {err}"))
@@ -838,12 +1039,16 @@ pub async fn list_user_library_permissions(
     else {
         return Err(AppError::not_found("user not found"));
     };
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        permissions
-            .into_iter()
-            .map(AdminUserLibraryPermissionDto::from)
-            .collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(AdminUserLibraryPermissionDto::from)
+                .collect(),
+        ),
     ))
 }
 
@@ -881,20 +1086,55 @@ pub async fn update_user_library_permission(
 
 pub async fn list_jobs(
     State(state): State<AppState>,
+    Query(query): Query<AdminJobQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<AdminJobDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<AdminJobDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_admin_job_status)
+        .transpose()?
+        .map(str::to_owned);
+    let job_type = query
+        .job_type
+        .as_deref()
+        .map(|value| validate_admin_job_filter_text("jobType", value))
+        .transpose()?
+        .map(str::to_owned);
+    let queue_name = query
+        .queue_name
+        .as_deref()
+        .map(|value| validate_admin_job_filter_text("queueName", value))
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
 
-    let jobs = AdminRepository::new(database.clone())
-        .list_admin_jobs(MAX_ADMIN_JOBS_LIST_LIMIT)
+    let page = AdminRepository::new(database.clone())
+        .list_admin_jobs_page(AdminJobFilter {
+            status,
+            job_type,
+            queue_name,
+            cursor,
+            limit: admin_job_list_limit(query.limit),
+        })
         .await
         .map_err(|err| AppError::internal(format!("failed to list jobs: {err}")))?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(jobs.into_iter().map(AdminJobDto::from).collect()))
+    Ok((
+        response_headers,
+        Json(page.records.into_iter().map(AdminJobDto::from).collect()),
+    ))
 }
 
 pub async fn get_job_detail(
@@ -924,6 +1164,101 @@ pub async fn get_job_detail(
     Ok(Json(AdminJobDetailDto::from(detail)))
 }
 
+pub async fn list_job_runs(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    Query(query): Query<AdminJobRunQueryDto>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<(HeaderMap, Json<Vec<AdminJobRunDto>>), AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let job_id = validate_uuid_public_id("jobId", &job_id)?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_admin_job_run_status)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_positive_i64_cursor("cursor", value))
+        .transpose()?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let Some(page) = AdminRepository::new(database.clone())
+        .list_admin_job_runs_page(
+            job_id,
+            AdminJobRunFilter {
+                status,
+                cursor,
+                limit: admin_job_run_list_limit(query.limit),
+            },
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list job runs: {err}")))?
+    else {
+        return Err(AppError::not_found("job not found"));
+    };
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
+
+    Ok((
+        response_headers,
+        Json(page.records.into_iter().map(AdminJobRunDto::from).collect()),
+    ))
+}
+
+pub async fn list_job_events(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    Query(query): Query<AdminJobEventQueryDto>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<(HeaderMap, Json<Vec<AdminJobEventDto>>), AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let job_id = validate_uuid_public_id("jobId", &job_id)?;
+    let event_level = query
+        .event_level
+        .as_deref()
+        .map(validate_admin_job_event_level)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_positive_i64_cursor("cursor", value))
+        .transpose()?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let Some(page) = AdminRepository::new(database.clone())
+        .list_admin_job_events_page(
+            job_id,
+            AdminJobEventFilter {
+                event_level,
+                cursor,
+                limit: admin_job_event_list_limit(query.limit),
+            },
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list job events: {err}")))?
+    else {
+        return Err(AppError::not_found("job not found"));
+    };
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
+
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(AdminJobEventDto::from)
+                .collect(),
+        ),
+    ))
+}
+
 pub async fn run_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -945,46 +1280,103 @@ pub async fn run_job(
 
 pub async fn list_scheduled_tasks(
     State(state): State<AppState>,
+    Query(query): Query<ScheduledTaskQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<ScheduledTaskDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<ScheduledTaskDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let task_type = query
+        .task_type
+        .as_deref()
+        .map(validate_scheduled_task_filter_text)
+        .transpose()?
+        .map(str::to_owned);
+    let owner_type = query
+        .owner_type
+        .as_deref()
+        .map(validate_scheduled_task_owner_type)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let tasks = AdminRepository::new(database.clone())
-        .list_scheduled_tasks(MAX_SCHEDULED_TASKS_LIST_LIMIT)
+    let page = AdminRepository::new(database.clone())
+        .list_scheduled_tasks_page(ScheduledTaskFilter {
+            task_type,
+            owner_type,
+            enabled: query.enabled,
+            cursor,
+            limit: scheduled_task_list_limit(query.limit),
+        })
         .await
         .map_err(|err| AppError::internal(format!("failed to list scheduled tasks: {err}")))?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        tasks.into_iter().map(ScheduledTaskDto::from).collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(ScheduledTaskDto::from)
+                .collect(),
+        ),
     ))
 }
 
 pub async fn list_scheduled_task_runs(
     State(state): State<AppState>,
     Path(task_key): Path<String>,
+    Query(query): Query<ScheduledTaskRunQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<ScheduledTaskRunHistoryDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<ScheduledTaskRunHistoryDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let task_key = validate_scheduled_task_key(&task_key)?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_scheduled_task_run_status)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let Some(runs) = AdminRepository::new(database.clone())
-        .list_scheduled_task_runs(task_key, MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT)
+    let Some(page) = AdminRepository::new(database.clone())
+        .list_scheduled_task_runs_page(
+            task_key,
+            ScheduledTaskRunFilter {
+                status,
+                cursor,
+                limit: scheduled_task_run_list_limit(query.limit),
+            },
+        )
         .await
         .map_err(|err| AppError::internal(format!("failed to list scheduled task runs: {err}")))?
     else {
         return Err(AppError::not_found("scheduled task not found"));
     };
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        runs.into_iter()
-            .map(ScheduledTaskRunHistoryDto::from)
-            .collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(ScheduledTaskRunHistoryDto::from)
+                .collect(),
+        ),
     ))
 }
 
@@ -1010,23 +1402,51 @@ pub async fn run_scheduled_task(
 
 pub async fn list_transcoding_sessions(
     State(state): State<AppState>,
+    Query(query): Query<TranscodeSessionQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<TranscodeSessionDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<TranscodeSessionDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_transcode_session_status)
+        .transpose()?
+        .map(str::to_owned);
+    let hardware_acceleration = query
+        .hardware_acceleration
+        .as_deref()
+        .map(validate_transcode_hardware_acceleration)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let sessions = TranscodeRepository::new(database.clone())
-        .list_sessions(MAX_TRANSCODE_SESSIONS_LIST_LIMIT)
+    let page = TranscodeRepository::new(database.clone())
+        .list_sessions_page(TranscodeSessionFilter {
+            status,
+            hardware_acceleration,
+            cursor,
+            limit: transcode_session_list_limit(query.limit),
+        })
         .await
         .map_err(|err| AppError::internal(format!("failed to list transcoding sessions: {err}")))?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        sessions
-            .into_iter()
-            .map(TranscodeSessionDto::from)
-            .collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(TranscodeSessionDto::from)
+                .collect(),
+        ),
     ))
 }
 
@@ -1064,63 +1484,140 @@ pub async fn cancel_transcoding_session(
 
 pub async fn list_notification_targets(
     State(state): State<AppState>,
+    Query(query): Query<NotificationTargetQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<NotificationTargetDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<NotificationTargetDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let target_type = query
+        .target_type
+        .as_deref()
+        .map(normalize_notification_target_type)
+        .map(|value| validate_notification_target_type(&value).map(|_| value))
+        .transpose()?;
+    let channel = query
+        .channel
+        .as_deref()
+        .map(validate_notification_channel)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let targets = AdminRepository::new(database.clone())
-        .list_notification_targets(MAX_NOTIFICATION_TARGETS_LIST_LIMIT)
+    let page = AdminRepository::new(database.clone())
+        .list_notification_targets_page(NotificationTargetFilter {
+            target_type,
+            channel,
+            is_enabled: query.enabled,
+            cursor,
+            limit: notification_target_list_limit(query.limit),
+        })
         .await
         .map_err(|err| AppError::internal(format!("failed to list notification targets: {err}")))?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        targets
-            .into_iter()
-            .map(NotificationTargetDto::from)
-            .collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(NotificationTargetDto::from)
+                .collect(),
+        ),
     ))
 }
 
 pub async fn list_notification_requests(
     State(state): State<AppState>,
+    Query(query): Query<NotificationRequestQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<NotificationRequestDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<NotificationRequestDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_notification_request_status)
+        .transpose()?
+        .map(str::to_owned);
+    let channel = query
+        .channel
+        .as_deref()
+        .map(validate_notification_channel)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let requests = AdminRepository::new(database.clone())
-        .list_notification_requests(MAX_NOTIFICATION_REQUESTS_LIST_LIMIT)
+    let page = AdminRepository::new(database.clone())
+        .list_notification_requests_page(NotificationRequestFilter {
+            status,
+            channel,
+            cursor,
+            limit: notification_request_list_limit(query.limit),
+        })
         .await
         .map_err(|err| {
             AppError::internal(format!("failed to list notification requests: {err}"))
         })?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        requests
-            .into_iter()
-            .map(NotificationRequestDto::from)
-            .collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(NotificationRequestDto::from)
+                .collect(),
+        ),
     ))
 }
 
 pub async fn list_notification_delivery_attempts(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
+    Query(query): Query<NotificationDeliveryAttemptQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<NotificationDeliveryAttemptDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<NotificationDeliveryAttemptDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let request_id = validate_public_id("requestId", &request_id)?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_notification_delivery_attempt_status)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let Some(attempts) = AdminRepository::new(database.clone())
-        .list_notification_delivery_attempts(request_id, MAX_NOTIFICATION_ATTEMPTS_LIST_LIMIT)
+    let Some(page) = AdminRepository::new(database.clone())
+        .list_notification_delivery_attempts_page(
+            request_id,
+            NotificationDeliveryAttemptFilter {
+                status,
+                cursor,
+                limit: notification_attempt_list_limit(query.limit),
+            },
+        )
         .await
         .map_err(|err| {
             AppError::internal(format!(
@@ -1130,12 +1627,16 @@ pub async fn list_notification_delivery_attempts(
     else {
         return Err(AppError::not_found("notification request not found"));
     };
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        attempts
-            .into_iter()
-            .map(NotificationDeliveryAttemptDto::from)
-            .collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(NotificationDeliveryAttemptDto::from)
+                .collect(),
+        ),
     ))
 }
 
@@ -1160,39 +1661,81 @@ pub async fn retry_notification_request(
 
 pub async fn list_plugin_dispatches(
     State(state): State<AppState>,
+    Query(query): Query<PluginDispatchQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<PluginDispatchDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<PluginDispatchDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_event_outbox_status)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let dispatches = AdminRepository::new(database.clone())
-        .list_plugin_dispatches(MAX_PLUGIN_DISPATCHES_LIST_LIMIT)
+    let page = AdminRepository::new(database.clone())
+        .list_plugin_dispatches_page(PluginDispatchFilter {
+            status,
+            cursor,
+            limit: plugin_dispatch_list_limit(query.limit),
+        })
         .await
         .map_err(|err| AppError::internal(format!("failed to list plugin dispatches: {err}")))?;
 
-    Ok(Json(
-        dispatches
-            .into_iter()
-            .map(PluginDispatchDto::from)
-            .collect(),
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
+
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(PluginDispatchDto::from)
+                .collect(),
+        ),
     ))
 }
 
 pub async fn list_plugin_execution_runs(
     State(state): State<AppState>,
     Path(dispatch_id): Path<String>,
+    Query(query): Query<PluginExecutionRunQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<PluginExecutionRunDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<PluginExecutionRunDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let dispatch_id = validate_public_id("dispatchId", &dispatch_id)?;
+    let status = query
+        .status
+        .as_deref()
+        .map(validate_plugin_execution_run_status)
+        .transpose()?
+        .map(str::to_owned);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let Some(runs) = AdminRepository::new(database.clone())
-        .list_plugin_execution_runs(dispatch_id, MAX_PLUGIN_EXECUTION_RUNS_LIST_LIMIT)
+    let Some(page) = AdminRepository::new(database.clone())
+        .list_plugin_execution_runs_page(
+            dispatch_id,
+            PluginExecutionRunFilter {
+                status,
+                cursor,
+                limit: plugin_execution_run_list_limit(query.limit),
+            },
+        )
         .await
         .map_err(|err| {
             AppError::internal(format!("failed to list plugin execution runs: {err}"))
@@ -1200,9 +1743,16 @@ pub async fn list_plugin_execution_runs(
     else {
         return Err(AppError::not_found("plugin dispatch not found"));
     };
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        runs.into_iter().map(PluginExecutionRunDto::from).collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(PluginExecutionRunDto::from)
+                .collect(),
+        ),
     ))
 }
 
@@ -1211,7 +1761,7 @@ pub async fn list_plugin_host_api_calls(
     Query(query): Query<PluginHostApiCallQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<PluginHostApiCallDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<PluginHostApiCallDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let plugin_id = query
         .plugin_id
@@ -1229,39 +1779,64 @@ pub async fn list_plugin_host_api_calls(
         .status_code
         .map(validate_http_status_code)
         .transpose()?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let calls = AdminRepository::new(database.clone())
-        .list_plugin_host_api_calls(PluginHostApiCallFilter {
+    let page = AdminRepository::new(database.clone())
+        .list_plugin_host_api_calls_page(PluginHostApiCallFilter {
             plugin_id,
             execution_run_id,
             status_code,
+            cursor,
             limit: plugin_host_api_call_limit(query.limit),
         })
         .await
         .map_err(|err| {
             AppError::internal(format!("failed to list plugin host api calls: {err}"))
         })?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        calls.into_iter().map(PluginHostApiCallDto::from).collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(PluginHostApiCallDto::from)
+                .collect(),
+        ),
     ))
 }
 
 pub async fn list_plugin_host_api_calls_for_run(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
+    Query(query): Query<PluginHostApiCallRunQueryDto>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<PluginHostApiCallDto>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<PluginHostApiCallDto>>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let run_id = validate_public_id("runId", &run_id)?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let Some(calls) = AdminRepository::new(database.clone())
-        .list_plugin_host_api_calls_for_run(run_id, MAX_PLUGIN_HOST_API_CALLS_LIST_LIMIT)
+    let Some(page) = AdminRepository::new(database.clone())
+        .list_plugin_host_api_calls_for_run_page(
+            run_id,
+            cursor,
+            plugin_host_api_call_limit(query.limit),
+        )
         .await
         .map_err(|err| {
             AppError::internal(format!(
@@ -1271,10 +1846,39 @@ pub async fn list_plugin_host_api_calls_for_run(
     else {
         return Err(AppError::not_found("plugin execution run not found"));
     };
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
 
-    Ok(Json(
-        calls.into_iter().map(PluginHostApiCallDto::from).collect(),
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(PluginHostApiCallDto::from)
+                .collect(),
+        ),
     ))
+}
+
+pub async fn event_stream_mirror_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<EventStreamMirrorStatusDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let status = AdminRepository::new(database.clone())
+        .event_stream_mirror_status()
+        .await
+        .map_err(|err| {
+            AppError::internal(format!("failed to load event stream mirror status: {err}"))
+        })?;
+
+    Ok(Json(EventStreamMirrorStatusDto::from_config_and_record(
+        state.config(),
+        status,
+    )))
 }
 
 pub async fn replay_plugin_dispatch(
@@ -1508,16 +2112,294 @@ fn validate_scheduled_task_key(value: &str) -> Result<&str, AppError> {
     Ok(value)
 }
 
+fn validate_scheduled_task_filter_text(value: &str) -> Result<&str, AppError> {
+    validate_admin_job_filter_text("taskType", value)
+}
+
+fn validate_scheduled_task_owner_type(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("ownerType", value, 32)?;
+    if matches!(value, "core" | "plugin") {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "ownerType must be one of core or plugin",
+    ))
+}
+
 fn metadata_refresh_limit(value: Option<i64>) -> i64 {
     value
         .unwrap_or(DEFAULT_LIBRARY_METADATA_REFRESH_LIMIT)
         .clamp(1, MAX_LIBRARY_METADATA_REFRESH_LIMIT)
 }
 
+fn notification_target_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_NOTIFICATION_TARGETS_LIST_LIMIT)
+        .clamp(1, MAX_NOTIFICATION_TARGETS_LIST_LIMIT)
+}
+
 fn plugin_host_api_call_limit(value: Option<i64>) -> i64 {
     value
         .unwrap_or(MAX_PLUGIN_HOST_API_CALLS_LIST_LIMIT)
         .clamp(1, MAX_PLUGIN_HOST_API_CALLS_LIST_LIMIT)
+}
+
+fn plugin_dispatch_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_PLUGIN_DISPATCHES_LIST_LIMIT)
+        .clamp(1, MAX_PLUGIN_DISPATCHES_LIST_LIMIT)
+}
+
+fn plugin_execution_run_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_PLUGIN_EXECUTION_RUNS_LIST_LIMIT)
+        .clamp(1, MAX_PLUGIN_EXECUTION_RUNS_LIST_LIMIT)
+}
+
+fn admin_job_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_ADMIN_JOBS_LIST_LIMIT)
+        .clamp(1, MAX_ADMIN_JOBS_LIST_LIMIT)
+}
+
+fn admin_user_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_ADMIN_USERS_LIST_LIMIT)
+        .clamp(1, MAX_ADMIN_USERS_LIST_LIMIT)
+}
+
+fn admin_user_library_permission_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_ADMIN_USER_LIBRARY_PERMISSIONS_LIMIT)
+        .clamp(1, MAX_ADMIN_USER_LIBRARY_PERMISSIONS_LIMIT)
+}
+
+fn admin_job_run_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_ADMIN_JOB_RUNS_LIST_LIMIT)
+        .clamp(1, MAX_ADMIN_JOB_RUNS_LIST_LIMIT)
+}
+
+fn admin_job_event_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_ADMIN_JOB_EVENTS_LIST_LIMIT)
+        .clamp(1, MAX_ADMIN_JOB_EVENTS_LIST_LIMIT)
+}
+
+fn scheduled_task_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_SCHEDULED_TASKS_LIST_LIMIT)
+        .clamp(1, MAX_SCHEDULED_TASKS_LIST_LIMIT)
+}
+
+fn scheduled_task_run_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT)
+        .clamp(1, MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT)
+}
+
+fn transcode_session_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_TRANSCODE_SESSIONS_LIST_LIMIT)
+        .clamp(1, MAX_TRANSCODE_SESSIONS_LIST_LIMIT)
+}
+
+fn notification_request_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_NOTIFICATION_REQUESTS_LIST_LIMIT)
+        .clamp(1, MAX_NOTIFICATION_REQUESTS_LIST_LIMIT)
+}
+
+fn notification_attempt_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_NOTIFICATION_ATTEMPTS_LIST_LIMIT)
+        .clamp(1, MAX_NOTIFICATION_ATTEMPTS_LIST_LIMIT)
+}
+
+fn validate_notification_request_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(
+        value,
+        "queued" | "delivering" | "delivered" | "failed" | "discarded"
+    ) {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of queued, delivering, delivered, failed, or discarded",
+    ))
+}
+
+fn validate_notification_delivery_attempt_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(value, "running" | "succeeded" | "failed" | "skipped") {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of running, succeeded, failed, or skipped",
+    ))
+}
+
+fn validate_event_outbox_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(
+        value,
+        "pending" | "delivering" | "delivered" | "failed" | "discarded"
+    ) {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of pending, delivering, delivered, failed, or discarded",
+    ))
+}
+
+fn validate_plugin_execution_run_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(value, "running" | "succeeded" | "failed") {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of running, succeeded, or failed",
+    ))
+}
+
+fn validate_admin_job_run_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(value, "running" | "succeeded" | "failed" | "cancelled") {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of running, succeeded, failed, or cancelled",
+    ))
+}
+
+fn validate_admin_job_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(
+        value,
+        "queued" | "running" | "succeeded" | "failed" | "cancelled"
+    ) {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of queued, running, succeeded, failed, or cancelled",
+    ))
+}
+
+fn validate_admin_job_filter_text<'a>(field: &str, value: &'a str) -> Result<&'a str, AppError> {
+    let value = validate_bounded_text(field, value, MAX_ADMIN_JOB_FILTER_TEXT_LEN)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
+    {
+        return Err(AppError::unprocessable(format!(
+            "{field} may only contain letters, numbers, dot, dash, underscore, or colon"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_admin_user_role_name(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("roleName", value, MAX_ADMIN_USER_ROLE_NAME_LEN)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(AppError::unprocessable(
+            "roleName may only contain letters, numbers, dot, dash, or underscore",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_admin_job_event_level(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("eventLevel", value, 32)?;
+    if matches!(value, "debug" | "info" | "warn" | "error") {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "eventLevel must be one of debug, info, warn, or error",
+    ))
+}
+
+fn validate_scheduled_task_run_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(value, "running" | "succeeded" | "failed" | "expired") {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of running, succeeded, failed, or expired",
+    ))
+}
+
+fn validate_transcode_session_status(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("status", value, 32)?;
+    if matches!(
+        value,
+        "queued" | "running" | "succeeded" | "failed" | "cancelled"
+    ) {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "status must be one of queued, running, succeeded, failed, or cancelled",
+    ))
+}
+
+fn validate_transcode_hardware_acceleration(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text(
+        "hardwareAcceleration",
+        value,
+        MAX_TRANSCODE_HARDWARE_ACCELERATION_LEN,
+    )?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(AppError::unprocessable(
+            "hardwareAcceleration may only contain letters, numbers, dot, dash, or underscore",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_positive_i64_cursor(field: &str, value: &str) -> Result<i64, AppError> {
+    let value = validate_bounded_text(field, value, 32)?;
+    let cursor = value.parse::<i64>().map_err(|_| {
+        AppError::unprocessable(format!("{field} must be a positive integer cursor"))
+    })?;
+    if cursor <= 0 {
+        return Err(AppError::unprocessable(format!(
+            "{field} must be a positive integer cursor"
+        )));
+    }
+    Ok(cursor)
+}
+
+fn pagination_headers(has_more: bool, next_cursor: Option<&str>) -> Result<HeaderMap, AppError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-fbz-has-more",
+        HeaderValue::from_static(if has_more { "true" } else { "false" }),
+    );
+    if let Some(next_cursor) = next_cursor {
+        headers.insert(
+            "x-fbz-next-cursor",
+            HeaderValue::from_str(next_cursor).map_err(|err| {
+                AppError::internal(format!("failed to encode next cursor header: {err}"))
+            })?,
+        );
+    }
+
+    Ok(headers)
 }
 
 fn validate_http_status_code(value: i32) -> Result<i32, AppError> {
@@ -2001,6 +2883,30 @@ impl From<PluginHostApiCallRecord> for PluginHostApiCallDto {
     }
 }
 
+impl EventStreamMirrorStatusDto {
+    fn from_config_and_record(config: &Config, record: EventStreamMirrorStatusRecord) -> Self {
+        Self {
+            enabled: config.redis.event_streams_enabled,
+            stream_key: config.redis.event_stream_key.clone(),
+            batch_size: config.redis.event_stream_batch_size,
+            interval_seconds: config.redis.event_stream_interval_seconds,
+            lease_seconds: config.redis.event_stream_lease_seconds,
+            operation_timeout_ms: config.redis.operation_timeout_ms,
+            retry_base_seconds: config.redis.event_stream_retry_base_seconds,
+            retry_max_seconds: config.redis.event_stream_retry_max_seconds,
+            unmirrored_count: record.unmirrored_count,
+            claimable_count: record.claimable_count,
+            locked_count: record.locked_count,
+            backoff_count: record.backoff_count,
+            failed_count: record.failed_count,
+            max_attempts: record.max_attempts,
+            oldest_unmirrored_created_at: record.oldest_unmirrored_created_at,
+            next_retry_at: record.next_retry_at,
+            last_error: record.last_error,
+        }
+    }
+}
+
 impl From<ScheduledTaskAdminRecord> for ScheduledTaskDto {
     fn from(record: ScheduledTaskAdminRecord) -> Self {
         Self {
@@ -2179,6 +3085,387 @@ mod tests {
             plugin_host_api_call_limit(Some(MAX_PLUGIN_HOST_API_CALLS_LIST_LIMIT + 1)),
             MAX_PLUGIN_HOST_API_CALLS_LIST_LIMIT
         );
+    }
+
+    #[test]
+    fn plugin_host_api_call_run_route_uses_keyset_pagination() {
+        let routes = include_str!("routes.rs");
+
+        assert!(routes.contains("pub struct PluginHostApiCallRunQueryDto"));
+        assert!(routes.contains("Query(query): Query<PluginHostApiCallRunQueryDto>"));
+        assert!(routes.contains("list_plugin_host_api_calls_for_run_page"));
+        assert!(routes.contains("plugin_host_api_call_limit(query.limit)"));
+        assert!(routes.contains("pagination_headers(page.has_more, page.next_cursor.as_deref())"));
+    }
+
+    #[test]
+    fn plugin_dispatch_list_limit_is_bounded() {
+        assert_eq!(
+            plugin_dispatch_list_limit(None),
+            MAX_PLUGIN_DISPATCHES_LIST_LIMIT
+        );
+        assert_eq!(plugin_dispatch_list_limit(Some(0)), 1);
+        assert_eq!(
+            plugin_dispatch_list_limit(Some(MAX_PLUGIN_DISPATCHES_LIST_LIMIT + 1)),
+            MAX_PLUGIN_DISPATCHES_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn plugin_dispatch_status_filter_requires_outbox_status() {
+        assert_eq!(validate_event_outbox_status("pending").unwrap(), "pending");
+        assert_eq!(
+            validate_event_outbox_status("discarded").unwrap(),
+            "discarded"
+        );
+        assert!(validate_event_outbox_status("").is_err());
+        assert!(validate_event_outbox_status("queued").is_err());
+        assert!(validate_event_outbox_status("pending now").is_err());
+    }
+
+    #[test]
+    fn plugin_execution_run_list_limit_is_bounded() {
+        assert_eq!(
+            plugin_execution_run_list_limit(None),
+            MAX_PLUGIN_EXECUTION_RUNS_LIST_LIMIT
+        );
+        assert_eq!(plugin_execution_run_list_limit(Some(0)), 1);
+        assert_eq!(
+            plugin_execution_run_list_limit(Some(MAX_PLUGIN_EXECUTION_RUNS_LIST_LIMIT + 1)),
+            MAX_PLUGIN_EXECUTION_RUNS_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn plugin_execution_run_status_filter_requires_declared_status() {
+        assert_eq!(
+            validate_plugin_execution_run_status("running").unwrap(),
+            "running"
+        );
+        assert_eq!(
+            validate_plugin_execution_run_status("succeeded").unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            validate_plugin_execution_run_status("failed").unwrap(),
+            "failed"
+        );
+        assert!(validate_plugin_execution_run_status("").is_err());
+        assert!(validate_plugin_execution_run_status("pending").is_err());
+        assert!(validate_plugin_execution_run_status("running now").is_err());
+    }
+
+    #[test]
+    fn admin_user_list_limit_and_role_filter_are_bounded() {
+        assert_eq!(admin_user_list_limit(None), MAX_ADMIN_USERS_LIST_LIMIT);
+        assert_eq!(admin_user_list_limit(Some(0)), 1);
+        assert_eq!(
+            admin_user_list_limit(Some(MAX_ADMIN_USERS_LIST_LIMIT + 1)),
+            MAX_ADMIN_USERS_LIST_LIMIT
+        );
+
+        assert_eq!(validate_admin_user_role_name("admin").unwrap(), "admin");
+        assert_eq!(
+            validate_admin_user_role_name("server-admin_1").unwrap(),
+            "server-admin_1"
+        );
+        assert!(validate_admin_user_role_name("").is_err());
+        assert!(validate_admin_user_role_name("server admin").is_err());
+        assert!(validate_admin_user_role_name("../admin").is_err());
+        assert!(validate_admin_user_role_name("admin\\role").is_err());
+        assert!(validate_admin_user_role_name("admin\nrole").is_err());
+    }
+
+    #[test]
+    fn admin_user_library_permission_list_limit_is_bounded() {
+        assert_eq!(
+            admin_user_library_permission_list_limit(None),
+            MAX_ADMIN_USER_LIBRARY_PERMISSIONS_LIMIT
+        );
+        assert_eq!(admin_user_library_permission_list_limit(Some(0)), 1);
+        assert_eq!(
+            admin_user_library_permission_list_limit(Some(
+                MAX_ADMIN_USER_LIBRARY_PERMISSIONS_LIMIT + 1
+            )),
+            MAX_ADMIN_USER_LIBRARY_PERMISSIONS_LIMIT
+        );
+        let library_type = normalize_library_type(" Movies ");
+        assert_eq!(library_type, "movies");
+        assert!(validate_library_type(&library_type).is_ok());
+        assert!(validate_library_type(&normalize_library_type("books")).is_err());
+    }
+
+    #[test]
+    fn admin_job_list_limit_is_bounded() {
+        assert_eq!(admin_job_list_limit(None), MAX_ADMIN_JOBS_LIST_LIMIT);
+        assert_eq!(admin_job_list_limit(Some(0)), 1);
+        assert_eq!(
+            admin_job_list_limit(Some(MAX_ADMIN_JOBS_LIST_LIMIT + 1)),
+            MAX_ADMIN_JOBS_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn admin_job_list_filters_require_safe_values() {
+        assert_eq!(validate_admin_job_status("queued").unwrap(), "queued");
+        assert_eq!(validate_admin_job_status("running").unwrap(), "running");
+        assert_eq!(validate_admin_job_status("succeeded").unwrap(), "succeeded");
+        assert_eq!(validate_admin_job_status("cancelled").unwrap(), "cancelled");
+        assert!(validate_admin_job_status("").is_err());
+        assert!(validate_admin_job_status("pending").is_err());
+        assert!(validate_admin_job_status("running now").is_err());
+
+        assert_eq!(
+            validate_admin_job_filter_text("jobType", "metadata.refresh").unwrap(),
+            "metadata.refresh"
+        );
+        assert_eq!(
+            validate_admin_job_filter_text("queueName", "plugin:hook_dispatch").unwrap(),
+            "plugin:hook_dispatch"
+        );
+        assert!(validate_admin_job_filter_text("jobType", "").is_err());
+        assert!(validate_admin_job_filter_text("jobType", "metadata refresh").is_err());
+        assert!(validate_admin_job_filter_text("jobType", "../metadata.refresh").is_err());
+        assert!(validate_admin_job_filter_text("queueName", "worker\\queue").is_err());
+        assert!(validate_admin_job_filter_text("queueName", "worker\nqueue").is_err());
+    }
+
+    #[test]
+    fn admin_job_run_and_event_list_limits_are_bounded() {
+        assert_eq!(
+            admin_job_run_list_limit(None),
+            MAX_ADMIN_JOB_RUNS_LIST_LIMIT
+        );
+        assert_eq!(admin_job_run_list_limit(Some(0)), 1);
+        assert_eq!(
+            admin_job_run_list_limit(Some(MAX_ADMIN_JOB_RUNS_LIST_LIMIT + 1)),
+            MAX_ADMIN_JOB_RUNS_LIST_LIMIT
+        );
+
+        assert_eq!(
+            admin_job_event_list_limit(None),
+            MAX_ADMIN_JOB_EVENTS_LIST_LIMIT
+        );
+        assert_eq!(admin_job_event_list_limit(Some(0)), 1);
+        assert_eq!(
+            admin_job_event_list_limit(Some(MAX_ADMIN_JOB_EVENTS_LIST_LIMIT + 1)),
+            MAX_ADMIN_JOB_EVENTS_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn admin_job_run_and_event_filters_require_declared_values() {
+        assert_eq!(validate_admin_job_run_status("running").unwrap(), "running");
+        assert_eq!(
+            validate_admin_job_run_status("cancelled").unwrap(),
+            "cancelled"
+        );
+        assert!(validate_admin_job_run_status("").is_err());
+        assert!(validate_admin_job_run_status("queued").is_err());
+        assert!(validate_admin_job_run_status("running now").is_err());
+
+        assert_eq!(validate_admin_job_event_level("info").unwrap(), "info");
+        assert_eq!(validate_admin_job_event_level("error").unwrap(), "error");
+        assert!(validate_admin_job_event_level("").is_err());
+        assert!(validate_admin_job_event_level("fatal").is_err());
+        assert!(validate_admin_job_event_level("info now").is_err());
+    }
+
+    #[test]
+    fn positive_i64_cursor_rejects_invalid_values() {
+        assert_eq!(validate_positive_i64_cursor("cursor", "42").unwrap(), 42);
+        assert!(validate_positive_i64_cursor("cursor", "0").is_err());
+        assert!(validate_positive_i64_cursor("cursor", "-1").is_err());
+        assert!(validate_positive_i64_cursor("cursor", "abc").is_err());
+    }
+
+    #[test]
+    fn scheduled_task_list_limit_and_filters_are_bounded() {
+        assert_eq!(
+            scheduled_task_list_limit(None),
+            MAX_SCHEDULED_TASKS_LIST_LIMIT
+        );
+        assert_eq!(scheduled_task_list_limit(Some(0)), 1);
+        assert_eq!(
+            scheduled_task_list_limit(Some(MAX_SCHEDULED_TASKS_LIST_LIMIT + 1)),
+            MAX_SCHEDULED_TASKS_LIST_LIMIT
+        );
+
+        assert_eq!(
+            validate_scheduled_task_filter_text("plugin.schedule").unwrap(),
+            "plugin.schedule"
+        );
+        assert_eq!(
+            validate_scheduled_task_filter_text("library:scan_all").unwrap(),
+            "library:scan_all"
+        );
+        assert!(validate_scheduled_task_filter_text("").is_err());
+        assert!(validate_scheduled_task_filter_text("plugin schedule").is_err());
+        assert!(validate_scheduled_task_filter_text("../plugin.schedule").is_err());
+
+        assert_eq!(validate_scheduled_task_owner_type("core").unwrap(), "core");
+        assert_eq!(
+            validate_scheduled_task_owner_type("plugin").unwrap(),
+            "plugin"
+        );
+        assert!(validate_scheduled_task_owner_type("").is_err());
+        assert!(validate_scheduled_task_owner_type("system").is_err());
+        assert!(validate_scheduled_task_owner_type("plugin worker").is_err());
+    }
+
+    #[test]
+    fn scheduled_task_run_list_limit_is_bounded() {
+        assert_eq!(
+            scheduled_task_run_list_limit(None),
+            MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT
+        );
+        assert_eq!(scheduled_task_run_list_limit(Some(0)), 1);
+        assert_eq!(
+            scheduled_task_run_list_limit(Some(MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT + 1)),
+            MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn scheduled_task_run_status_filter_requires_declared_status() {
+        assert_eq!(
+            validate_scheduled_task_run_status("running").unwrap(),
+            "running"
+        );
+        assert_eq!(
+            validate_scheduled_task_run_status("expired").unwrap(),
+            "expired"
+        );
+        assert!(validate_scheduled_task_run_status("").is_err());
+        assert!(validate_scheduled_task_run_status("pending").is_err());
+        assert!(validate_scheduled_task_run_status("running now").is_err());
+    }
+
+    #[test]
+    fn transcode_session_list_limit_is_bounded() {
+        assert_eq!(
+            transcode_session_list_limit(None),
+            MAX_TRANSCODE_SESSIONS_LIST_LIMIT
+        );
+        assert_eq!(transcode_session_list_limit(Some(0)), 1);
+        assert_eq!(
+            transcode_session_list_limit(Some(MAX_TRANSCODE_SESSIONS_LIST_LIMIT + 1)),
+            MAX_TRANSCODE_SESSIONS_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn transcode_session_filters_require_safe_values() {
+        assert_eq!(
+            validate_transcode_session_status("queued").unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            validate_transcode_session_status("running").unwrap(),
+            "running"
+        );
+        assert_eq!(
+            validate_transcode_session_status("succeeded").unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            validate_transcode_session_status("cancelled").unwrap(),
+            "cancelled"
+        );
+        assert!(validate_transcode_session_status("").is_err());
+        assert!(validate_transcode_session_status("pending").is_err());
+        assert!(validate_transcode_session_status("running now").is_err());
+
+        assert_eq!(
+            validate_transcode_hardware_acceleration("intel-gpu_0").unwrap(),
+            "intel-gpu_0"
+        );
+        assert_eq!(
+            validate_transcode_hardware_acceleration("cuda.12").unwrap(),
+            "cuda.12"
+        );
+        assert!(validate_transcode_hardware_acceleration("").is_err());
+        assert!(validate_transcode_hardware_acceleration("nvidia gpu").is_err());
+        assert!(validate_transcode_hardware_acceleration("../nvidia").is_err());
+        assert!(validate_transcode_hardware_acceleration("nvidia\\gpu").is_err());
+        assert!(validate_transcode_hardware_acceleration("nvidia\ngpu").is_err());
+    }
+
+    #[test]
+    fn notification_target_list_limit_and_filters_are_bounded() {
+        assert_eq!(
+            notification_target_list_limit(None),
+            MAX_NOTIFICATION_TARGETS_LIST_LIMIT
+        );
+        assert_eq!(notification_target_list_limit(Some(0)), 1);
+        assert_eq!(
+            notification_target_list_limit(Some(MAX_NOTIFICATION_TARGETS_LIST_LIMIT + 1)),
+            MAX_NOTIFICATION_TARGETS_LIST_LIMIT
+        );
+
+        let target_type = normalize_notification_target_type(" WebHook ");
+        assert_eq!(target_type, "webhook");
+        assert!(validate_notification_target_type(&target_type).is_ok());
+        assert!(
+            validate_notification_target_type(&normalize_notification_target_type("email"))
+                .is_err()
+        );
+
+        assert_eq!(validate_notification_channel("ops:tg").unwrap(), "ops:tg");
+        assert!(validate_notification_channel("").is_err());
+        assert!(validate_notification_channel("ops tg").is_err());
+        assert!(validate_notification_channel("../ops").is_err());
+        assert!(validate_notification_channel("ops\\tg").is_err());
+    }
+
+    #[test]
+    fn notification_list_limits_are_bounded() {
+        assert_eq!(
+            notification_request_list_limit(None),
+            MAX_NOTIFICATION_REQUESTS_LIST_LIMIT
+        );
+        assert_eq!(notification_request_list_limit(Some(0)), 1);
+        assert_eq!(
+            notification_request_list_limit(Some(MAX_NOTIFICATION_REQUESTS_LIST_LIMIT + 1)),
+            MAX_NOTIFICATION_REQUESTS_LIST_LIMIT
+        );
+
+        assert_eq!(
+            notification_attempt_list_limit(None),
+            MAX_NOTIFICATION_ATTEMPTS_LIST_LIMIT
+        );
+        assert_eq!(notification_attempt_list_limit(Some(0)), 1);
+        assert_eq!(
+            notification_attempt_list_limit(Some(MAX_NOTIFICATION_ATTEMPTS_LIST_LIMIT + 1)),
+            MAX_NOTIFICATION_ATTEMPTS_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn notification_status_filters_require_declared_statuses() {
+        assert_eq!(
+            validate_notification_request_status("queued").unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            validate_notification_request_status("discarded").unwrap(),
+            "discarded"
+        );
+        assert!(validate_notification_request_status("").is_err());
+        assert!(validate_notification_request_status("pending").is_err());
+        assert!(validate_notification_request_status("queued now").is_err());
+
+        assert_eq!(
+            validate_notification_delivery_attempt_status("running").unwrap(),
+            "running"
+        );
+        assert_eq!(
+            validate_notification_delivery_attempt_status("skipped").unwrap(),
+            "skipped"
+        );
+        assert!(validate_notification_delivery_attempt_status("").is_err());
+        assert!(validate_notification_delivery_attempt_status("delivered").is_err());
+        assert!(validate_notification_delivery_attempt_status("running now").is_err());
     }
 
     #[test]

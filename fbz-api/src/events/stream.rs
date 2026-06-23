@@ -1,4 +1,8 @@
-use crate::{cache::RedisConnection, config::RedisConfig, events::repository::ClaimedOutboxEvent};
+use crate::{
+    cache::{RedisConnection, with_operation_timeout},
+    config::RedisConfig,
+    events::repository::ClaimedOutboxEvent,
+};
 
 pub async fn publish_outbox_event(
     connection: &mut RedisConnection,
@@ -18,7 +22,7 @@ pub async fn publish_outbox_event(
         command.arg(field).arg(value);
     }
 
-    command.query_async(connection).await
+    with_operation_timeout(config.operation_timeout_ms, command.query_async(connection)).await
 }
 
 pub fn stream_fields_for_event(event: &ClaimedOutboxEvent) -> Vec<(&'static str, String)> {

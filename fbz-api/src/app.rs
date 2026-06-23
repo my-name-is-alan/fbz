@@ -1,4 +1,4 @@
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use serde::Serialize;
 use tower_http::{
     cors::CorsLayer,
@@ -20,6 +20,8 @@ struct HealthResponse {
 struct ReadyResponse {
     status: &'static str,
     service: &'static str,
+    node_role: &'static str,
+    readiness_timeout_ms: u64,
     checks: ReadyChecks,
 }
 
@@ -55,20 +57,32 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-async fn ready(State(state): State<AppState>) -> Json<ReadyResponse> {
-    Json(ReadyResponse {
-        status: "ok",
-        service: "fbz-api",
-        checks: ReadyChecks {
-            config: "ok",
-            database: ready_label(state.database_ready()),
-            redis: ready_label(state.redis_ready()),
-        },
-    })
-}
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    let readiness = state.readiness().await;
+    let status_code = if readiness.is_ready() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
 
-fn ready_label(ready: bool) -> &'static str {
-    if ready { "ok" } else { "not_configured" }
+    (
+        status_code,
+        Json(ReadyResponse {
+            status: if readiness.is_ready() {
+                "ok"
+            } else {
+                "not_ready"
+            },
+            service: "fbz-api",
+            node_role: state.config().node.role.as_str(),
+            readiness_timeout_ms: state.config().server.readiness_timeout_ms,
+            checks: ReadyChecks {
+                config: "ok",
+                database: readiness.database.as_str(),
+                redis: readiness.redis.as_str(),
+            },
+        }),
+    )
 }
 
 async fn not_found() -> AppError {
@@ -78,7 +92,7 @@ async fn not_found() -> AppError {
 #[cfg(test)]
 mod tests {
     use axum::{
-        body::Body,
+        body::{self, Body},
         http::{Method, Request, StatusCode, header::CONTENT_TYPE},
     };
     use tower::ServiceExt;
@@ -104,8 +118,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_returns_ok() {
-        let app = build_router(AppState::for_tests(Config::default()));
+    async fn ready_returns_service_unavailable_without_dependencies() {
+        let mut config = Config::default();
+        config.server.readiness_timeout_ms = 750;
+        let app = build_router(AppState::for_tests(config));
 
         let response = app
             .oneshot(
@@ -117,7 +133,19 @@ mod tests {
             .await
             .expect("ready request should succeed");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be json");
+
+        assert_eq!(json["status"], "not_ready");
+        assert_eq!(json["service"], "fbz-api");
+        assert_eq!(json["node_role"], "all");
+        assert_eq!(json["readiness_timeout_ms"], 750);
+        assert_eq!(json["checks"]["config"], "ok");
+        assert_eq!(json["checks"]["database"], "not_configured");
+        assert_eq!(json["checks"]["redis"], "not_configured");
     }
 
     #[tokio::test]
@@ -232,6 +260,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emby_live_tv_aliases_return_disabled_or_empty() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in ["/emby/LiveTv/Info", "/LiveTv/Info"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("live tv info request should succeed");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should read");
+            let value: serde_json::Value =
+                serde_json::from_slice(&body).expect("body should be json");
+            assert_eq!(value["IsEnabled"], false);
+            assert!(value["EnabledUsers"].as_array().is_some_and(Vec::is_empty));
+        }
+
+        for uri in [
+            "/emby/LiveTv/Channels?UserId=user-1&StartIndex=20&Limit=10",
+            "/LiveTv/Channels?UserId=user-1&StartIndex=20&Limit=10",
+            "/emby/LiveTv/Programs?UserId=user-1",
+            "/LiveTv/Programs?UserId=user-1",
+            "/emby/LiveTv/RecommendedPrograms?UserId=user-1",
+            "/LiveTv/RecommendedPrograms?UserId=user-1",
+            "/emby/LiveTv/UpcomingPrograms?UserId=user-1",
+            "/LiveTv/UpcomingPrograms?UserId=user-1",
+            "/emby/LiveTv/Recordings?UserId=user-1",
+            "/LiveTv/Recordings?UserId=user-1",
+            "/emby/LiveTv/Recordings/Groups?UserId=user-1",
+            "/LiveTv/Recordings/Groups?UserId=user-1",
+            "/emby/LiveTv/Timers?UserId=user-1",
+            "/LiveTv/Timers?UserId=user-1",
+            "/emby/LiveTv/SeriesTimers?UserId=user-1",
+            "/LiveTv/SeriesTimers?UserId=user-1",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("live tv empty query request should succeed");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should read");
+            let value: serde_json::Value =
+                serde_json::from_slice(&body).expect("body should be json");
+            assert_eq!(value["TotalRecordCount"], 0);
+            assert!(value["Items"].as_array().is_some_and(Vec::is_empty));
+        }
+    }
+
+    #[tokio::test]
     async fn emby_display_preferences_aliases_exist() {
         let app = build_router(AppState::for_tests(Config::default()));
 
@@ -291,6 +387,14 @@ mod tests {
                 Method::GET,
                 "/api/admin/jobs/00000000-0000-0000-0000-000000000001",
             ),
+            (
+                Method::GET,
+                "/api/admin/jobs/00000000-0000-0000-0000-000000000001/runs",
+            ),
+            (
+                Method::GET,
+                "/api/admin/jobs/00000000-0000-0000-0000-000000000001/events",
+            ),
             (Method::POST, "/api/admin/jobs/job-1/run"),
             (Method::GET, "/api/admin/scheduled-tasks"),
             (
@@ -309,6 +413,7 @@ mod tests {
             (Method::GET, "/api/admin/plugins"),
             (Method::GET, "/api/admin/plugins/capabilities"),
             (Method::GET, "/api/admin/plugins/menu-items"),
+            (Method::GET, "/api/admin/plugins/packages"),
             (Method::POST, "/api/admin/plugins/packages"),
             (Method::GET, "/api/admin/plugins/packages/package-1"),
             (
@@ -351,6 +456,7 @@ mod tests {
                 Method::GET,
                 "/api/admin/plugin-execution-runs/run-1/host-api-calls",
             ),
+            (Method::GET, "/api/admin/event-stream-mirror/status"),
             (
                 Method::POST,
                 "/api/admin/plugin-dispatches/dispatch-1/replay",
@@ -723,6 +829,8 @@ mod tests {
             "/Users/user-1/Items?AnyProviderIdEquals=tmdb.123,imdb.tt7654321,tvdb.456",
             "/emby/Users/user-1/Items?ImageTypes=Primary,Backdrop&EnableImages=true&ImageTypeLimit=2&EnableImageTypes=Primary,Backdrop,Logo",
             "/Users/user-1/Items?ImageTypes=Primary,Backdrop&EnableImages=true&ImageTypeLimit=2&EnableImageTypes=Primary,Backdrop,Logo",
+            "/emby/Users/user-1/Items?IncludeItemTypes=Playlist&SearchTerm=mix&SortOrder=Descending",
+            "/Users/user-1/Items?IncludeItemTypes=Playlist&SearchTerm=mix&SortOrder=Descending",
         ] {
             let response = app
                 .clone()
@@ -843,6 +951,8 @@ mod tests {
             "/Artists?UserId=user-1&Limit=20",
             "/emby/Artists/AlbumArtists?UserId=user-1&SearchTerm=bow",
             "/Artists/AlbumArtists?UserId=user-1&SearchTerm=bow",
+            "/emby/Artists/Prefixes?UserId=user-1&Limit=20",
+            "/Artists/Prefixes?UserId=user-1&Limit=20",
             "/emby/Artists/David%20Bowie?UserId=user-1",
             "/Artists/David%20Bowie?UserId=user-1",
         ] {
@@ -858,6 +968,31 @@ mod tests {
                 )
                 .await
                 .expect("artist request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_item_prefix_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Items/Prefixes?UserId=user-1&IncludeItemTypes=Movie,MusicAlbum&Limit=50",
+            "/Items/Prefixes?UserId=user-1&IncludeItemTypes=Movie,MusicAlbum&Limit=50",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("item prefixes request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
         }
@@ -912,6 +1047,70 @@ mod tests {
                 )
                 .await
                 .expect("album or artist similar request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_instant_mix_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Items/item-1/InstantMix?UserId=user-1&Limit=20",
+            "/Items/item-1/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Songs/song-1/InstantMix?UserId=user-1&Limit=20",
+            "/Songs/song-1/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Albums/album-1/InstantMix?UserId=user-1&Limit=20",
+            "/Albums/album-1/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Artists/InstantMix?UserId=user-1&Limit=20",
+            "/Artists/InstantMix?UserId=user-1&Limit=20",
+            "/emby/MusicGenres/InstantMix?UserId=user-1&Limit=20",
+            "/MusicGenres/InstantMix?UserId=user-1&Limit=20",
+            "/emby/MusicGenres/Rock/InstantMix?UserId=user-1&Limit=20",
+            "/MusicGenres/Rock/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Playlists/playlist-1/InstantMix?UserId=user-1&Limit=20",
+            "/Playlists/playlist-1/InstantMix?UserId=user-1&Limit=20",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("instant mix request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_playlist_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Playlists?UserId=user-1&Limit=20",
+            "/Playlists?UserId=user-1&Limit=20",
+            "/emby/Playlists/playlist-1/Items?UserId=user-1&Limit=50",
+            "/Playlists/playlist-1/Items?UserId=user-1&Limit=50",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("playlist request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
         }

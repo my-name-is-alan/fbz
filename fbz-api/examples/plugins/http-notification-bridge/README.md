@@ -6,6 +6,7 @@ This is a first-party example HTTP plugin. It receives FBZ plugin hook dispatche
 
 - `manifest.json`: plugin contract used when installing the package.
 - `server.mjs`: dependency-free Node.js HTTP runtime endpoint for local development.
+- `fbz-plugin-http.mjs`: packaged copy of the shared HTTP helper. The example loads it from the package root first and falls back to `../_shared/fbz-plugin-http.mjs` during repository development.
 
 ## Local Run
 
@@ -24,8 +25,15 @@ Create a zip whose root contains `manifest.json` and any runtime files you want 
 
 ```text
 manifest.json
+fbz-plugin-http.mjs
 server.mjs
 README.md
+```
+
+From the repository root, the helper below writes the archive to `var/plugin-packages` and prints an install-ready `packagePath`, `checksumSha256`, and manifest payload:
+
+```powershell
+./scripts/package-plugin.ps1 -PluginDir examples/plugins/http-notification-bridge -Force
 ```
 
 Install the package through the admin plugin package API using this manifest. In production, keep `PLUGIN_ALLOW_UNSIGNED=false` and provide a trusted package signature.
