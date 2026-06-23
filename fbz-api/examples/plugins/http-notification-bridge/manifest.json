@@ -1,0 +1,46 @@
+{
+  "id": "dev.fbz.notify.bridge",
+  "name": "HTTP Notification Bridge",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19091/fbz-plugin",
+  "description": "First-party example HTTP plugin that forwards selected host events into the controlled notification Host API.",
+  "permissions": [
+    {
+      "key": "notification.send",
+      "reason": "Forward selected host events into administrator-managed notification targets."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "library.scan.completed",
+      "handler": "hooks.forward"
+    },
+    {
+      "event": "library.scan.failed",
+      "handler": "hooks.forward"
+    },
+    {
+      "event": "metadata.refresh.failed",
+      "handler": "hooks.forward"
+    },
+    {
+      "event": "transcode.failed",
+      "handler": "hooks.forward"
+    },
+    {
+      "event": "user.login",
+      "handler": "hooks.forward"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "channel",
+      "label": "Notification channel",
+      "type": "string",
+      "required": false,
+      "helpText": "Optional logical channel matched by administrator-managed notification targets."
+    }
+  ]
+}

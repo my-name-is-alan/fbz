@@ -1,0 +1,92 @@
+$fbz-color-bg: #0a0a0b;
+$fbz-color-bg-strong: #050506;
+$fbz-color-panel: #141416;
+$fbz-color-panel-strong: #1c1c20;
+$fbz-color-panel-elevated: #232328;
+$fbz-color-line: #2a2a2e;
+$fbz-color-line-bright: #3a3a40;
+$fbz-color-line-soft: #1f1f23;
+$fbz-color-text: #f3f3f4;
+$fbz-color-text-soft: #b2b2b8;
+$fbz-color-text-muted: #6f6f78;
+$fbz-color-text-disabled: #4a4a52;
+$fbz-color-brand-500: #1ed760;
+$fbz-color-brand-600: #1bc356;
+$fbz-color-cyan-500: #33d6ff;
+$fbz-color-green-500: #1ed760;
+$fbz-color-amber-500: #ffb82e;
+$fbz-color-danger-500: #ff5f79;
+$fbz-color-focus: #2ee06b;
+$fbz-space-1: 4px;
+$fbz-space-2: 8px;
+$fbz-space-3: 12px;
+$fbz-space-4: 16px;
+$fbz-space-5: 20px;
+$fbz-space-6: 24px;
+$fbz-space-8: 32px;
+$fbz-font-size-xs: 11px;
+$fbz-font-size-sm: 12px;
+$fbz-font-size-md: 14px;
+$fbz-font-size-lg: 18px;
+$fbz-font-size-xl: 24px;
+$fbz-radius-card: 4px;
+$fbz-radius-control: 6px;
+$fbz-radius-hero: 10px;
+$fbz-radius-round: 999px;
+$fbz-motion-fast: 120ms;
+$fbz-motion-base: 180ms;
+$fbz-motion-slow: 320ms;
+$fbz-z-sticky: 20;
+$fbz-z-overlay: 50;
+
+@mixin fbz-theme-vars {
+  :root {
+    --fbz-color-bg: #{$fbz-color-bg};
+    --fbz-color-bg-strong: #{$fbz-color-bg-strong};
+    --fbz-color-panel: #{$fbz-color-panel};
+    --fbz-color-panel-strong: #{$fbz-color-panel-strong};
+    --fbz-color-panel-elevated: #{$fbz-color-panel-elevated};
+    --fbz-color-line: #{$fbz-color-line};
+    --fbz-color-line-bright: #{$fbz-color-line-bright};
+    --fbz-color-line-soft: #{$fbz-color-line-soft};
+    --fbz-color-text: #{$fbz-color-text};
+    --fbz-color-text-soft: #{$fbz-color-text-soft};
+    --fbz-color-text-muted: #{$fbz-color-text-muted};
+    --fbz-color-text-disabled: #{$fbz-color-text-disabled};
+    --fbz-color-brand-500: #{$fbz-color-brand-500};
+    --fbz-color-brand-600: #{$fbz-color-brand-600};
+    --fbz-color-cyan-500: #{$fbz-color-cyan-500};
+    --fbz-color-green-500: #{$fbz-color-green-500};
+    --fbz-color-amber-500: #{$fbz-color-amber-500};
+    --fbz-color-danger-500: #{$fbz-color-danger-500};
+    --fbz-color-focus: #{$fbz-color-focus};
+    --fbz-space-1: #{$fbz-space-1};
+    --fbz-space-2: #{$fbz-space-2};
+    --fbz-space-3: #{$fbz-space-3};
+    --fbz-space-4: #{$fbz-space-4};
+    --fbz-space-5: #{$fbz-space-5};
+    --fbz-space-6: #{$fbz-space-6};
+    --fbz-space-8: #{$fbz-space-8};
+    --fbz-font-size-xs: #{$fbz-font-size-xs};
+    --fbz-font-size-sm: #{$fbz-font-size-sm};
+    --fbz-font-size-md: #{$fbz-font-size-md};
+    --fbz-font-size-lg: #{$fbz-font-size-lg};
+    --fbz-font-size-xl: #{$fbz-font-size-xl};
+    --fbz-radius-card: #{$fbz-radius-card};
+    --fbz-radius-control: #{$fbz-radius-control};
+    --fbz-radius-hero: #{$fbz-radius-hero};
+    --fbz-radius-round: #{$fbz-radius-round};
+    --fbz-shadow-panel: 0 20px 50px rgba(0, 0, 0, 0.5);
+    --fbz-shadow-focus: 0 0 0 3px rgba(30, 215, 96, 0.3);
+    // 字体：正文走系统优先的现代字栈（借鉴 HDHive），数字/品牌用 Orbitron 展示体
+    --fbz-font-sans:
+      ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
+      "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei", "Noto Sans SC", Helvetica, Arial, sans-serif;
+    --fbz-font-display: "Orbitron", var(--fbz-font-sans);
+    --fbz-motion-fast: #{$fbz-motion-fast};
+    --fbz-motion-base: #{$fbz-motion-base};
+    --fbz-motion-slow: #{$fbz-motion-slow};
+    --fbz-z-sticky: #{$fbz-z-sticky};
+    --fbz-z-overlay: #{$fbz-z-overlay};
+  }
+}

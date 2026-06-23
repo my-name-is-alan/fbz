@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AetherNAS 家庭影音库</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <strong>AetherNAS</strong>
+          <span>家庭影音库</span>
+        </div>
+      </div>
+
+      <nav class="nav-list" id="navList"></nav>
+
+      <div class="watch-device">
+        <div class="device-orb" aria-hidden="true"></div>
+        <div>
+          <strong>客厅电视</strong>
+          <span>Direct Play</span>
+        </div>
+        <p>下次继续</p>
+        <b>北境余烬 S4 E3</b>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="viewEyebrow">Watch Home</p>
+          <h1 id="viewTitle">首页</h1>
+          <p class="topbar-copy" id="viewCopy">继续观看、发现新片、进入你的家庭媒体库</p>
+        </div>
+
+        <label class="search" aria-label="搜索媒体">
+          <span aria-hidden="true"></span>
+          <input type="search" placeholder="搜索电影、剧集、演员、导演..." />
+        </label>
+
+        <button class="profile" type="button">
+          <span class="profile-avatar" aria-hidden="true"></span>
+          <span>
+            <strong>Alex Morgan</strong>
+            <small>家庭管理员</small>
+          </span>
+        </button>
+      </header>
+
+      <section id="viewRoot" class="view-root" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

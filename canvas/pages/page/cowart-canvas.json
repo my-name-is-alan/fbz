@@ -1,0 +1,346 @@
+{
+  "schema": {
+    "schemaVersion": 2,
+    "sequences": {
+      "com.tldraw.store": 5,
+      "com.tldraw.asset": 1,
+      "com.tldraw.camera": 1,
+      "com.tldraw.document": 2,
+      "com.tldraw.instance": 26,
+      "com.tldraw.instance_page_state": 5,
+      "com.tldraw.page": 1,
+      "com.tldraw.instance_presence": 6,
+      "com.tldraw.pointer": 1,
+      "com.tldraw.shape": 4,
+      "com.tldraw.user": 1,
+      "com.tldraw.asset.image": 6,
+      "com.tldraw.asset.video": 5,
+      "com.tldraw.asset.bookmark": 2,
+      "com.tldraw.shape.group": 0,
+      "com.tldraw.shape.text": 4,
+      "com.tldraw.shape.bookmark": 2,
+      "com.tldraw.shape.draw": 4,
+      "com.tldraw.shape.geo": 11,
+      "com.tldraw.shape.note": 12,
+      "com.tldraw.shape.line": 5,
+      "com.tldraw.shape.frame": 1,
+      "com.tldraw.shape.arrow": 8,
+      "com.tldraw.shape.highlight": 3,
+      "com.tldraw.shape.embed": 4,
+      "com.tldraw.shape.image": 5,
+      "com.tldraw.shape.video": 4,
+      "com.tldraw.binding.arrow": 1
+    }
+  },
+  "store": {
+    "shape:qlmpK3etXc-le6f0WbA-k": {
+      "x": 526.4322553566361,
+      "y": 198.27846114004993,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartAnnotationArrow": true
+      },
+      "id": "shape:qlmpK3etXc-le6f0WbA-k",
+      "type": "arrow",
+      "props": {
+        "kind": "arc",
+        "elbowMidPoint": 0.5,
+        "dash": "draw",
+        "size": "m",
+        "fill": "none",
+        "color": "red",
+        "labelColor": "red",
+        "bend": 42.818016932510886,
+        "start": {
+          "x": 0,
+          "y": 0
+        },
+        "end": {
+          "x": -305.6077631036948,
+          "y": 184.17961189716007
+        },
+        "arrowheadStart": "none",
+        "arrowheadEnd": "arrow",
+        "richText": {
+          "type": "doc",
+          "attrs": {
+            "dir": "auto"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "dir": "auto"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "这些tag又是什么意思？"
+                }
+              ]
+            }
+          ]
+        },
+        "labelPosition": 0,
+        "font": "draw",
+        "scale": 1
+      },
+      "parentId": "page:page",
+      "index": "a4qCgSeV",
+      "typeName": "shape"
+    },
+    "shape:0SigBE6E5IAiidmKgfeWS": {
+      "x": 466.94061080578354,
+      "y": 679.1013417565298,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartAnnotationArrow": true
+      },
+      "id": "shape:0SigBE6E5IAiidmKgfeWS",
+      "type": "arrow",
+      "props": {
+        "kind": "arc",
+        "elbowMidPoint": 0.5,
+        "dash": "draw",
+        "size": "m",
+        "fill": "none",
+        "color": "red",
+        "labelColor": "red",
+        "bend": 20.485551951612933,
+        "start": {
+          "x": 0,
+          "y": 0
+        },
+        "end": {
+          "x": -115.72347296193243,
+          "y": -125.50292138125064
+        },
+        "arrowheadStart": "none",
+        "arrowheadEnd": "arrow",
+        "richText": {
+          "type": "doc",
+          "attrs": {
+            "dir": "auto"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "dir": "auto"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "色调跟系统不符合"
+                }
+              ]
+            }
+          ]
+        },
+        "labelPosition": 0,
+        "font": "draw",
+        "scale": 1
+      },
+      "parentId": "page:page",
+      "index": "a3Qo8uiV",
+      "typeName": "shape"
+    },
+    "user:6V8MmSLSL5sPvuk04DDPA": {
+      "name": "",
+      "color": "#E34BA9",
+      "imageUrl": "",
+      "meta": {},
+      "id": "user:6V8MmSLSL5sPvuk04DDPA",
+      "typeName": "user"
+    },
+    "shape:cowart-4157c248939441708134280e32ff5d3a": {
+      "x": 40,
+      "y": 40,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "cowartAssetPath": "C:\\Code\\fbz\\canvas\\pages\\page\\assets\\movie-card-component-20260622-135841.png"
+      },
+      "id": "shape:cowart-4157c248939441708134280e32ff5d3a",
+      "type": "image",
+      "props": {
+        "w": 420,
+        "h": 560,
+        "assetId": "asset:cowart-c3ba95a1a9ce44b19eb0ac9c8a9d1e68",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "影视卡片组件图片"
+      },
+      "parentId": "page:page",
+      "index": "a2",
+      "typeName": "shape"
+    },
+    "shape:uY8QRhfcxoN6njZpeoRs4": {
+      "x": 553,
+      "y": 285.5,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartAiImageHolder": true,
+        "cowartAiImageHolderVersion": 1
+      },
+      "id": "shape:uY8QRhfcxoN6njZpeoRs4",
+      "type": "frame",
+      "props": {
+        "w": 320,
+        "h": 220,
+        "name": "AI 图片",
+        "color": "blue"
+      },
+      "parentId": "page:page",
+      "index": "a15BXYjV",
+      "typeName": "shape"
+    },
+    "shape:_IfWJp-KdavGE_sRGd_uI": {
+      "x": 553.3257385097613,
+      "y": 584.5666737031202,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartAnnotationArrow": true
+      },
+      "id": "shape:_IfWJp-KdavGE_sRGd_uI",
+      "type": "arrow",
+      "props": {
+        "kind": "arc",
+        "elbowMidPoint": 0.5,
+        "dash": "draw",
+        "size": "m",
+        "fill": "none",
+        "color": "red",
+        "labelColor": "red",
+        "bend": 24.426705261161146,
+        "start": {
+          "x": 0,
+          "y": 0
+        },
+        "end": {
+          "x": -185.80951996704653,
+          "y": -83.12531156420494
+        },
+        "arrowheadStart": "none",
+        "arrowheadEnd": "arrow",
+        "richText": {
+          "type": "doc",
+          "attrs": {
+            "dir": "auto"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "dir": "auto"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "这里的又是什么意思？参考emby的卡片"
+                }
+              ]
+            }
+          ]
+        },
+        "labelPosition": 0,
+        "font": "draw",
+        "scale": 1
+      },
+      "parentId": "page:page",
+      "index": "a5RPjD7V",
+      "typeName": "shape"
+    },
+    "page:page": {
+      "meta": {},
+      "id": "page:page",
+      "name": "Page 1",
+      "index": "a1",
+      "typeName": "page"
+    },
+    "document:document": {
+      "gridSize": 10,
+      "name": "",
+      "meta": {},
+      "id": "document:document",
+      "typeName": "document"
+    },
+    "asset:cowart-c3ba95a1a9ce44b19eb0ac9c8a9d1e68": {
+      "id": "asset:cowart-c3ba95a1a9ce44b19eb0ac9c8a9d1e68",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "movie-card-component-20260622-135841.png",
+        "src": "/page-assets/page/movie-card-component-20260622-135841.png",
+        "w": 1086,
+        "h": 1448,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "cowartSource": "imagegen"
+      }
+    },
+    "asset:cowart-61685e37337d4ff09ac18f39372d8105": {
+      "id": "asset:cowart-61685e37337d4ff09ac18f39372d8105",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "movie-card-component-emby-fbz-20260622-140621.png",
+        "src": "/page-assets/page/movie-card-component-emby-fbz-20260622-140621.png",
+        "w": 1024,
+        "h": 1536,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {
+        "cowartGeneratedFromAnnotationEdit": true,
+        "cowartAnnotationSourceShapeId": "shape:cowart-4157c248939441708134280e32ff5d3a",
+        "cowartSource": "imagegen"
+      }
+    },
+    "shape:cowart-78164901fb954b83b88bce0e50245c24": {
+      "x": 920,
+      "y": 40,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedFromAnnotationEdit": true,
+        "cowartAnnotationSourceShapeId": "shape:cowart-4157c248939441708134280e32ff5d3a",
+        "cowartAssetPath": "C:\\Code\\fbz\\canvas\\pages\\page\\assets\\movie-card-component-emby-fbz-20260622-140621.png",
+        "cowartEditNotes": "Removed unclear tags and metadata row; matched FBZ black/green Emby-style media card."
+      },
+      "id": "shape:cowart-78164901fb954b83b88bce0e50245c24",
+      "type": "image",
+      "props": {
+        "w": 420,
+        "h": 630,
+        "assetId": "asset:cowart-61685e37337d4ff09ac18f39372d8105",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "根据标注修改后的影视卡片组件图片"
+      },
+      "parentId": "page:page",
+      "index": "a6",
+      "typeName": "shape"
+    }
+  }
+}

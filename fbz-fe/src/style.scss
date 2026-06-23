@@ -1,0 +1,58 @@
+@include fbz-theme-vars;
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  // 永久预留滚动条槽位：避免不同页面高度导致路由切换时滚动条出现/消失、宽度抖动闪烁
+  scrollbar-gutter: stable;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: var(--fbz-font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "tnum" 1;
+
+  --header-h: 60px;
+}
+
+@media (max-width: 600px) {
+  :root {
+    --header-h: 56px;
+  }
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  color: var(--fbz-color-text);
+  background: var(--fbz-color-bg);
+}
+
+html.fbz-scroll-locked,
+body.fbz-scroll-locked {
+  overflow: hidden;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+#app {
+  min-height: 100vh;
+}

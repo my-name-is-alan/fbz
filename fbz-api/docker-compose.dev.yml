@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fbz-api-postgres
+    environment:
+      POSTGRES_DB: fbz
+      POSTGRES_USER: fbz
+      POSTGRES_PASSWORD: fbz
+    ports:
+      - "5432:5432"
+    volumes:
+      - fbz_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fbz -d fbz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: fbz-api-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - fbz_redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  fbz_postgres_data:
+  fbz_redis_data:
