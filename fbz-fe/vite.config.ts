@@ -48,6 +48,17 @@ export default defineConfig(({ mode }) => {
     define: {
       __APP_ENV__: JSON.stringify(env.APP_ENV ?? mode),
     },
+    build: {
+      rollupOptions: {
+        onLog(level, log, handler) {
+          if (log.code === "INVALID_ANNOTATION" && log.loc?.file?.includes("@vueuse/core")) {
+            return;
+          }
+
+          handler(level, log);
+        },
+      },
+    },
     staged: {
       "*": "vp check --fix",
     },
