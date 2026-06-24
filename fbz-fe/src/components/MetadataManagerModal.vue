@@ -152,33 +152,56 @@ function handleSave() {
     }
   }
 
-  alert("⚙️ 元数据更新成功！已将信息同步到本地 NFO 文件并刷新图片缓存。");
+  uiStore.showToast("元数据更新成功！已将信息同步到本地 NFO 文件并刷新图片缓存。", "success");
   uiStore.closeMetadataManager();
 }
+
+useEventListener(window, "keydown", (e) => {
+  if (e.key === "Escape" && metadataManager.value.open) {
+    uiStore.closeMetadataManager();
+  }
+});
 </script>
 
 <template>
   <Transition name="fade">
     <div v-if="metadataManager.open" class="metadata-overlay" @click="uiStore.closeMetadataManager">
-      <div class="metadata-modal" @click.stop>
+      <div
+        class="metadata-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="metadata-title"
+        @click.stop
+      >
         <!-- Modal Header -->
         <header class="modal-header">
           <div class="header-title">
-            <span class="icon">✏️</span>
+            <span class="icon" aria-hidden="true">✏️</span>
             <div>
-              <h2>编辑元数据</h2>
+              <h2 id="metadata-title">编辑元数据</h2>
               <span class="subtitle">{{ metadataManager.item?.title }}</span>
             </div>
           </div>
-          <button class="close-btn" type="button" @click="uiStore.closeMetadataManager">✕</button>
+          <button
+            class="close-btn"
+            type="button"
+            aria-label="关闭元数据管理器"
+            @click="uiStore.closeMetadataManager"
+          >
+            ✕
+          </button>
         </header>
 
         <!-- Tabs Navigation -->
-        <nav class="modal-tabs">
+        <nav class="modal-tabs" role="tablist" aria-label="元数据编辑分类">
           <button
             class="tab-btn"
             :class="{ active: activeTab === 'basic' }"
             type="button"
+            role="tab"
+            :aria-selected="activeTab === 'basic'"
+            aria-controls="tabpanel-basic"
+            id="tab-basic"
             @click="activeTab = 'basic'"
           >
             📋 基本信息
@@ -187,6 +210,10 @@ function handleSave() {
             class="tab-btn"
             :class="{ active: activeTab === 'poster' }"
             type="button"
+            role="tab"
+            :aria-selected="activeTab === 'poster'"
+            aria-controls="tabpanel-poster"
+            id="tab-poster"
             @click="activeTab = 'poster'"
           >
             🖼️ 封面与海报
@@ -195,6 +222,10 @@ function handleSave() {
             class="tab-btn"
             :class="{ active: activeTab === 'fanart' }"
             type="button"
+            role="tab"
+            :aria-selected="activeTab === 'fanart'"
+            aria-controls="tabpanel-fanart"
+            id="tab-fanart"
             @click="activeTab = 'fanart'"
           >
             🌌 背景与剧照
@@ -204,17 +235,23 @@ function handleSave() {
         <!-- Modal Content Body -->
         <div class="modal-body">
           <!-- Tab 1: Basic Info Form -->
-          <div v-if="activeTab === 'basic'" class="tab-content basic-info-tab">
+          <div
+            v-if="activeTab === 'basic'"
+            id="tabpanel-basic"
+            role="tabpanel"
+            aria-labelledby="tab-basic"
+            class="tab-content basic-info-tab"
+          >
             <div class="form-row">
               <div class="form-group flex-2">
-                <label>影片名称 (Title)</label>
-                <input v-model="form.title" type="text" class="control-input" />
+                <label for="meta-title">影片名称 (Title)</label>
+                <input id="meta-title" v-model="form.title" type="text" class="control-input" />
               </div>
               <div class="form-group flex-1">
-                <label style="opacity: 0">.</label>
+                <label style="opacity: 0" for="meta-lock">.</label>
                 <div class="checkbox-wrapper">
-                  <label class="checkbox-label">
-                    <input type="checkbox" checked />
+                  <label class="checkbox-label" for="meta-lock">
+                    <input id="meta-lock" type="checkbox" checked />
                     <span class="custom-check" />
                     <span>自动锁定该条目</span>
                   </label>
@@ -224,16 +261,27 @@ function handleSave() {
 
             <div class="form-row">
               <div class="form-group">
-                <label>原始名称 (Original Title)</label>
-                <input v-model="form.originalTitle" type="text" class="control-input" />
-              </div>
-              <div class="form-group flex-half">
-                <label>上映年份 (Year)</label>
-                <input v-model.number="form.year" type="number" class="control-input" />
-              </div>
-              <div class="form-group flex-half">
-                <label>TMDB 评分 (Rating)</label>
+                <label for="meta-orig-title">原始名称 (Original Title)</label>
                 <input
+                  id="meta-orig-title"
+                  v-model="form.originalTitle"
+                  type="text"
+                  class="control-input"
+                />
+              </div>
+              <div class="form-group flex-half">
+                <label for="meta-year">上映年份 (Year)</label>
+                <input
+                  id="meta-year"
+                  v-model.number="form.year"
+                  type="number"
+                  class="control-input"
+                />
+              </div>
+              <div class="form-group flex-half">
+                <label for="meta-rating">TMDB 评分 (Rating)</label>
+                <input
+                  id="meta-rating"
                   v-model.number="form.rating"
                   type="number"
                   step="0.1"
@@ -244,8 +292,9 @@ function handleSave() {
 
             <div class="form-row">
               <div class="form-group">
-                <label>题材类型 (Genres)</label>
+                <label for="meta-genres">题材类型 (Genres)</label>
                 <input
+                  id="meta-genres"
                   v-model="form.genres"
                   type="text"
                   placeholder="用逗号分隔，如：科幻, 冒险, 动作"
@@ -253,20 +302,25 @@ function handleSave() {
                 />
               </div>
               <div class="form-group">
-                <label>一句话宣传语 (Tagline)</label>
-                <input v-model="form.tagline" type="text" class="control-input" />
+                <label for="meta-tagline">一句话宣传语 (Tagline)</label>
+                <input id="meta-tagline" v-model="form.tagline" type="text" class="control-input" />
               </div>
             </div>
 
             <div class="form-group">
-              <label>剧情简介 (Overview)</label>
-              <textarea v-model="form.overview" rows="4" class="control-textarea" />
+              <label for="meta-overview">剧情简介 (Overview)</label>
+              <textarea
+                id="meta-overview"
+                v-model="form.overview"
+                rows="4"
+                class="control-textarea"
+              />
             </div>
 
             <div class="form-row">
               <div class="form-group">
-                <label>海报语言偏好</label>
-                <select v-model="form.posterLanguage" class="control-select">
+                <label for="meta-lang">海报语言偏好</label>
+                <select id="meta-lang" v-model="form.posterLanguage" class="control-select">
                   <option value="zh">优先中文 (CN)</option>
                   <option value="en">优先英文 (EN)</option>
                   <option value="original">使用原产国语言</option>
@@ -284,7 +338,13 @@ function handleSave() {
           </div>
 
           <!-- Tab 2: Poster Grid Selector -->
-          <div v-if="activeTab === 'poster'" class="tab-content assets-tab">
+          <div
+            v-if="activeTab === 'poster'"
+            id="tabpanel-poster"
+            role="tabpanel"
+            aria-labelledby="tab-poster"
+            class="tab-content assets-tab"
+          >
             <div class="asset-toolbar">
               <span class="hint">为您从网络上搜刮到以下封面图片，请选择一张作为海报：</span>
               <button class="upload-btn" type="button" @click="triggerPosterUpload">
@@ -305,7 +365,13 @@ function handleSave() {
                 :key="p.id"
                 class="asset-card"
                 :class="{ active: selectedPosterId === p.id }"
+                tabindex="0"
+                role="button"
+                :aria-pressed="selectedPosterId === p.id"
+                :aria-label="`选择海报: ${p.label}`"
                 @click="selectPoster(p.id)"
+                @keydown.enter="selectPoster(p.id)"
+                @keydown.space.prevent="selectPoster(p.id)"
               >
                 <img :src="p.url" alt="Poster option" />
                 <div class="asset-overlay">
@@ -317,7 +383,13 @@ function handleSave() {
           </div>
 
           <!-- Tab 3: Fanart Grid Selector -->
-          <div v-if="activeTab === 'fanart'" class="tab-content assets-tab">
+          <div
+            v-if="activeTab === 'fanart'"
+            id="tabpanel-fanart"
+            role="tabpanel"
+            aria-labelledby="tab-fanart"
+            class="tab-content assets-tab"
+          >
             <div class="asset-toolbar">
               <span class="hint">为您搜刮到以下高画质背景与剧照横幅：</span>
               <button class="upload-btn" type="button" @click="triggerFanartUpload">
@@ -342,7 +414,13 @@ function handleSave() {
                 :key="f.id"
                 class="asset-card wide-card"
                 :class="{ active: selectedFanartId === f.id }"
+                tabindex="0"
+                role="button"
+                :aria-pressed="selectedFanartId === f.id"
+                :aria-label="`选择背景图: ${f.label}`"
                 @click="selectFanart(f.id)"
+                @keydown.enter="selectFanart(f.id)"
+                @keydown.space.prevent="selectFanart(f.id)"
               >
                 <img :src="f.url" alt="Fanart option" />
                 <div class="asset-overlay">
@@ -571,7 +649,11 @@ function handleSave() {
   user-select: none;
 
   input {
-    display: none;
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
   }
 
   .custom-check {
@@ -599,6 +681,11 @@ function handleSave() {
     &::after {
       opacity: 1;
     }
+  }
+
+  input:focus-visible + .custom-check {
+    border-color: var(--fbz-color-brand-500);
+    box-shadow: 0 0 0 3px rgba(30, 215, 96, 0.4);
   }
 }
 

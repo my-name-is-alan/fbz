@@ -31,13 +31,12 @@ impl EventOutboxMirrorRepository {
     ) -> Result<Vec<ClaimedOutboxEvent>, sqlx::Error> {
         let rows = sqlx::query(
             r#"
-            update event_outbox
-            set stream_mirror_attempts = stream_mirror_attempts + 1,
-                stream_mirror_locked_by = $2,
-                stream_mirror_locked_until = now() + ($3::bigint * interval '1 second'),
-                stream_mirror_last_error = null
-            where id in (
-                select id
+            with claimable as (
+                select id,
+                       (
+                           stream_mirror_locked_by is not null
+                           and stream_mirror_locked_until <= now()
+                       ) as stale_mirror_lease
                 from event_outbox
                 where stream_mirrored_at is null
                   and (
@@ -48,19 +47,27 @@ impl EventOutboxMirrorRepository {
                 for update skip locked
                 limit $1
             )
+            update event_outbox outbox
+            set stream_mirror_attempts = outbox.stream_mirror_attempts + 1,
+                stream_mirror_locked_by = $2,
+                stream_mirror_locked_until = now() + ($3::bigint * interval '1 second'),
+                stream_mirror_last_error = null
+            from claimable
+            where outbox.id = claimable.id
             returning
-                id,
-                public_id::text as public_id,
-                event_type,
-                aggregate_type,
-                aggregate_id,
-                payload,
-                status,
-                attempts,
-                max_attempts,
-                available_at::text as available_at,
-                created_at::text as created_at,
-                stream_mirror_attempts
+                outbox.id,
+                outbox.public_id::text as public_id,
+                outbox.event_type,
+                outbox.aggregate_type,
+                outbox.aggregate_id,
+                outbox.payload,
+                outbox.status,
+                outbox.attempts,
+                outbox.max_attempts,
+                outbox.available_at::text as available_at,
+                outbox.created_at::text as created_at,
+                outbox.stream_mirror_attempts,
+                claimable.stale_mirror_lease
             "#,
         )
         .bind(i64::from(batch_size))
@@ -85,6 +92,7 @@ impl EventOutboxMirrorRepository {
                     available_at: row.try_get("available_at")?,
                     created_at: row.try_get("created_at")?,
                     stream_mirror_attempts: row.try_get("stream_mirror_attempts")?,
+                    stale_mirror_lease: row.try_get("stale_mirror_lease")?,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -153,6 +161,7 @@ pub struct ClaimedOutboxEvent {
     pub available_at: String,
     pub created_at: String,
     pub stream_mirror_attempts: i32,
+    pub stale_mirror_lease: bool,
 }
 
 fn truncate_error(error: &str) -> String {
@@ -163,6 +172,8 @@ fn truncate_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const REPOSITORY_SOURCE: &str = include_str!("repository.rs");
 
     #[test]
     fn truncate_error_keeps_database_error_values_bounded() {
@@ -187,5 +198,19 @@ mod tests {
             )
         );
         assert!(!normalized.contains("stream_mirror_locked_until = null"));
+    }
+
+    #[test]
+    fn stream_mirror_claim_marks_expired_leases_before_update() {
+        let production_source = REPOSITORY_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("repository source should include production section");
+
+        assert!(production_source.contains("stale_mirror_lease"));
+        assert!(production_source.contains("stream_mirror_locked_by is not null"));
+        assert!(production_source.contains("stream_mirror_locked_until <= now()"));
+        assert!(production_source.contains("claimable.stale_mirror_lease"));
+        assert!(production_source.contains("stale_mirror_lease: row.try_get"));
     }
 }

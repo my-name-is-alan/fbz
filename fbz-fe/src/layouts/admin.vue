@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { useThemeStore } from "@/stores/theme.ts";
+import { useAuthStore } from "@/stores/auth.ts";
 
 const route = useRoute();
 const themeStore = useThemeStore();
+const authStore = useAuthStore();
 
 const mobileMenuOpen = ref(false);
 
@@ -40,6 +42,7 @@ const ICONS = {
   transcode: "M23 7l-7 5 7 5V7z M1 5h15v14H1z",
   users:
     "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75",
+  user: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
   plugin: "M12 2L2 7l10 5 10-5-10-5z M2 17l10 5 10-5 M2 12l10 5 10-5",
   metaMgr: "M4 7V4h16v3 M9 20h6 M12 4v16",
   log: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M12 18v-6 M8 18v-4 M16 18v-2",
@@ -56,6 +59,7 @@ const navItems: NavItem[] = [
   {
     label: "个人偏好",
     children: [
+      { label: "个人信息", to: "/admin/profile", name: "admin-profile", icon: ICONS.user },
       { label: "主题设置", to: "/admin/theme", name: "admin-theme", icon: ICONS.theme },
       { label: "媒体库排序", to: "/admin/lib-sort", name: "admin-lib-sort", icon: ICONS.sort },
     ],
@@ -105,6 +109,12 @@ function toggleTheme() {
 function closeMobileMenu() {
   mobileMenuOpen.value = false;
 }
+
+useEventListener(window, "keydown", (e) => {
+  if (e.key === "Escape" && mobileMenuOpen.value) {
+    closeMobileMenu();
+  }
+});
 </script>
 
 <template>
@@ -116,7 +126,7 @@ function closeMobileMenu() {
         <span class="brand-sub">系统控制台</span>
       </div>
 
-      <nav class="sidebar-nav">
+      <nav class="sidebar-nav" aria-label="后台管理主要导航">
         <template v-for="item in navItems" :key="isGroup(item) ? item.label : item.to">
           <!-- Top-level link -->
           <RouterLink
@@ -142,7 +152,13 @@ function closeMobileMenu() {
           </RouterLink>
 
           <!-- Group with children -->
-          <div v-else class="nav-group" :class="{ 'group-active': groupIsActive(item) }">
+          <div
+            v-else
+            class="nav-group"
+            role="group"
+            :aria-label="item.label"
+            :class="{ 'group-active': groupIsActive(item) }"
+          >
             <div class="group-label">{{ item.label }}</div>
             <RouterLink
               v-for="child in item.children"
@@ -242,13 +258,19 @@ function closeMobileMenu() {
 
     <!-- Mobile Sidebar -->
     <Transition name="slide">
-      <aside v-if="mobileMenuOpen" class="mobile-sidebar">
+      <aside
+        v-if="mobileMenuOpen"
+        class="mobile-sidebar"
+        role="dialog"
+        aria-modal="true"
+        aria-label="移动端导航侧栏"
+      >
         <div class="sidebar-brand">
           <span class="brand-logo">F<b>B</b>Z</span>
           <span class="brand-sub">系统控制台</span>
         </div>
 
-        <nav class="sidebar-nav">
+        <nav class="sidebar-nav" aria-label="后台管理移动端导航">
           <template v-for="item in navItems" :key="isGroup(item) ? item.label : item.to">
             <RouterLink
               v-if="!isGroup(item)"
@@ -273,7 +295,13 @@ function closeMobileMenu() {
               <span class="menu-label">{{ item.label }}</span>
             </RouterLink>
 
-            <div v-else class="nav-group" :class="{ 'group-active': groupIsActive(item) }">
+            <div
+              v-else
+              class="nav-group"
+              role="group"
+              :aria-label="item.label"
+              :class="{ 'group-active': groupIsActive(item) }"
+            >
               <div class="group-label">{{ item.label }}</div>
               <RouterLink
                 v-for="child in item.children"
@@ -372,6 +400,7 @@ function closeMobileMenu() {
           type="button"
           @click="mobileMenuOpen = true"
           aria-label="打开菜单"
+          :aria-expanded="mobileMenuOpen"
         >
           <svg
             viewBox="0 0 24 24"
@@ -429,10 +458,10 @@ function closeMobileMenu() {
             </svg>
           </button>
 
-          <div class="user-badge">
-            <span class="user-avatar">A</span>
-            <span class="user-name">Admin</span>
-          </div>
+          <RouterLink to="/admin/profile" class="user-badge" title="个人信息与偏好设置">
+            <span class="user-avatar">{{ authStore.nickname.charAt(0).toUpperCase() }}</span>
+            <span class="user-name">{{ authStore.nickname }}</span>
+          </RouterLink>
         </div>
       </header>
 

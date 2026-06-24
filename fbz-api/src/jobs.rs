@@ -1,9 +1,17 @@
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, Row, Transaction};
+use tracing::warn;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpiredJobMessages<'a> {
     pub retry: &'a str,
     pub final_failure: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExpiredJobSummary {
+    pub expired_jobs: u64,
+    pub retryable_jobs: u64,
+    pub terminal_jobs: u64,
 }
 
 const EXPIRE_STALE_RUNNING_JOBS_SQL: &str = r#"
@@ -24,7 +32,9 @@ with expired_jobs as (
     where job_type = $1
       and status = 'running'
       and locked_until <= now()
-    returning id, last_error
+    returning id,
+              last_error,
+              attempts < max_attempts as retryable
 ),
 expired_runs as (
     update job_runs jr
@@ -36,7 +46,9 @@ expired_runs as (
       and jr.status = 'running'
     returning jr.id
 )
-select count(*)::bigint
+select count(*)::bigint as expired_jobs,
+       count(*) filter (where retryable)::bigint as retryable_jobs,
+       count(*) filter (where not retryable)::bigint as terminal_jobs
 from expired_jobs
 "#;
 
@@ -44,15 +56,40 @@ pub async fn expire_stale_running_jobs(
     tx: &mut Transaction<'_, Postgres>,
     job_type: &str,
     messages: ExpiredJobMessages<'_>,
-) -> Result<u64, sqlx::Error> {
-    let count = sqlx::query_scalar::<_, i64>(EXPIRE_STALE_RUNNING_JOBS_SQL)
+) -> Result<ExpiredJobSummary, sqlx::Error> {
+    let row = sqlx::query(EXPIRE_STALE_RUNNING_JOBS_SQL)
         .bind(job_type.trim())
         .bind(messages.retry)
         .bind(messages.final_failure)
         .fetch_one(&mut **tx)
         .await?;
+    let summary = ExpiredJobSummary {
+        expired_jobs: row.try_get::<i64, _>("expired_jobs")?.max(0) as u64,
+        retryable_jobs: row.try_get::<i64, _>("retryable_jobs")?.max(0) as u64,
+        terminal_jobs: row.try_get::<i64, _>("terminal_jobs")?.max(0) as u64,
+    };
 
-    Ok(count.max(0) as u64)
+    log_expired_job_summary(job_type, summary);
+
+    Ok(summary)
+}
+
+impl ExpiredJobSummary {
+    pub fn has_work(&self) -> bool {
+        self.expired_jobs > 0
+    }
+}
+
+fn log_expired_job_summary(job_type: &str, summary: ExpiredJobSummary) {
+    if summary.has_work() {
+        warn!(
+            job_type = %job_type,
+            expired_jobs = summary.expired_jobs,
+            retryable_jobs = summary.retryable_jobs,
+            terminal_jobs = summary.terminal_jobs,
+            "recovered stale running jobs"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -69,6 +106,35 @@ mod tests {
         assert_ne!(messages.retry, messages.final_failure);
         assert!(messages.retry.contains("retry"));
         assert!(messages.final_failure.contains("max attempts"));
+    }
+
+    #[test]
+    fn stale_job_recovery_reports_retryable_and_terminal_counts() {
+        let summary = ExpiredJobSummary {
+            expired_jobs: 3,
+            retryable_jobs: 2,
+            terminal_jobs: 1,
+        };
+
+        assert!(summary.has_work());
+        assert_eq!(
+            summary.expired_jobs,
+            summary.retryable_jobs + summary.terminal_jobs
+        );
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("retryable_jobs"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("terminal_jobs"));
+    }
+
+    #[test]
+    fn stale_job_recovery_logs_structured_summary_fields() {
+        let source = include_str!("jobs.rs");
+
+        assert!(source.contains("log_expired_job_summary"));
+        assert!(source.contains("job_type = %job_type"));
+        assert!(source.contains("expired_jobs = summary.expired_jobs"));
+        assert!(source.contains("retryable_jobs = summary.retryable_jobs"));
+        assert!(source.contains("terminal_jobs = summary.terminal_jobs"));
+        assert!(source.contains("recovered stale running jobs"));
     }
 
     #[test]

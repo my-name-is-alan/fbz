@@ -78,6 +78,17 @@ pub struct UserItemDataRecord {
     pub played: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserItemDataUpdateInput {
+    pub user_id: i64,
+    pub item_id: String,
+    pub playback_position_ticks: Option<i64>,
+    pub play_count: Option<i32>,
+    pub is_favorite: Option<bool>,
+    pub rating: Option<f64>,
+    pub played: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtworkRecord {
     pub artwork_type: String,
@@ -457,6 +468,89 @@ impl MediaRepository {
             .await
     }
 
+    pub async fn find_user_item_data(
+        &self,
+        user_id: i64,
+        item_id: &str,
+    ) -> Result<Option<UserItemDataRecord>, sqlx::Error> {
+        let Some(target) = self.find_playback_target(user_id, item_id, None).await? else {
+            return Ok(None);
+        };
+
+        self.find_user_item_data_by_media_id(user_id, target.media_item_id)
+            .await
+    }
+
+    pub async fn update_user_item_data(
+        &self,
+        input: UserItemDataUpdateInput,
+    ) -> Result<Option<UserItemDataRecord>, sqlx::Error> {
+        let Some(target) = self
+            .find_playback_target(input.user_id, &input.item_id, None)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        sqlx::query(
+            r#"
+            insert into user_playstates (
+                user_id,
+                media_item_id,
+                played,
+                position_ticks,
+                play_count,
+                is_favorite,
+                rating,
+                last_played_at,
+                updated_at
+            )
+            values (
+                $1,
+                $2,
+                coalesce($3::boolean, false),
+                coalesce($4::bigint, 0),
+                coalesce($5::integer, 0),
+                coalesce($6::boolean, false),
+                case
+                    when $7::boolean then $8::double precision::numeric(4, 2)
+                    else null
+                end,
+                case when coalesce($3::boolean, false) then now() else null end,
+                now()
+            )
+            on conflict (user_id, media_item_id) do update
+            set played = coalesce($3::boolean, user_playstates.played),
+                position_ticks = coalesce($4::bigint, user_playstates.position_ticks),
+                play_count = coalesce($5::integer, user_playstates.play_count),
+                is_favorite = coalesce($6::boolean, user_playstates.is_favorite),
+                rating = case
+                    when $7::boolean then $8::double precision::numeric(4, 2)
+                    else user_playstates.rating
+                end,
+                last_played_at = case
+                    when $3::boolean is true then now()
+                    when $3::boolean is false then null
+                    else user_playstates.last_played_at
+                end,
+                updated_at = now()
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(target.media_item_id)
+        .bind(input.played)
+        .bind(input.playback_position_ticks)
+        .bind(input.play_count)
+        .bind(input.is_favorite)
+        .bind(input.rating.is_some())
+        .bind(input.rating)
+        .execute(&self.pool)
+        .await?;
+
+        self.find_user_item_data_by_media_id(input.user_id, target.media_item_id)
+            .await
+    }
+
     pub async fn set_item_favorite(
         &self,
         user_id: i64,
@@ -616,6 +710,48 @@ impl MediaRepository {
         .await?
         .map(ArtworkRecord::from_row)
         .transpose()
+    }
+
+    pub async fn list_item_artwork(
+        &self,
+        user_id: i64,
+        item_id: &str,
+    ) -> Result<Vec<ArtworkRecord>, sqlx::Error> {
+        sqlx::query(
+            r#"
+            with target_item as (
+                select mi.id
+                from media_items mi
+                join libraries l on l.id = mi.library_id
+                join library_permissions lp on lp.library_id = mi.library_id
+                where mi.public_id = case
+                    when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end
+                  and lp.user_id = $1
+                  and lp.can_view = true
+                  and mi.is_deleted = false
+                  and l.is_hidden = false
+            )
+            select
+                a.artwork_type,
+                a.storage_key,
+                a.remote_url,
+                a.width,
+                a.height
+            from artwork a
+            join target_item target on target.id = a.media_item_id
+            order by a.artwork_type, a.is_primary desc, a.id
+            "#,
+        )
+        .bind(user_id)
+        .bind(item_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(ArtworkRecord::from_row)
+        .collect()
     }
 
     async fn find_playback_target(

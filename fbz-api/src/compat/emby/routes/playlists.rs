@@ -1,9 +1,9 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, Uri},
+    http::{HeaderMap, StatusCode, Uri},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     compat::emby::dto::{BaseItemDto, BaseItemSource, QueryResultDto},
@@ -14,10 +14,17 @@ use crate::{
     state::AppState,
 };
 
-use super::{access::authenticate_query_user, items::media_item_to_base_item};
+use super::{
+    access::{authenticate_query_user, authenticate_request_user},
+    items::media_item_to_base_item,
+};
 
 const DEFAULT_PLAYLISTS_LIMIT: u32 = 100;
 const MAX_PLAYLISTS_LIMIT: u32 = 200;
+const MAX_PLAYLIST_IDS: usize = 256;
+const MAX_PLAYLIST_ID_LEN: usize = 128;
+const MAX_PLAYLIST_NAME_LEN: usize = 256;
+const MAX_PLAYLIST_MEDIA_TYPE_LEN: usize = 64;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -42,6 +49,56 @@ pub struct PlaylistItemsQuery {
     pub enable_images: Option<bool>,
     pub image_type_limit: Option<u32>,
     pub enable_image_types: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreatePlaylistQuery {
+    pub name: Option<String>,
+    pub ids: Option<String>,
+    pub media_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AddToPlaylistInfoQuery {
+    pub user_id: Option<String>,
+    pub ids: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AddPlaylistItemsQuery {
+    pub user_id: Option<String>,
+    pub ids: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemovePlaylistItemsQuery {
+    pub entry_ids: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaylistCreationResultDto {
+    pub id: String,
+    pub name: String,
+    pub item_added_count: i32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AddToPlaylistResultDto {
+    pub id: String,
+    pub item_added_count: i32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AddToPlaylistInfoDto {
+    pub item_count: i32,
+    pub contains_duplicates: bool,
 }
 
 pub async fn playlists(
@@ -80,6 +137,21 @@ pub async fn playlists(
         result.total_record_count,
         window.start_index as u32,
     )))
+}
+
+pub async fn create_playlist(
+    State(state): State<AppState>,
+    Query(query): Query<CreatePlaylistQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<PlaylistCreationResultDto>, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let input = create_playlist_input(query)?;
+    let _name = input.name;
+    let _ids = input.ids;
+    let _media_type = input.media_type;
+
+    Err(playlist_write_disabled_error())
 }
 
 pub async fn playlist_items(
@@ -121,6 +193,67 @@ pub async fn playlist_items(
     )))
 }
 
+pub async fn add_to_playlist_info(
+    State(state): State<AppState>,
+    Path(playlist_id): Path<String>,
+    Query(query): Query<AddToPlaylistInfoQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<AddToPlaylistInfoDto>, AppError> {
+    authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let input = add_to_playlist_input(&playlist_id, query.ids.as_deref())?;
+
+    Ok(Json(AddToPlaylistInfoDto {
+        item_count: input.ids.len() as i32,
+        contains_duplicates: input.contains_duplicates,
+    }))
+}
+
+pub async fn add_playlist_items(
+    State(state): State<AppState>,
+    Path(playlist_id): Path<String>,
+    Query(query): Query<AddPlaylistItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<AddToPlaylistResultDto>, AppError> {
+    authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let input = add_to_playlist_input(&playlist_id, query.ids.as_deref())?;
+    let _playlist_id = input.playlist_id;
+    let _ids = input.ids;
+
+    Err(playlist_write_disabled_error())
+}
+
+pub async fn remove_playlist_items(
+    State(state): State<AppState>,
+    Path(playlist_id): Path<String>,
+    Query(query): Query<RemovePlaylistItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let input = remove_playlist_items_input(&playlist_id, query.entry_ids.as_deref())?;
+    let _playlist_id = input.playlist_id;
+    let _entry_ids = input.ids;
+
+    Err(playlist_write_disabled_error())
+}
+
+pub async fn move_playlist_item(
+    State(state): State<AppState>,
+    Path((playlist_id, item_id, new_index)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let input = move_playlist_item_input(&playlist_id, &item_id, &new_index)?;
+    let _playlist_id = input.playlist_id;
+    let _item_id = input.item_id;
+    let _new_index = input.new_index;
+
+    Err(playlist_write_disabled_error())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PlaylistWindow {
     start_index: i64,
@@ -155,6 +288,69 @@ pub(super) fn playlist_to_base_item(record: PlaylistRecord) -> BaseItemDto {
     item
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreatePlaylistInput {
+    name: String,
+    ids: Vec<String>,
+    media_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaylistIdsInput {
+    playlist_id: String,
+    ids: Vec<String>,
+    contains_duplicates: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MovePlaylistItemInput {
+    playlist_id: String,
+    item_id: String,
+    new_index: u32,
+}
+
+fn create_playlist_input(query: CreatePlaylistQuery) -> Result<CreatePlaylistInput, AppError> {
+    Ok(CreatePlaylistInput {
+        name: normalize_required_playlist_name(query.name.as_deref())?,
+        ids: normalize_playlist_ids(query.ids.as_deref(), false)?.ids,
+        media_type: normalize_optional_media_type(query.media_type.as_deref())?,
+    })
+}
+
+fn add_to_playlist_input(
+    playlist_id: &str,
+    ids: Option<&str>,
+) -> Result<PlaylistIdsInput, AppError> {
+    Ok(PlaylistIdsInput {
+        playlist_id: normalize_playlist_id(playlist_id, "Id")?,
+        ..normalize_playlist_ids(ids, true)?
+    })
+}
+
+fn remove_playlist_items_input(
+    playlist_id: &str,
+    entry_ids: Option<&str>,
+) -> Result<PlaylistIdsInput, AppError> {
+    Ok(PlaylistIdsInput {
+        playlist_id: normalize_playlist_id(playlist_id, "Id")?,
+        ..normalize_playlist_ids(entry_ids, true)?
+    })
+}
+
+fn move_playlist_item_input(
+    playlist_id: &str,
+    item_id: &str,
+    new_index: &str,
+) -> Result<MovePlaylistItemInput, AppError> {
+    Ok(MovePlaylistItemInput {
+        playlist_id: normalize_playlist_id(playlist_id, "Id")?,
+        item_id: normalize_playlist_id(item_id, "ItemId")?,
+        new_index: new_index
+            .parse::<u32>()
+            .map_err(|_| AppError::unprocessable("NewIndex is invalid"))?,
+    })
+}
+
 fn normalized_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -168,6 +364,87 @@ fn sort_direction_from_query(value: Option<&str>) -> SortDirection {
         Some(value) if value.eq_ignore_ascii_case("Desc") => SortDirection::Desc,
         _ => SortDirection::Asc,
     }
+}
+
+fn normalize_playlist_ids(
+    value: Option<&str>,
+    required: bool,
+) -> Result<PlaylistIdsInput, AppError> {
+    let raw = value.unwrap_or_default();
+    let mut ids = Vec::new();
+    let mut contains_duplicates = false;
+
+    for part in raw.split(',') {
+        let value = part.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let value = normalize_playlist_id(value, "Ids")?;
+        if ids.iter().any(|existing| existing == &value) {
+            contains_duplicates = true;
+            continue;
+        }
+        ids.push(value);
+        if ids.len() > MAX_PLAYLIST_IDS {
+            return Err(AppError::unprocessable("too many playlist item ids"));
+        }
+    }
+
+    if required && ids.is_empty() {
+        return Err(AppError::unprocessable("Ids are required"));
+    }
+
+    Ok(PlaylistIdsInput {
+        playlist_id: String::new(),
+        ids,
+        contains_duplicates,
+    })
+}
+
+fn normalize_playlist_id(value: &str, field: &'static str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::unprocessable(format!("{field} is required")));
+    }
+    if value.len() > MAX_PLAYLIST_ID_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(AppError::unprocessable(format!("{field} is invalid")));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn normalize_required_playlist_name(value: Option<&str>) -> Result<String, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(AppError::unprocessable("Name is required"));
+    };
+    if value.len() > MAX_PLAYLIST_NAME_LEN || value.chars().any(char::is_control) {
+        return Err(AppError::unprocessable("Name is invalid"));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn normalize_optional_media_type(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_PLAYLIST_MEDIA_TYPE_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return Err(AppError::unprocessable("MediaType is invalid"));
+    }
+
+    Ok(Some(value.to_owned()))
+}
+
+fn playlist_write_disabled_error() -> AppError {
+    AppError::conflict("Emby playlist writes are disabled; use FBZ collection management APIs")
 }
 
 #[cfg(test)]
@@ -214,5 +491,110 @@ mod tests {
         assert!(item.is_folder);
         assert_eq!(item.collection_type.as_deref(), Some("playlists"));
         assert!(item.media_type.is_none());
+    }
+
+    #[test]
+    fn playlist_write_dtos_serialize_with_official_pascal_case() {
+        assert_eq!(
+            serde_json::to_value(PlaylistCreationResultDto {
+                id: "playlist-1".to_owned(),
+                name: "Road Trip".to_owned(),
+                item_added_count: 2,
+            })
+            .unwrap(),
+            json!({
+                "Id": "playlist-1",
+                "Name": "Road Trip",
+                "ItemAddedCount": 2
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(AddToPlaylistResultDto {
+                id: "playlist-1".to_owned(),
+                item_added_count: 2,
+            })
+            .unwrap(),
+            json!({
+                "Id": "playlist-1",
+                "ItemAddedCount": 2
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(AddToPlaylistInfoDto {
+                item_count: 2,
+                contains_duplicates: true,
+            })
+            .unwrap(),
+            json!({
+                "ItemCount": 2,
+                "ContainsDuplicates": true
+            })
+        );
+    }
+
+    #[test]
+    fn playlist_write_inputs_normalize_official_query_parameters() {
+        let create = create_playlist_input(CreatePlaylistQuery {
+            name: Some(" Road Trip ".to_owned()),
+            ids: Some(" item-1,item-2,item-1 ".to_owned()),
+            media_type: Some(" Audio ".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(create.name, "Road Trip");
+        assert_eq!(create.ids, ["item-1", "item-2"]);
+        assert_eq!(create.media_type.as_deref(), Some("Audio"));
+
+        let add = add_to_playlist_input(" playlist-1 ", Some("item-1,item-2,item-1")).unwrap();
+
+        assert_eq!(add.playlist_id, "playlist-1");
+        assert_eq!(add.ids, ["item-1", "item-2"]);
+        assert!(add.contains_duplicates);
+
+        let moved = move_playlist_item_input("playlist-1", "entry-1", "3").unwrap();
+
+        assert_eq!(moved.new_index, 3);
+    }
+
+    #[test]
+    fn playlist_write_inputs_reject_missing_or_unsafe_values() {
+        assert_eq!(
+            create_playlist_input(CreatePlaylistQuery {
+                name: Some(" ".to_owned()),
+                ids: None,
+                media_type: None,
+            })
+            .unwrap_err()
+            .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            add_to_playlist_input("playlist-1", None)
+                .unwrap_err()
+                .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            remove_playlist_items_input("playlist-1", Some("bad/id"))
+                .unwrap_err()
+                .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            move_playlist_item_input("playlist-1", "entry-1", "-1")
+                .unwrap_err()
+                .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            create_playlist_input(CreatePlaylistQuery {
+                name: Some("Road Trip".to_owned()),
+                ids: None,
+                media_type: Some("Audio/Video".to_owned()),
+            })
+            .unwrap_err()
+            .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

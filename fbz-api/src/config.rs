@@ -11,12 +11,14 @@ const DEFAULT_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_READINESS_TIMEOUT_MS: u64 = 500;
 const MAX_READINESS_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_HTTP_SLOW_LOG_THRESHOLD_MS: u64 = 1_000;
 const DEFAULT_LOG_LEVEL: &str = "fbz_api=info,tower_http=info";
 const DEFAULT_DATABASE_URL: &str = "postgres://fbz:fbz@127.0.0.1:5432/fbz";
 const DEFAULT_DATABASE_ACQUIRE_TIMEOUT_SECONDS: u64 = 5;
 const DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_DATABASE_MAX_LIFETIME_SECONDS: u64 = 1_800;
 const DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS: u32 = 30_000;
+const DEFAULT_DATABASE_SLOW_LOG_THRESHOLD_MS: u64 = 1_000;
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379";
 const DEFAULT_REDIS_EVENT_STREAM_KEY: &str = "fbz:events";
 const DEFAULT_REDIS_EVENT_STREAM_MAX_LEN: u64 = 50_000;
@@ -128,6 +130,7 @@ pub struct DatabaseConfig {
     pub idle_timeout_seconds: u64,
     pub max_lifetime_seconds: u64,
     pub statement_timeout_ms: u32,
+    pub slow_log_threshold_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,6 +333,7 @@ pub struct BootstrapAdminConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TelemetryConfig {
     pub log_level: String,
+    pub http_slow_log_threshold_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -413,6 +417,11 @@ impl Config {
                 statement_timeout_ms: parse_or(
                     "DATABASE_STATEMENT_TIMEOUT_MS",
                     DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+                    &source,
+                )?,
+                slow_log_threshold_ms: parse_or(
+                    "DATABASE_SLOW_LOG_THRESHOLD_MS",
+                    DEFAULT_DATABASE_SLOW_LOG_THRESHOLD_MS,
                     &source,
                 )?,
             },
@@ -641,6 +650,11 @@ impl Config {
             },
             telemetry: TelemetryConfig {
                 log_level: get_or("RUST_LOG", DEFAULT_LOG_LEVEL, &source),
+                http_slow_log_threshold_ms: parse_or(
+                    "HTTP_SLOW_LOG_THRESHOLD_MS",
+                    DEFAULT_HTTP_SLOW_LOG_THRESHOLD_MS,
+                    &source,
+                )?,
             },
         };
 
@@ -664,6 +678,12 @@ impl Config {
             return Err(ConfigError::new(
                 "FBZ_READINESS_TIMEOUT_MS",
                 "must be less than or equal to 60000",
+            ));
+        }
+        if self.telemetry.http_slow_log_threshold_ms == 0 {
+            return Err(ConfigError::new(
+                "HTTP_SLOW_LOG_THRESHOLD_MS",
+                "must be greater than zero",
             ));
         }
 
@@ -709,6 +729,12 @@ impl Config {
         if self.database.statement_timeout_ms == 0 {
             return Err(ConfigError::new(
                 "DATABASE_STATEMENT_TIMEOUT_MS",
+                "must be greater than zero",
+            ));
+        }
+        if self.database.slow_log_threshold_ms == 0 {
+            return Err(ConfigError::new(
+                "DATABASE_SLOW_LOG_THRESHOLD_MS",
                 "must be greater than zero",
             ));
         }
@@ -1273,6 +1299,10 @@ mod tests {
             config.server.readiness_timeout_ms,
             DEFAULT_READINESS_TIMEOUT_MS
         );
+        assert_eq!(
+            config.telemetry.http_slow_log_threshold_ms,
+            DEFAULT_HTTP_SLOW_LOG_THRESHOLD_MS
+        );
         assert_eq!(config.database.url, DEFAULT_DATABASE_URL);
         assert_eq!(config.database.min_connections, 1);
         assert_eq!(config.database.max_connections, 20);
@@ -1291,6 +1321,10 @@ mod tests {
         assert_eq!(
             config.database.statement_timeout_ms,
             DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS
+        );
+        assert_eq!(
+            config.database.slow_log_threshold_ms,
+            DEFAULT_DATABASE_SLOW_LOG_THRESHOLD_MS
         );
         assert_eq!(config.redis.url, DEFAULT_REDIS_URL);
         assert_eq!(
@@ -1384,6 +1418,7 @@ mod tests {
             ("FBZ_API_HOST", "0.0.0.0"),
             ("FBZ_API_PORT", "8096"),
             ("FBZ_READINESS_TIMEOUT_MS", "750"),
+            ("HTTP_SLOW_LOG_THRESHOLD_MS", "2500"),
             ("PUBLIC_BASE_URL", "https://media.example.test"),
             ("DATABASE_URL", "postgresql://fbz:secret@db/fbz"),
             ("DATABASE_MIN_CONNECTIONS", "2"),
@@ -1392,6 +1427,7 @@ mod tests {
             ("DATABASE_IDLE_TIMEOUT_SECONDS", "300"),
             ("DATABASE_MAX_LIFETIME_SECONDS", "900"),
             ("DATABASE_STATEMENT_TIMEOUT_MS", "12000"),
+            ("DATABASE_SLOW_LOG_THRESHOLD_MS", "450"),
             ("REDIS_URL", "rediss://redis.example.test:6380"),
             ("REDIS_OPERATION_TIMEOUT_MS", "1500"),
             ("REDIS_EVENT_STREAMS_ENABLED", "true"),
@@ -1446,6 +1482,7 @@ mod tests {
         assert_eq!(config.server.host, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(config.server.port, 8096);
         assert_eq!(config.server.readiness_timeout_ms, 750);
+        assert_eq!(config.telemetry.http_slow_log_threshold_ms, 2_500);
         assert_eq!(config.server.public_base_url, "https://media.example.test");
         assert_eq!(config.database.url, "postgresql://fbz:secret@db/fbz");
         assert_eq!(config.database.min_connections, 2);
@@ -1454,6 +1491,7 @@ mod tests {
         assert_eq!(config.database.idle_timeout_seconds, 300);
         assert_eq!(config.database.max_lifetime_seconds, 900);
         assert_eq!(config.database.statement_timeout_ms, 12_000);
+        assert_eq!(config.database.slow_log_threshold_ms, 450);
         assert_eq!(config.redis.url, "rediss://redis.example.test:6380");
         assert_eq!(config.redis.operation_timeout_ms, 1_500);
         assert!(config.redis.event_streams_enabled);
@@ -1545,6 +1583,15 @@ mod tests {
     }
 
     #[test]
+    fn invalid_http_slow_log_threshold_fails_early() {
+        let source = map_source([("HTTP_SLOW_LOG_THRESHOLD_MS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "HTTP_SLOW_LOG_THRESHOLD_MS");
+    }
+
+    #[test]
     fn invalid_database_url_fails_early() {
         let source = map_source([("DATABASE_URL", "mysql://fbz:secret@db/fbz")]);
 
@@ -1593,6 +1640,12 @@ mod tests {
         let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
 
         assert_eq!(err.key(), "DATABASE_STATEMENT_TIMEOUT_MS");
+
+        let source = map_source([("DATABASE_SLOW_LOG_THRESHOLD_MS", "0")]);
+
+        let err = Config::from_source(|key| source.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err.key(), "DATABASE_SLOW_LOG_THRESHOLD_MS");
     }
 
     #[test]

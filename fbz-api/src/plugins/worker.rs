@@ -58,7 +58,7 @@ pub fn spawn_plugin_worker(
 async fn run_available_dispatches(service: &PluginExecutionService, max_concurrency: u16) {
     match service.recover_stale_execution_runs().await {
         Ok(summary) if summary.recovered_anything() => {
-            info!(
+            warn!(
                 expired_runs = summary.expired_runs,
                 revoked_tokens = summary.revoked_tokens,
                 "recovered stale plugin execution runs"
@@ -155,6 +155,8 @@ impl PluginDispatchBatchOutcome {
 mod tests {
     use super::*;
 
+    const WORKER_SOURCE: &str = include_str!("worker.rs");
+
     #[test]
     fn dispatch_batch_size_never_returns_zero() {
         assert_eq!(dispatch_batch_size(0), 1);
@@ -187,5 +189,22 @@ mod tests {
             }
             .should_continue(4)
         );
+    }
+
+    #[test]
+    fn stale_execution_recovery_logs_structured_warn_fields() {
+        let production_source = WORKER_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("worker source should include production section");
+
+        assert!(
+            production_source
+                .contains("warn!(\r\n                expired_runs = summary.expired_runs")
+                || production_source
+                    .contains("warn!(\n                expired_runs = summary.expired_runs")
+        );
+        assert!(production_source.contains("revoked_tokens = summary.revoked_tokens"));
+        assert!(production_source.contains("recovered stale plugin execution runs"));
     }
 }

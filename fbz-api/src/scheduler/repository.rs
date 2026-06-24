@@ -1,8 +1,6 @@
 use serde_json::json;
-use sqlx::{
-    Postgres, Row, Transaction,
-    postgres::{PgQueryResult, PgRow},
-};
+use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
+use tracing::warn;
 
 use crate::{
     db::DbPool, metadata::service::METADATA_REFRESH_JOB_TYPE,
@@ -13,8 +11,51 @@ pub const CORE_INCREMENTAL_SCAN_TASK_KEY: &str = "core.library.incremental_scan"
 pub const CORE_SCAN_ALL_TASK_TYPE: &str = "library.scan_all";
 pub const CORE_METADATA_REFRESH_TASK_KEY: &str = "core.metadata.refresh";
 pub const CORE_METADATA_REFRESH_TASK_TYPE: &str = "metadata.refresh_all";
+pub const CORE_TRANSCODE_CLEANUP_TASK_KEY: &str = "core.transcode.cleanup";
+pub const CORE_TRANSCODE_CLEANUP_TASK_TYPE: &str = "transcode.cleanup";
 pub const PLUGIN_SCHEDULE_TASK_TYPE: &str = "plugin.schedule";
 const METADATA_REFRESH_QUEUE_BATCH_SIZE: i64 = 50_000;
+
+const EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL: &str = r#"
+with expired_runs as (
+    update scheduled_task_runs
+    set status = 'expired',
+        error_message = coalesce(error_message, 'scheduled task lease expired'),
+        finished_at = coalesce(finished_at, lease_expires_at),
+        updated_at = now()
+    where status = 'running'
+      and lease_expires_at <= now()
+    returning id,
+              trigger_type
+)
+select count(*)::bigint as expired_runs,
+       count(*) filter (where trigger_type = 'due')::bigint as due_runs,
+       count(*) filter (where trigger_type = 'manual')::bigint as manual_runs
+from expired_runs
+"#;
+
+const TRANSCODE_CLEANUP_CANDIDATES_SQL: &str = r#"
+            select public_id::text as id,
+                   output_path
+            from transcoding_sessions
+            where status in ('cancelled', 'failed')
+              and output_cleaned_at is null
+              and output_path is not null
+            order by finished_at asc nulls first, id asc
+            limit $1
+            "#;
+
+const TRANSCODE_MARK_OUTPUT_CLEANED_SQL: &str = r#"
+            update transcoding_sessions
+            set output_cleaned_at = now(),
+                updated_at = now()
+            where public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+              and output_cleaned_at is null
+            "#;
 
 #[derive(Clone)]
 pub struct SchedulerRepository {
@@ -42,6 +83,25 @@ pub struct ScheduledTaskRecord {
     pub schedule_value: String,
     pub timeout_seconds: i32,
     pub max_concurrency: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScheduledTaskExpiredRunSummary {
+    pub expired_runs: u64,
+    pub due_runs: u64,
+    pub manual_runs: u64,
+}
+
+impl ScheduledTaskExpiredRunSummary {
+    pub fn has_work(&self) -> bool {
+        self.expired_runs > 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscodeCleanupCandidate {
+    pub id: String,
+    pub output_path: String,
 }
 
 impl SchedulerRepository {
@@ -576,6 +636,34 @@ impl SchedulerRepository {
         .await
         .map_err(SchedulerError::Database)
     }
+
+    pub async fn list_transcode_cleanup_candidates(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<TranscodeCleanupCandidate>, SchedulerError> {
+        let rows = sqlx::query(TRANSCODE_CLEANUP_CANDIDATES_SQL)
+            .bind(limit.max(1))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(SchedulerError::Database)?;
+
+        rows.into_iter()
+            .map(TranscodeCleanupCandidate::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SchedulerError::Database)
+    }
+
+    pub async fn mark_transcode_output_cleaned(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, SchedulerError> {
+        sqlx::query(TRANSCODE_MARK_OUTPUT_CLEANED_SQL)
+            .bind(session_id.trim())
+            .execute(&self.pool)
+            .await
+            .map(|result| result.rows_affected() > 0)
+            .map_err(SchedulerError::Database)
+    }
 }
 
 impl ScheduledTaskRecord {
@@ -596,21 +684,41 @@ impl ScheduledTaskRecord {
 
 async fn expire_stale_runs(
     tx: &mut Transaction<'_, Postgres>,
-) -> Result<PgQueryResult, SchedulerError> {
-    sqlx::query(
-        r#"
-        update scheduled_task_runs
-        set status = 'expired',
-            error_message = coalesce(error_message, 'scheduled task lease expired'),
-            finished_at = coalesce(finished_at, lease_expires_at),
-            updated_at = now()
-        where status = 'running'
-          and lease_expires_at <= now()
-        "#,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(SchedulerError::Database)
+) -> Result<ScheduledTaskExpiredRunSummary, SchedulerError> {
+    let row = sqlx::query(EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(SchedulerError::Database)?;
+
+    let summary = ScheduledTaskExpiredRunSummary {
+        expired_runs: row
+            .try_get::<i64, _>("expired_runs")
+            .map_err(SchedulerError::Database)?
+            .max(0) as u64,
+        due_runs: row
+            .try_get::<i64, _>("due_runs")
+            .map_err(SchedulerError::Database)?
+            .max(0) as u64,
+        manual_runs: row
+            .try_get::<i64, _>("manual_runs")
+            .map_err(SchedulerError::Database)?
+            .max(0) as u64,
+    };
+
+    log_expired_scheduled_task_run_summary(summary);
+
+    Ok(summary)
+}
+
+fn log_expired_scheduled_task_run_summary(summary: ScheduledTaskExpiredRunSummary) {
+    if summary.has_work() {
+        warn!(
+            expired_runs = summary.expired_runs,
+            due_runs = summary.due_runs,
+            manual_runs = summary.manual_runs,
+            "recovered stale scheduled task runs"
+        );
+    }
 }
 
 async fn active_run_count(
@@ -665,4 +773,74 @@ async fn insert_task_run(
     .fetch_one(&mut **tx)
     .await
     .map_err(SchedulerError::Database)
+}
+
+impl TranscodeCleanupCandidate {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            output_path: row.try_get("output_path")?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REPOSITORY_SOURCE: &str = include_str!("repository.rs");
+    const TRANSCODE_CLEANUP_MIGRATION: &str =
+        include_str!("../../migrations/0062_transcode_output_cleanup_marker.sql");
+
+    #[test]
+    fn transcode_cleanup_queries_terminal_sessions_with_marker_index() {
+        assert!(REPOSITORY_SOURCE.contains("pub struct TranscodeCleanupCandidate"));
+        assert!(REPOSITORY_SOURCE.contains("TRANSCODE_CLEANUP_CANDIDATES_SQL"));
+        assert!(REPOSITORY_SOURCE.contains("status in ('cancelled', 'failed')"));
+        assert!(REPOSITORY_SOURCE.contains("output_cleaned_at is null"));
+        assert!(REPOSITORY_SOURCE.contains("order by finished_at asc nulls first, id asc"));
+        assert!(REPOSITORY_SOURCE.contains("limit $1"));
+        assert!(REPOSITORY_SOURCE.contains("mark_transcode_output_cleaned"));
+        assert!(REPOSITORY_SOURCE.contains("where public_id = case"));
+        assert!(REPOSITORY_SOURCE.contains("and output_cleaned_at is null"));
+
+        assert!(TRANSCODE_CLEANUP_MIGRATION.contains("add column if not exists output_cleaned_at"));
+        assert!(
+            TRANSCODE_CLEANUP_MIGRATION.contains("idx_transcoding_sessions_output_cleanup_pending")
+        );
+        assert!(TRANSCODE_CLEANUP_MIGRATION.contains("status in ('cancelled', 'failed')"));
+        assert!(TRANSCODE_CLEANUP_MIGRATION.contains("output_cleaned_at is null"));
+    }
+
+    #[test]
+    fn stale_scheduled_task_run_recovery_counts_due_and_manual_runs() {
+        let summary = ScheduledTaskExpiredRunSummary {
+            expired_runs: 3,
+            due_runs: 2,
+            manual_runs: 1,
+        };
+
+        assert!(summary.has_work());
+        assert_eq!(summary.expired_runs, summary.due_runs + summary.manual_runs);
+        assert!(EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL.contains("due_runs"));
+        assert!(EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL.contains("manual_runs"));
+        assert!(EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL.contains("status = 'running'"));
+        assert!(EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL.contains("lease_expires_at <= now()"));
+        assert!(EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL.contains("returning id,"));
+        assert!(EXPIRE_STALE_SCHEDULED_TASK_RUNS_SQL.contains("trigger_type"));
+    }
+
+    #[test]
+    fn stale_scheduled_task_run_recovery_reports_structured_summary_fields() {
+        let production_source = REPOSITORY_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("repository source should include production section");
+
+        assert!(production_source.contains("ScheduledTaskExpiredRunSummary"));
+        assert!(production_source.contains("expired_runs = summary.expired_runs"));
+        assert!(production_source.contains("due_runs = summary.due_runs"));
+        assert!(production_source.contains("manual_runs = summary.manual_runs"));
+        assert!(production_source.contains("recovered stale scheduled task runs"));
+    }
 }

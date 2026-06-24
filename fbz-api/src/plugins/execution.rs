@@ -562,6 +562,18 @@ impl PluginExecutionService {
         .await
         .map_err(PluginExecutionError::from)?;
 
+        if outbox_status == "failed" {
+            warn!(
+                event_id = event.id,
+                outbox_event_id = %event.public_id,
+                attempt = event.attempt,
+                max_attempts = event.max_attempts,
+                retry_delay_seconds,
+                error = %message,
+                "plugin dispatch failed; scheduled retry"
+            );
+        }
+
         Ok(outbox_status.to_owned())
     }
 }
@@ -1078,6 +1090,20 @@ mod tests {
         assert_eq!(retry_delay_seconds(2), 10);
         assert_eq!(retry_delay_seconds(6), 160);
         assert_eq!(retry_delay_seconds(12), 160);
+    }
+
+    #[test]
+    fn plugin_dispatch_retry_logs_structured_event_context() {
+        let production_source = include_str!("execution.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("execution source should include production section");
+
+        assert!(production_source.contains("outbox_event_id = %event.public_id"));
+        assert!(production_source.contains("attempt = event.attempt"));
+        assert!(production_source.contains("max_attempts = event.max_attempts"));
+        assert!(production_source.contains("retry_delay_seconds"));
+        assert!(production_source.contains("plugin dispatch failed; scheduled retry"));
     }
 
     #[test]

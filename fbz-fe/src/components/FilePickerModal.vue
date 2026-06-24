@@ -146,19 +146,48 @@ function handleConfirm() {
 function handleCancel() {
   uiStore.closeFilePicker();
 }
+
+function handleFolderKeydown(event: KeyboardEvent, folder: string) {
+  if (event.key === "Enter") {
+    handleFolderClick(folder);
+  } else if (event.key === " ") {
+    event.preventDefault();
+    manualPathInput.value =
+      currentPath.value === "/" ? `/${folder}` : `${currentPath.value}/${folder}`;
+  }
+}
+
+useEventListener(window, "keydown", (e: KeyboardEvent) => {
+  if (e.key === "Escape" && filePicker.value.open) {
+    handleCancel();
+  }
+});
 </script>
 
 <template>
   <Transition name="fade">
     <div v-if="filePicker.open" class="file-picker-overlay" @click="handleCancel">
-      <div class="file-picker-modal" @click.stop>
+      <div
+        class="file-picker-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="file-picker-title"
+        @click.stop
+      >
         <!-- Modal Header -->
         <header class="modal-header">
           <div class="header-title">
-            <span class="icon">📁</span>
-            <h2>服务器端文件夹选择器</h2>
+            <span class="icon" aria-hidden="true">📁</span>
+            <h2 id="file-picker-title">服务器端文件夹选择器</h2>
           </div>
-          <button class="close-btn" type="button" @click="handleCancel">✕</button>
+          <button
+            class="close-btn"
+            type="button"
+            aria-label="关闭文件夹选择器"
+            @click="handleCancel"
+          >
+            ✕
+          </button>
         </header>
 
         <!-- Manual Path Input -->
@@ -167,54 +196,80 @@ function handleCancel() {
             v-model="manualPathInput"
             type="text"
             placeholder="手动输入服务器绝对路径..."
+            aria-label="服务器绝对路径"
             @keyup.enter="handleManualSubmit"
           />
-          <button class="action-btn" type="button" @click="handleManualSubmit">前往</button>
+          <button
+            class="action-btn"
+            type="button"
+            aria-label="前往输入的路径"
+            @click="handleManualSubmit"
+          >
+            前往
+          </button>
         </div>
 
         <!-- Breadcrumbs -->
-        <div class="breadcrumbs-container">
+        <nav class="breadcrumbs-container" aria-label="路径导航">
           <span class="label">当前路径:</span>
           <div class="crumbs">
             <template v-for="(crumb, idx) in breadcrumbs" :key="crumb.path">
               <span
                 class="crumb-link"
                 :class="{ active: idx === breadcrumbs.length - 1 }"
+                tabindex="0"
+                role="link"
+                :aria-label="
+                  idx === breadcrumbs.length - 1
+                    ? `当前目录: ${crumb.name}`
+                    : `前往目录 ${crumb.name}`
+                "
                 @click="loadFolder(crumb.path)"
+                @keydown.enter="loadFolder(crumb.path)"
+                @keydown.space.prevent="loadFolder(crumb.path)"
               >
                 {{ crumb.name }}
               </span>
-              <span v-if="idx < breadcrumbs.length - 1" class="crumb-separator">/</span>
+              <span v-if="idx < breadcrumbs.length - 1" class="crumb-separator" aria-hidden="true"
+                >/</span
+              >
             </template>
           </div>
-        </div>
+        </nav>
 
         <!-- Main Body -->
         <div class="modal-body">
           <!-- Sidebar: Disks -->
-          <aside class="disk-sidebar">
+          <aside class="disk-sidebar" aria-label="存储盘选择">
             <h3>存储介质</h3>
-            <div class="disk-list">
+            <div class="disk-list" role="radiogroup" aria-label="存储介质列表">
               <button
                 v-for="disk in diskOptions"
                 :key="disk.root"
                 class="disk-item"
                 :class="{ active: activeDisk === disk.root }"
                 type="button"
+                role="radio"
+                :aria-checked="activeDisk === disk.root"
                 @click="selectDisk(disk.root)"
               >
-                <span class="disk-icon">💽</span>
+                <span class="disk-icon" aria-hidden="true">💽</span>
                 <span class="disk-name">{{ disk.name }}</span>
               </button>
             </div>
           </aside>
 
           <!-- Folder Explorer -->
-          <section class="folder-explorer">
+          <section class="folder-explorer" aria-label="文件夹浏览器">
             <div class="explorer-toolbar">
               <div class="search-input">
-                <span class="search-icon">🔍</span>
-                <input v-model="search" type="text" placeholder="过滤当前目录..." />
+                <span class="search-icon" aria-hidden="true">🔍</span>
+                <input
+                  v-model="search"
+                  type="text"
+                  placeholder="过滤当前目录..."
+                  aria-label="过滤当前目录"
+                />
               </div>
               <div class="action-buttons">
                 <button
@@ -223,10 +278,10 @@ function handleCancel() {
                   @click="navigateBack"
                   :disabled="currentPath === '/'"
                 >
-                  ↩️ 返回上级
+                  <span aria-hidden="true">↩️ </span>返回上级
                 </button>
                 <button class="util-btn brand-btn" type="button" @click="createNewFolder">
-                  ➕ 新建文件夹
+                  <span aria-hidden="true">➕ </span>新建文件夹
                 </button>
               </div>
             </div>
@@ -237,23 +292,27 @@ function handleCancel() {
                 <div class="spinner" />
                 <span>正在加载服务器目录...</span>
               </div>
-              <div v-else-if="filteredFolders.length === 0" class="empty-view">
-                <span class="empty-icon">📂</span>
+              <div v-else-if="filteredFolders.length === 0" class="empty-view" role="status">
+                <span class="empty-icon" aria-hidden="true">📂</span>
                 <span class="empty-title">当前目录为空</span>
                 <span class="empty-sub">没有在此处找到子文件夹。</span>
               </div>
-              <div v-else class="folder-grid">
+              <div v-else class="folder-grid" role="list" aria-label="文件夹列表">
                 <div
                   v-for="folder in filteredFolders"
                   :key="folder"
                   class="folder-card"
+                  tabindex="0"
+                  role="listitem"
+                  :aria-label="`文件夹: ${folder}`"
                   @dblclick="handleFolderClick(folder)"
                   @click="
                     manualPathInput =
                       currentPath === '/' ? `/${folder}` : `${currentPath}/${folder}`
                   "
+                  @keydown="handleFolderKeydown($event, folder)"
                 >
-                  <span class="folder-icon">📁</span>
+                  <span class="folder-icon" aria-hidden="true">📁</span>
                   <span class="folder-name">{{ folder }}</span>
                 </div>
               </div>

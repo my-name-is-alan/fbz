@@ -16,7 +16,7 @@ use crate::{
     scheduler::{
         repository::{
             CORE_INCREMENTAL_SCAN_TASK_KEY, CORE_METADATA_REFRESH_TASK_KEY,
-            PLUGIN_SCHEDULE_TASK_TYPE,
+            CORE_TRANSCODE_CLEANUP_TASK_KEY, PLUGIN_SCHEDULE_TASK_TYPE,
         },
         service::{SchedulerError, SchedulerService, default_worker_id, parse_interval_seconds},
     },
@@ -111,10 +111,14 @@ pub async fn run_scheduled_task(
         return Err(AppError::not_found("scheduled task not found"));
     };
 
-    SchedulerService::with_worker_id(database.clone(), default_worker_id("emby-manual"))
-        .run_task_once(&task.task_key)
-        .await
-        .map_err(scheduler_error_to_app_error)?;
+    SchedulerService::with_worker_id(
+        database.clone(),
+        default_worker_id("emby-manual"),
+        state.config().storage.transcode_cache_dir.clone(),
+    )
+    .run_task_once(&task.task_key)
+    .await
+    .map_err(scheduler_error_to_app_error)?;
 
     Ok((StatusCode::OK, "").into_response())
 }
@@ -139,10 +143,14 @@ pub async fn stop_scheduled_task(
         return Err(AppError::not_found("scheduled task not found"));
     };
 
-    SchedulerService::with_worker_id(database.clone(), default_worker_id("emby-manual"))
-        .cancel_running_task(&task.task_key)
-        .await
-        .map_err(scheduler_error_to_app_error)?;
+    SchedulerService::with_worker_id(
+        database.clone(),
+        default_worker_id("emby-manual"),
+        state.config().storage.transcode_cache_dir.clone(),
+    )
+    .cancel_running_task(&task.task_key)
+    .await
+    .map_err(scheduler_error_to_app_error)?;
 
     Ok((StatusCode::OK, "").into_response())
 }
@@ -235,6 +243,7 @@ fn scheduled_task_name(record: &ScheduledTaskAdminRecord) -> String {
     match record.task_key.as_str() {
         CORE_INCREMENTAL_SCAN_TASK_KEY => "Incremental library scan".to_owned(),
         CORE_METADATA_REFRESH_TASK_KEY => "Metadata refresh".to_owned(),
+        CORE_TRANSCODE_CLEANUP_TASK_KEY => "Transcode cleanup".to_owned(),
         _ if record.task_type == PLUGIN_SCHEDULE_TASK_TYPE => {
             format!("Plugin schedule: {}", record.task_key)
         }
@@ -246,6 +255,9 @@ fn scheduled_task_description(record: &ScheduledTaskAdminRecord) -> String {
     match record.task_key.as_str() {
         CORE_INCREMENTAL_SCAN_TASK_KEY => "Scans enabled media libraries for changes.".to_owned(),
         CORE_METADATA_REFRESH_TASK_KEY => "Refreshes metadata for existing media items.".to_owned(),
+        CORE_TRANSCODE_CLEANUP_TASK_KEY => {
+            "Cleans failed and cancelled transcode output directories.".to_owned()
+        }
         _ if record.task_type == PLUGIN_SCHEDULE_TASK_TYPE => {
             "Runs a plugin-owned scheduled hook.".to_owned()
         }
@@ -256,6 +268,8 @@ fn scheduled_task_description(record: &ScheduledTaskAdminRecord) -> String {
 fn scheduled_task_category(record: &ScheduledTaskAdminRecord) -> String {
     if record.owner_type == "plugin" || record.task_type == PLUGIN_SCHEDULE_TASK_TYPE {
         "Plugins".to_owned()
+    } else if record.task_key == CORE_TRANSCODE_CLEANUP_TASK_KEY {
+        "Maintenance".to_owned()
     } else {
         "Library".to_owned()
     }

@@ -27,6 +27,16 @@ pub struct LoginInput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginByUserIdInput {
+    pub user_id: String,
+    pub password: String,
+    pub client: Option<String>,
+    pub device: Option<String>,
+    pub device_id: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoginOutput {
     pub user_id: String,
     pub username: String,
@@ -86,8 +96,49 @@ impl AuthService {
             .map_err(repository_error)?
             .ok_or(AuthServiceError::InvalidCredentials)?;
 
-        validate_login_user(&self.password_service, &user, &input.password)?;
+        self.complete_login(
+            user,
+            LoginSessionInput {
+                password: input.password,
+                client: input.client,
+                device: input.device,
+                device_id: input.device_id,
+                version: input.version,
+            },
+        )
+        .await
+    }
 
+    pub async fn authenticate_by_user_id(
+        &self,
+        input: LoginByUserIdInput,
+    ) -> Result<LoginOutput, AuthServiceError> {
+        let user = self
+            .repository
+            .find_user_by_public_id(&input.user_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(AuthServiceError::InvalidCredentials)?;
+
+        self.complete_login(
+            user,
+            LoginSessionInput {
+                password: input.password,
+                client: input.client,
+                device: input.device,
+                device_id: input.device_id,
+                version: input.version,
+            },
+        )
+        .await
+    }
+
+    async fn complete_login(
+        &self,
+        user: AuthUserRecord,
+        input: LoginSessionInput,
+    ) -> Result<LoginOutput, AuthServiceError> {
+        validate_login_user(&self.password_service, &user, &input.password)?;
         let device_id = input
             .device_id
             .map(|device_id| device_id.trim().to_owned())
@@ -140,6 +191,15 @@ impl AuthService {
             .map(authenticated_user_from_record)
             .ok_or(AuthServiceError::InvalidCredentials)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LoginSessionInput {
+    password: String,
+    client: Option<String>,
+    device: Option<String>,
+    device_id: Option<String>,
+    version: Option<String>,
 }
 
 impl Display for AuthServiceError {

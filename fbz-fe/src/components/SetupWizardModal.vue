@@ -41,28 +41,31 @@ const passwordError = computed(() => {
   return "";
 });
 
+const route = useRoute();
+const router = useRouter();
+
+onMounted(() => {
+  if (uiStore.setupWizardOpen && route.path !== "/") {
+    router.replace("/");
+  }
+});
+
+watch(
+  () => uiStore.setupWizardOpen,
+  (open) => {
+    if (open && route.path !== "/") {
+      router.replace("/");
+    }
+  },
+);
+
 // Step 3: Add library (optional)
 const skipLibrary = ref(false);
-const libraryTitle = ref("我的电影");
-const libraryType = ref("movie");
-const libraryPath = ref("/media/nas/电影");
 
-const libraryTypeOptions = [
-  { label: "电影", value: "movie" },
-  { label: "电视剧", value: "series" },
-  { label: "动漫", value: "anime" },
-  { label: "纪录片", value: "documentary" },
-  { label: "音乐", value: "music" },
-];
-
-async function browsePath() {
-  try {
-    const selectedPath = await uiStore.openFilePicker();
-    if (selectedPath) {
-      libraryPath.value = selectedPath;
-    }
-  } catch (err) {
-    console.error(err);
+function deleteLibrary(id: string) {
+  const idx = libraryStore.libraries.findIndex((l) => l.id === id);
+  if (idx > -1) {
+    libraryStore.libraries.splice(idx, 1);
   }
 }
 
@@ -86,16 +89,8 @@ function nextStep() {
     currentStep.value++;
   } else {
     // Finish initialization
-    // Add library to store if not skipped
-    if (!skipLibrary.value && libraryTitle.value && libraryPath.value) {
-      libraryStore.libraries.push({
-        id: `custom-${Date.now()}`,
-        name: libraryTitle.value,
-        kind: libraryType.value as any,
-        count: 12, // mock some item count
-      });
-    }
     uiStore.completeInitialization();
+    router.push("/");
   }
 }
 
@@ -108,8 +103,15 @@ function prevStep() {
 
 <template>
   <Transition name="fade">
-    <div v-if="uiStore.setupWizardOpen" class="wizard-overlay">
+    <div
+      v-if="uiStore.setupWizardOpen"
+      class="wizard-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wizard-title"
+    >
       <div class="wizard-container">
+        <h2 id="wizard-title" class="sr-only">系统初始化向导</h2>
         <!-- Sidebar Navigation Tracker -->
         <aside class="wizard-steps-aside">
           <div class="brand">
@@ -168,8 +170,8 @@ function prevStep() {
               </p>
             </div>
 
-            <label class="agreement-check">
-              <input v-model="agreed" type="checkbox" />
+            <label class="agreement-check" for="wizard-agreed">
+              <input id="wizard-agreed" v-model="agreed" type="checkbox" />
               <span class="check-box-display" />
               <span class="check-text">我已阅读并完全同意上述许可与免责协议</span>
             </label>
@@ -183,8 +185,9 @@ function prevStep() {
             </p>
 
             <div class="form-group">
-              <label>管理员用户名</label>
+              <label for="wizard-username">管理员用户名</label>
               <input
+                id="wizard-username"
                 v-model="username"
                 type="text"
                 placeholder="输入管理员名称"
@@ -193,8 +196,9 @@ function prevStep() {
             </div>
 
             <div class="form-group">
-              <label>登录密码</label>
+              <label for="wizard-password">登录密码</label>
               <input
+                id="wizard-password"
                 v-model="password"
                 type="password"
                 placeholder="请输入高强度密码"
@@ -218,8 +222,9 @@ function prevStep() {
             </div>
 
             <div class="form-group">
-              <label>确认登录密码</label>
+              <label for="wizard-confirm-password">确认登录密码</label>
               <input
+                id="wizard-confirm-password"
                 v-model="confirmPassword"
                 type="password"
                 placeholder="请再次输入密码"
@@ -234,8 +239,8 @@ function prevStep() {
           <div v-if="currentStep === 3" class="wizard-step step-3">
             <div class="step-header">
               <h1>添加首个媒体库 📁</h1>
-              <label class="skip-toggle">
-                <input v-model="skipLibrary" type="checkbox" />
+              <label class="skip-toggle" for="wizard-skip-library">
+                <input id="wizard-skip-library" v-model="skipLibrary" type="checkbox" />
                 <span>稍后在控制台中添加</span>
               </label>
             </div>
@@ -244,34 +249,70 @@ function prevStep() {
             </p>
 
             <div v-if="!skipLibrary" class="library-setup-fields">
-              <div class="form-group">
-                <label>媒体库类型</label>
-                <BaseSelect v-model="libraryType" :options="libraryTypeOptions" class="w-full" />
-              </div>
-
-              <div class="form-group">
-                <label>媒体库标题</label>
-                <input
-                  v-model="libraryTitle"
-                  type="text"
-                  placeholder="输入媒体库的显示标题，如：我的电影"
-                  class="control-input"
-                />
-              </div>
-
-              <div class="form-group">
-                <label>媒体夹路径 (绝对路径)</label>
-                <div class="input-with-button">
-                  <input
-                    v-model="libraryPath"
-                    type="text"
-                    placeholder="例如：/media/nas/电影"
-                    class="control-input"
-                  />
-                  <button class="browse-btn" type="button" @click="browsePath">📁 浏览</button>
+              <div class="wizard-libraries-grid" v-if="libraryStore.libraries.length > 0">
+                <div
+                  v-for="lib in libraryStore.libraries"
+                  :key="lib.id"
+                  class="wizard-library-card"
+                >
+                  <div class="card-left">
+                    <span class="lib-icon">📁</span>
+                    <div class="lib-info">
+                      <span class="name">{{ lib.name }}</span>
+                      <span class="meta"
+                        >{{
+                          lib.kind === "series"
+                            ? "电视剧"
+                            : lib.kind === "movie"
+                              ? "电影"
+                              : lib.kind
+                        }}
+                        · {{ lib.paths?.[0] || "默认路径" }}</span
+                      >
+                    </div>
+                  </div>
+                  <div class="card-right">
+                    <button
+                      class="action-btn edit"
+                      type="button"
+                      :aria-label="`编辑媒体库 ${lib.name}`"
+                      @click="uiStore.openLibraryEditor(lib.id)"
+                    >
+                      编辑
+                    </button>
+                    <button
+                      class="action-btn delete"
+                      type="button"
+                      :aria-label="`删除媒体库 ${lib.name}`"
+                      @click="deleteLibrary(lib.id)"
+                    >
+                      删除
+                    </button>
+                  </div>
                 </div>
-                <span class="hint">系统将监控此目录，发现新影片后自动执行元数据匹配搜刮。</span>
               </div>
+
+              <button
+                class="wizard-add-lib-btn"
+                type="button"
+                @click="uiStore.openLibraryEditor(null)"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="add-icon"
+                >
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                <span>添加媒体库</span>
+              </button>
             </div>
             <div v-else class="skip-tip">
               <span class="skip-icon">💡</span>
@@ -293,6 +334,8 @@ function prevStep() {
                   class="theme-opt-card"
                   :class="{ active: themeStore.themeMode === 'dark' }"
                   type="button"
+                  :aria-pressed="themeStore.themeMode === 'dark'"
+                  aria-label="选择暗黑模式"
                   @click="themeStore.setThemeMode('dark')"
                 >
                   <div class="opt-preview dark-preview">
@@ -305,6 +348,8 @@ function prevStep() {
                   class="theme-opt-card"
                   :class="{ active: themeStore.themeMode === 'light' }"
                   type="button"
+                  :aria-pressed="themeStore.themeMode === 'light'"
+                  aria-label="选择明亮模式"
                   @click="themeStore.setThemeMode('light')"
                 >
                   <div class="opt-preview light-preview">
@@ -327,18 +372,22 @@ function prevStep() {
                   :style="{ '--dot-color': color.value }"
                   type="button"
                   :title="color.label"
+                  :aria-label="`选择主题色 ${color.label}`"
+                  :aria-pressed="themeStore.brandColor === color.value"
                   @click="themeStore.setBrandColor(color.value)"
                 >
                   <span class="check-mark">✓</span>
                 </button>
 
                 <div class="custom-color-picker">
-                  <label class="picker-label">
+                  <label class="picker-label" for="custom-brand-color">
                     <input
+                      id="custom-brand-color"
                       type="color"
                       :value="themeStore.brandColor"
                       @input="(e) => themeStore.setBrandColor((e.target as HTMLInputElement).value)"
                       class="color-input"
+                      aria-label="自定义主题色选择器"
                     />
                     <span
                       class="picker-display-dot"
@@ -567,7 +616,11 @@ function prevStep() {
   color: var(--fbz-color-text);
 
   input {
-    display: none;
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
   }
 
   .check-box-display {
@@ -596,6 +649,23 @@ function prevStep() {
     &::after {
       opacity: 1;
     }
+  }
+
+  input:focus-visible + .check-box-display {
+    border-color: var(--fbz-color-brand-500);
+    box-shadow: 0 0 0 3px rgba(30, 215, 96, 0.4);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 }
 
@@ -943,6 +1013,128 @@ function prevStep() {
 
 .picker-text {
   line-height: 1;
+}
+
+.library-setup-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fbz-space-4);
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.wizard-libraries-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fbz-space-2);
+}
+
+.wizard-library-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--fbz-color-panel-strong);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: var(--fbz-radius-control);
+  transition: all var(--fbz-motion-fast);
+
+  &:hover {
+    border-color: var(--fbz-color-line-bright);
+    background: var(--fbz-color-panel-elevated);
+  }
+
+  .card-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    .lib-icon {
+      font-size: 20px;
+      color: var(--fbz-color-brand-500);
+      opacity: 0.85;
+    }
+
+    .lib-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+
+      .name {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--fbz-color-text);
+      }
+
+      .meta {
+        font-size: 11px;
+        color: var(--fbz-color-text-muted);
+      }
+    }
+  }
+
+  .card-right {
+    display: flex;
+    gap: var(--fbz-space-2);
+
+    .action-btn {
+      height: 28px;
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all var(--fbz-motion-fast);
+
+      &.edit {
+        background: var(--fbz-color-panel);
+        border: 1px solid var(--fbz-color-line);
+        color: var(--fbz-color-text-soft);
+
+        &:hover {
+          background: var(--fbz-color-panel-strong);
+          color: var(--fbz-color-text);
+        }
+      }
+
+      &.delete {
+        background: transparent;
+        border: 1px solid var(--fbz-color-danger-500);
+        color: var(--fbz-color-danger-500);
+
+        &:hover {
+          background: color-mix(in srgb, var(--fbz-color-danger-500) 8%, transparent);
+        }
+      }
+    }
+  }
+}
+
+.wizard-add-lib-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  background: transparent;
+  border: 1px dashed var(--fbz-color-line-bright);
+  border-radius: var(--fbz-radius-control);
+  color: var(--fbz-color-text-soft);
+  font-weight: 700;
+  font-size: var(--fbz-font-size-sm);
+  cursor: pointer;
+  transition: all var(--fbz-motion-fast);
+
+  &:hover {
+    border-color: var(--fbz-color-brand-500);
+    color: var(--fbz-color-brand-500);
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 3%, transparent);
+  }
+
+  .add-icon {
+    flex-shrink: 0;
+  }
 }
 
 .wizard-footer {

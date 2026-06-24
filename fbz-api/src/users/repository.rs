@@ -32,6 +32,22 @@ pub struct UserDetailRecord {
     pub enabled_folders: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsersQueryFilter {
+    pub is_hidden: Option<bool>,
+    pub is_disabled: Option<bool>,
+    pub start_index: i64,
+    pub limit: i64,
+    pub name_starts_with_or_greater: Option<String>,
+    pub sort_descending: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsersQueryPage {
+    pub records: Vec<UserDetailRecord>,
+    pub total_record_count: i64,
+}
+
 impl UsersRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
@@ -117,6 +133,112 @@ impl UsersRepository {
         .await?
         .map(UserDetailRecord::from_row)
         .transpose()
+    }
+
+    pub async fn list_users_query(
+        &self,
+        filter: UsersQueryFilter,
+    ) -> Result<UsersQueryPage, sqlx::Error> {
+        let total_record_count: i64 = sqlx::query_scalar(
+            r#"
+            select count(*)::bigint
+            from users u
+            where ($1::boolean is null or $1 = false)
+              and ($2::boolean is null or u.is_disabled = $2)
+              and (
+                  $3::text is null
+                  or u.username_normalized >= lower($3)
+              )
+            "#,
+        )
+        .bind(filter.is_hidden)
+        .bind(filter.is_disabled)
+        .bind(filter.name_starts_with_or_greater.as_deref())
+        .fetch_one(&self.pool)
+        .await?;
+
+        if total_record_count == 0 || filter.start_index >= total_record_count {
+            return Ok(UsersQueryPage {
+                records: Vec::new(),
+                total_record_count,
+            });
+        }
+
+        let rows = sqlx::query(
+            r#"
+            select
+                u.public_id::text as id,
+                u.username as name,
+                u.password_hash is not null as has_password,
+                r.name_normalized in ('owner', 'admin', 'administrator') as is_administrator,
+                u.is_disabled,
+                u.allow_download,
+                u.allow_transcode,
+                u.allow_new_device_login,
+                (
+                    u.allow_download
+                    and coalesce(accessible_libraries.has_downloadable_library, false)
+                ) as enable_content_downloading,
+                (
+                    u.allow_transcode
+                    and coalesce(accessible_libraries.has_transcodable_library, false)
+                ) as enable_playback_transcoding,
+                (
+                    coalesce(visible_libraries.visible_count, 0) = 0
+                    or coalesce(accessible_libraries.accessible_count, 0)
+                       = coalesce(visible_libraries.visible_count, 0)
+                ) as enable_all_folders,
+                coalesce(accessible_libraries.enabled_folders, array[]::text[]) as enabled_folders
+            from users u
+            join roles r on r.id = u.role_id
+            left join lateral (
+                select count(*)::bigint as visible_count
+                from libraries l
+                where l.is_hidden = false
+            ) visible_libraries on true
+            left join lateral (
+                select count(*)::bigint as accessible_count,
+                       array_agg(l.public_id::text order by l.name asc, l.id asc) as enabled_folders,
+                       bool_or(lp.can_download) as has_downloadable_library,
+                       bool_or(lp.can_transcode) as has_transcodable_library
+                from libraries l
+                join library_permissions lp
+                  on lp.library_id = l.id
+                 and lp.user_id = u.id
+                 and lp.can_view = true
+                where l.is_hidden = false
+            ) accessible_libraries on true
+            where ($1::boolean is null or $1 = false)
+              and ($2::boolean is null or u.is_disabled = $2)
+              and (
+                  $3::text is null
+                  or u.username_normalized >= lower($3)
+              )
+            order by
+                case when $4::boolean then u.username_normalized end desc,
+                case when $4::boolean then u.id end desc,
+                case when not $4::boolean then u.username_normalized end asc,
+                case when not $4::boolean then u.id end asc
+            offset $5
+            limit $6
+            "#,
+        )
+        .bind(filter.is_hidden)
+        .bind(filter.is_disabled)
+        .bind(filter.name_starts_with_or_greater.as_deref())
+        .bind(filter.sort_descending)
+        .bind(filter.start_index)
+        .bind(filter.limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(UsersQueryPage {
+            records: rows
+                .into_iter()
+                .map(UserDetailRecord::from_row)
+                .collect::<Result<Vec<_>, _>>()?,
+            total_record_count,
+        })
     }
 }
 

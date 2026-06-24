@@ -87,3 +87,50 @@ a {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  label {
+    font-size: var(--fbz-font-size-xs);
+    font-weight: 700;
+    color: var(--fbz-color-text-soft);
+    margin-bottom: 2px;
+  }
+
+  .control-input {
+    height: 38px;
+    background: var(--fbz-color-panel);
+    border: 1px solid var(--fbz-color-line);
+    border-radius: var(--fbz-radius-control);
+    padding: 0 var(--fbz-space-3);
+    color: var(--fbz-color-text);
+    font-size: var(--fbz-font-size-sm);
+    transition: all var(--fbz-motion-fast);
+
+    &:focus {
+      outline: none;
+      border-color: var(--fbz-color-brand-500);
+      box-shadow: var(--fbz-shadow-focus);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+
+  .base-select {
+    width: 100%;
+    display: block;
+  }
+
+  .field-hint {
+    font-size: 11px;
+    color: var(--fbz-color-text-muted);
+    line-height: 1.4;
+    margin-top: 2px;
+  }
+}

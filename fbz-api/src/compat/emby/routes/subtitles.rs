@@ -44,9 +44,32 @@ pub struct SubtitleStreamQuery {
     pub user_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct HlsSubtitlePlaylistQuery {
+    pub subtitle_segment_length: Option<i64>,
+    pub manifest_subtitles: Option<String>,
+    pub user_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoteSubtitleDownloadQuery {
+    pub media_source_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DeleteSubtitleQuery {
+    pub media_source_id: Option<String>,
+}
+
 const MAX_SUBTITLE_LANGUAGE_LEN: usize = 32;
 const MAX_MEDIA_SOURCE_ID_LEN: usize = 256;
+const MAX_REMOTE_SUBTITLE_ID_LEN: usize = 512;
 const MAX_SUBTITLE_FORMAT_LEN: usize = 16;
+const DEFAULT_HLS_SUBTITLE_SEGMENT_LENGTH_SECONDS: i64 = 4;
+const MAX_HLS_SUBTITLE_SEGMENT_LENGTH_SECONDS: i64 = 3600;
 
 pub async fn remote_subtitle_search(
     State(state): State<AppState>,
@@ -75,6 +98,57 @@ pub async fn remote_subtitle_search(
     ensure_user_can_access_item(&state, user.id, &item_id).await?;
 
     Ok(Json(empty_remote_subtitle_results(language)))
+}
+
+pub async fn provider_subtitle_download(
+    State(state): State<AppState>,
+    AxumPath(subtitle_id): AxumPath<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let _user = authenticate_request_user(&state, &headers, &uri).await?;
+    let _subtitle_id = normalize_remote_subtitle_id(&subtitle_id)?;
+
+    Err(AppError::conflict(
+        "remote subtitle provider downloads are not configured",
+    ))
+}
+
+pub async fn download_remote_subtitle(
+    State(state): State<AppState>,
+    AxumPath((item_id, subtitle_id)): AxumPath<(String, String)>,
+    Query(query): Query<RemoteSubtitleDownloadQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let _subtitle_id = normalize_remote_subtitle_id(&subtitle_id)?;
+    let _media_source_id = normalize_required_media_source_id(query.media_source_id.as_deref())?;
+    ensure_user_can_access_item(&state, user.id, &item_id).await?;
+
+    Err(AppError::conflict(
+        "remote subtitle downloads are not configured",
+    ))
+}
+
+pub async fn delete_item_subtitle(
+    State(state): State<AppState>,
+    AxumPath((item_id, index)): AxumPath<(String, String)>,
+    Query(query): Query<DeleteSubtitleQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    delete_subtitle_response(state, item_id, index, query, headers, uri).await
+}
+
+pub async fn delete_video_subtitle(
+    State(state): State<AppState>,
+    AxumPath((item_id, index)): AxumPath<(String, String)>,
+    Query(query): Query<DeleteSubtitleQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    delete_subtitle_response(state, item_id, index, query, headers, uri).await
 }
 
 pub async fn subtitle_stream(
@@ -127,6 +201,65 @@ pub async fn subtitle_stream_with_start_position(
         uri,
     )
     .await
+}
+
+pub async fn video_attachment_stream(
+    State(state): State<AppState>,
+    AxumPath((item_id, media_source_id, index)): AxumPath<(String, String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let _media_file_id = parse_media_source_id(&media_source_id)?;
+    let _attachment_index = parse_subtitle_stream_index(&index)?;
+    ensure_user_can_access_item(&state, user.id, &item_id).await?;
+
+    Err(AppError::conflict(
+        "embedded subtitle attachments are not available",
+    ))
+}
+
+pub async fn hls_subtitle_playlist(
+    State(state): State<AppState>,
+    AxumPath(item_id): AxumPath<String>,
+    Query(query): Query<HlsSubtitlePlaylistQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    hls_subtitle_playlist_response(state, item_id, query, headers, uri).await
+}
+
+pub async fn hls_live_subtitle_playlist(
+    State(state): State<AppState>,
+    AxumPath(item_id): AxumPath<String>,
+    Query(query): Query<HlsSubtitlePlaylistQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    hls_subtitle_playlist_response(state, item_id, query, headers, uri).await
+}
+
+async fn hls_subtitle_playlist_response(
+    state: AppState,
+    item_id: String,
+    query: HlsSubtitlePlaylistQuery,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+    let input = hls_subtitle_playlist_input(&query)?;
+    ensure_user_can_access_item(&state, user.id, &item_id).await?;
+
+    Ok(hls_subtitle_playlist_response_body(
+        input.target_duration_seconds,
+    ))
 }
 
 async fn subtitle_stream_response(
@@ -308,6 +441,60 @@ fn validate_subtitle_ticks(
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HlsSubtitlePlaylistInput {
+    target_duration_seconds: i64,
+    manifest_subtitle_format: Option<String>,
+}
+
+fn hls_subtitle_playlist_input(
+    query: &HlsSubtitlePlaylistQuery,
+) -> Result<HlsSubtitlePlaylistInput, AppError> {
+    let target_duration_seconds = match query.subtitle_segment_length {
+        Some(value) if (1..=MAX_HLS_SUBTITLE_SEGMENT_LENGTH_SECONDS).contains(&value) => value,
+        Some(_) => {
+            return Err(AppError::unprocessable(
+                "SubtitleSegmentLength must be between 1 and 3600 seconds",
+            ));
+        }
+        None => DEFAULT_HLS_SUBTITLE_SEGMENT_LENGTH_SECONDS,
+    };
+    let manifest_subtitle_format = query
+        .manifest_subtitles
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_subtitle_format)
+        .transpose()?
+        .map(str::to_owned);
+
+    Ok(HlsSubtitlePlaylistInput {
+        target_duration_seconds,
+        manifest_subtitle_format,
+    })
+}
+
+fn hls_subtitle_playlist_response_body(target_duration_seconds: i64) -> Response {
+    let mut response = Response::new(Body::from(empty_hls_subtitle_playlist(
+        target_duration_seconds,
+    )));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.apple.mpegurl"),
+    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn empty_hls_subtitle_playlist(target_duration_seconds: i64) -> String {
+    format!(
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_duration_seconds}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-ENDLIST\n"
+    )
+}
+
 fn parse_subtitle_tick(value: &str) -> Result<i64, AppError> {
     value
         .trim()
@@ -419,6 +606,24 @@ async fn local_subtitle_response(path: &Path, format: &str) -> Result<Response, 
     Ok(response)
 }
 
+async fn delete_subtitle_response(
+    state: AppState,
+    item_id: String,
+    index: String,
+    query: DeleteSubtitleQuery,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let _media_source_id = normalize_required_media_source_id(query.media_source_id.as_deref())?;
+    let _stream_index = parse_subtitle_stream_index(&index)?;
+    ensure_user_can_access_item(&state, user.id, &item_id).await?;
+
+    Err(AppError::conflict(
+        "external subtitle deletion is managed by FBZ subtitle indexing",
+    ))
+}
+
 fn subtitle_content_type(format: &str) -> &'static str {
     match format {
         "vtt" => "text/vtt; charset=utf-8",
@@ -438,6 +643,27 @@ fn subtitle_path_io_error(error: std::io::Error, not_found_message: &'static str
 
 fn empty_remote_subtitle_results(_language: String) -> Vec<RemoteSubtitleInfoDto> {
     Vec::new()
+}
+
+fn normalize_remote_subtitle_id(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::unprocessable("SubtitleId is required"));
+    }
+    if value.len() > MAX_REMOTE_SUBTITLE_ID_LEN
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+    {
+        return Err(AppError::unprocessable("SubtitleId is invalid"));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn normalize_required_media_source_id(value: Option<&str>) -> Result<String, AppError> {
+    normalize_optional_media_source_id(value)?
+        .ok_or_else(|| AppError::unprocessable("MediaSourceId is required"))
 }
 
 #[cfg(test)]
@@ -477,6 +703,22 @@ mod tests {
     }
 
     #[test]
+    fn remote_subtitle_download_values_are_bounded() {
+        assert_eq!(
+            normalize_remote_subtitle_id(" provider:sub-1 ").unwrap(),
+            "provider:sub-1"
+        );
+        assert_eq!(
+            normalize_required_media_source_id(Some(" source-1 ")).unwrap(),
+            "source-1"
+        );
+        assert!(normalize_remote_subtitle_id("").is_err());
+        assert!(normalize_remote_subtitle_id("provider/sub-1").is_err());
+        assert!(normalize_remote_subtitle_id(&"x".repeat(513)).is_err());
+        assert!(normalize_required_media_source_id(None).is_err());
+    }
+
+    #[test]
     fn subtitle_stream_path_values_are_bounded() {
         assert_eq!(parse_media_source_id("42").unwrap(), 42);
         assert!(parse_media_source_id("").is_err());
@@ -507,6 +749,40 @@ mod tests {
         assert!(validate_subtitle_ticks(None, Some(10), Some(10)).is_ok());
         assert!(validate_subtitle_ticks(Some("-1"), None, None).is_err());
         assert!(validate_subtitle_ticks(None, Some(20), Some(10)).is_err());
+    }
+
+    #[test]
+    fn hls_subtitle_playlist_query_is_normalized_and_bounded() {
+        let input = hls_subtitle_playlist_input(&HlsSubtitlePlaylistQuery {
+            subtitle_segment_length: Some(6),
+            manifest_subtitles: Some(" webvtt ".to_owned()),
+            user_id: Some("user-1".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(input.target_duration_seconds, 6);
+        assert_eq!(input.manifest_subtitle_format.as_deref(), Some("vtt"));
+        assert_eq!(
+            empty_hls_subtitle_playlist(input.target_duration_seconds),
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-ENDLIST\n"
+        );
+
+        assert!(
+            hls_subtitle_playlist_input(&HlsSubtitlePlaylistQuery {
+                subtitle_segment_length: Some(0),
+                manifest_subtitles: Some("vtt".to_owned()),
+                user_id: None,
+            })
+            .is_err()
+        );
+        assert!(
+            hls_subtitle_playlist_input(&HlsSubtitlePlaylistQuery {
+                subtitle_segment_length: Some(4),
+                manifest_subtitles: Some("../vtt".to_owned()),
+                user_id: None,
+            })
+            .is_err()
+        );
     }
 
     #[test]

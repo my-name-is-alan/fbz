@@ -192,6 +192,14 @@ GET /api/plugin/libraries/{libraryId}/items?limit=200&cursor=<nextCursor>
 
 这样通知凭据只由管理员持有，插件无法把通知能力扩展成任意出站 HTTP。
 
+一等通知模板位于：
+
+- `examples/plugins/telegram-notifier-template`：默认 channel 为 `telegram`。
+- `examples/plugins/wecom-notifier-template`：默认 channel 为 `wecom`。
+- `examples/plugins/webhook-notifier-template`：默认 channel 为 `webhook`。
+
+这些模板都只声明 `notification.send`，配置项只包含逻辑 channel、标题前缀和是否附带截断 payload；真实 Telegram、企业微信和 webhook 目标仍通过管理员通知目标配置管理。
+
 ## Marker 导入插件推荐边界
 
 片头片尾、章节和广告 marker 建议走 `metadata.write` 权限：
@@ -220,11 +228,31 @@ README.md
 ./scripts/package-plugin.ps1 -PluginDir examples/plugins/http-notification-bridge -Force
 ```
 
+也可以把 `PluginDir` 替换为 `examples/plugins/telegram-notifier-template`、`examples/plugins/wecom-notifier-template` 或 `examples/plugins/webhook-notifier-template` 打包对应通知模板。
+
 脚本会输出：
 
 - `packagePath`
 - `checksumSha256`
 - `manifest`
+
+生产签名：
+
+```powershell
+$key = [byte[]]::new(32)
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($key)
+$env:PLUGIN_SIGNING_PRIVATE_KEY_HEX = -join ($key | ForEach-Object { $_.ToString("x2") })
+cargo run --bin sign-plugin-package -- --package var/plugin-packages/dev.fbz.notify.bridge-0.1.0.zip --key-id dev-key
+```
+
+签名工具会从 ZIP 根目录读取 `manifest.json`，用和安装端一致的 manifest hash 规则生成 `signature`，并输出 `publicKeyHex`。服务端生产环境配置：
+
+```powershell
+$env:PLUGIN_TRUSTED_SIGNATURE_KEYS="dev-key:<publicKeyHex>"
+$env:PLUGIN_ALLOW_UNSIGNED="false"
+```
+
+安装包时把打包脚本输出的 `packagePath` / `checksumSha256`、manifest，以及签名工具输出的 `signature` 一起提交给 `POST /api/admin/plugins/packages`。
 
 管理员通过 `POST /api/admin/plugins/packages` 安装包。生产环境建议保持：
 
@@ -238,22 +266,38 @@ README.md
 
 ```powershell
 ./scripts/smoke-plugin-lifecycle.ps1 -StartServer
+./scripts/smoke-plugin-lifecycle.ps1 -StartServer -SignedPackage
+./scripts/smoke-plugin-lifecycle.ps1 -StartServer -SignedPackage -IncludeSchedule
 ```
 
 运行时 smoke：
 
 ```powershell
 ./scripts/smoke-plugin-runtime.ps1 -StartServer
+./scripts/smoke-plugin-runtime.ps1 -StartServer -SignedPackage
+./scripts/smoke-plugin-runtime.ps1 -StartServer -ExhaustHostApiBudget
+./scripts/smoke-plugin-runtime.ps1 -StartServer -SignedPackage -DeliverNotification
+./scripts/smoke-plugin-runtime.ps1 -StartServer -SignedPackage -DispatchSchedule
 ```
 
+生命周期 smoke 会验证安装、审批、启用、配置保存、菜单暴露和包详情归一化；追加 `-IncludeSchedule` 会让临时插件声明 `scheduler.register` 权限和 enabled-by-default interval schedule，并验证该 schedule 已同步到 Admin 计划任务列表。
 运行时 smoke 会验证真实 worker、Host API、运行审计和失败重试闭环。
+追加 `-SignedPackage` 会让 smoke 使用 `sign-plugin-package` 生成 Ed25519 签名，并以 `PLUGIN_ALLOW_UNSIGNED=false` 和临时 `PLUGIN_TRUSTED_SIGNATURE_KEYS` 启动 API，覆盖生产默认签名安装链路。
+追加 `-ExhaustHostApiBudget` 会把 `PLUGIN_HOST_API_MAX_CALLS_PER_RUN` 降为 `1`，让临时插件第二次调用 `/api/plugin/config`，并验证超限调用返回和审计记录为 `429 too_many_requests`。
+追加 `-DeliverNotification` 会给临时插件声明 `notification.send` 权限，创建管理员管理的本地 webhook 通知目标，启用通知 worker，并验证 Host API 通知请求、Admin delivery attempt 和本地 webhook 接收日志形成闭环。该选项不能和 `-ExhaustHostApiBudget` 同时使用。
+追加 `-DispatchSchedule` 会给临时插件声明 `scheduler.register` 权限和 enabled-by-default interval schedule，通过 Admin manual-run 触发该插件 `plugin.schedule` task，并验证生成的 `scheduler.tick` dispatch 被 plugin worker 执行成功。
 
 如果只改 HTTP helper 或示例插件，可先运行：
 
 ```powershell
 node --test examples/plugins/_shared/fbz-plugin-http.test.mjs
+node --test examples/plugins/first-party-notifier-templates.test.mjs
+./scripts/smoke-plugin-signature.test.ps1
 node --check examples/plugins/http-notification-bridge/server.mjs
 node --check examples/plugins/http-marker-importer/server.mjs
+node --check examples/plugins/telegram-notifier-template/server.mjs
+node --check examples/plugins/wecom-notifier-template/server.mjs
+node --check examples/plugins/webhook-notifier-template/server.mjs
 ```
 
 ## 插件作者检查清单

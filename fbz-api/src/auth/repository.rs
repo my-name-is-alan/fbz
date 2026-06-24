@@ -121,6 +121,34 @@ impl AuthRepository {
         .transpose()
     }
 
+    pub async fn find_user_by_public_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<AuthUserRecord>, sqlx::Error> {
+        sqlx::query(
+            r#"
+            select
+                id,
+                public_id::text as public_id,
+                username,
+                password_hash,
+                is_disabled,
+                allow_new_device_login
+            from users
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id.trim())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(AuthUserRecord::from_row)
+        .transpose()
+    }
+
     pub async fn create_session(
         &self,
         user: &AuthUserRecord,
@@ -326,6 +354,50 @@ impl AuthRepository {
         .await?;
 
         rows.into_iter().map(SessionInfoRecord::from_row).collect()
+    }
+
+    pub async fn find_active_session_for_user(
+        &self,
+        user_id: i64,
+        session_id: &str,
+    ) -> Result<Option<SessionInfoRecord>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select
+                s.public_id::text as id,
+                u.public_id::text as user_id,
+                u.username as user_name,
+                d.client_name as client,
+                d.device_id,
+                d.device_name,
+                d.client_version as application_version,
+                true as is_active
+            from sessions s
+            join users u on u.id = s.user_id
+            left join devices d on d.id = s.device_id
+            where s.user_id = $1
+              and s.public_id = case
+                  when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $2::uuid
+                  else null::uuid
+              end
+              and s.revoked_at is null
+              and s.expires_at > now()
+              and not exists (
+                  select 1
+                  from devices revoked
+                  where revoked.id = s.device_id
+                    and revoked.revoked_at is not null
+              )
+            limit 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(session_id.trim())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(SessionInfoRecord::from_row).transpose()
     }
 
     pub async fn list_devices(
@@ -736,6 +808,17 @@ mod tests {
         assert!(repository.contains("match_priority"));
         assert!(!repository.contains(&bad_or_filter));
         assert!(!repository.contains(&bad_order_filter));
+    }
+
+    #[test]
+    fn auth_user_public_id_lookup_keeps_uuid_index_shape() {
+        let repository = include_str!("repository.rs");
+        let bad_filter = format!("{}{}", "where public_id::text = ", "$1");
+
+        assert!(repository.contains("find_user_by_public_id"));
+        assert!(repository.contains("where public_id = case"));
+        assert!(repository.contains("then $1::uuid"));
+        assert!(!repository.contains(&bad_filter));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -674,6 +674,20 @@ impl AuthenticateByNameRequestDto {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AuthenticateUserRequestDto {
+    #[serde(rename = "Pw")]
+    pub pw: Option<String>,
+    pub password: Option<String>,
+}
+
+impl AuthenticateUserRequestDto {
+    pub fn password(&self) -> Option<&str> {
+        self.pw.as_deref().or(self.password.as_deref())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SessionInfoDto {
@@ -795,6 +809,273 @@ pub struct MediaSubFolderDto {
     pub is_user_access_configurable: bool,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct VirtualFolderInfoDto {
+    pub name: String,
+    pub locations: Vec<String>,
+    pub collection_type: String,
+    pub library_options: LibraryDefaultOptionsDto,
+    pub item_id: String,
+    pub id: String,
+    pub guid: String,
+    pub primary_image_item_id: Option<String>,
+    pub primary_image_tag: Option<String>,
+    pub refresh_progress: Option<f64>,
+    pub refresh_status: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryOptionsResultDto {
+    pub metadata_savers: Vec<LibraryOptionInfoDto>,
+    pub metadata_readers: Vec<LibraryOptionInfoDto>,
+    pub subtitle_fetchers: Vec<LibraryOptionInfoDto>,
+    pub lyrics_fetchers: Vec<LibraryOptionInfoDto>,
+    pub type_options: Vec<LibraryTypeOptionsDto>,
+    pub default_library_options: Vec<LibraryDefaultOptionsDto>,
+}
+
+impl LibraryOptionsResultDto {
+    pub fn fbz_default() -> Self {
+        let metadata_reader = LibraryOptionInfoDto::new("FBZ Metadata", true);
+        let image_fetcher = LibraryOptionInfoDto::new("FBZ Artwork", true);
+        let supported_image_types = vec![
+            "Primary".to_owned(),
+            "Backdrop".to_owned(),
+            "Logo".to_owned(),
+            "Thumb".to_owned(),
+        ];
+        let default_image_options = vec![
+            LibraryImageOptionDto::new("Primary", 1),
+            LibraryImageOptionDto::new("Backdrop", 3),
+            LibraryImageOptionDto::new("Logo", 1),
+            LibraryImageOptionDto::new("Thumb", 1),
+        ];
+        let content_types = ["movies", "tvshows", "music", "mixed"];
+
+        Self {
+            metadata_savers: Vec::new(),
+            metadata_readers: vec![metadata_reader.clone()],
+            subtitle_fetchers: Vec::new(),
+            lyrics_fetchers: Vec::new(),
+            type_options: content_types
+                .iter()
+                .map(|content_type| LibraryTypeOptionsDto {
+                    type_name: (*content_type).to_owned(),
+                    metadata_fetchers: vec![metadata_reader.clone()],
+                    image_fetchers: vec![image_fetcher.clone()],
+                    supported_image_types: supported_image_types.clone(),
+                    default_image_options: default_image_options.clone(),
+                })
+                .collect(),
+            default_library_options: content_types
+                .iter()
+                .map(|content_type| LibraryDefaultOptionsDto::for_content_type(content_type))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryOptionInfoDto {
+    pub name: String,
+    pub setup_url: Option<String>,
+    pub default_enabled: bool,
+    pub features: Vec<String>,
+}
+
+impl LibraryOptionInfoDto {
+    fn new(name: &str, default_enabled: bool) -> Self {
+        Self {
+            name: name.to_owned(),
+            setup_url: None,
+            default_enabled,
+            features: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryTypeOptionsDto {
+    #[serde(rename = "Type")]
+    pub type_name: String,
+    pub metadata_fetchers: Vec<LibraryOptionInfoDto>,
+    pub image_fetchers: Vec<LibraryOptionInfoDto>,
+    pub supported_image_types: Vec<String>,
+    pub default_image_options: Vec<LibraryImageOptionDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryImageOptionDto {
+    #[serde(rename = "Type")]
+    pub image_type: String,
+    pub limit: i32,
+    pub min_width: i32,
+}
+
+impl LibraryImageOptionDto {
+    fn new(image_type: &str, limit: i32) -> Self {
+        Self {
+            image_type: image_type.to_owned(),
+            limit,
+            min_width: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryDefaultOptionsDto {
+    pub enable_archive_media_files: bool,
+    pub enable_photos: bool,
+    pub enable_realtime_monitor: bool,
+    pub enable_marker_detection: bool,
+    pub enable_marker_detection_during_library_scan: bool,
+    pub intro_detection_fingerprint_length: i32,
+    pub enable_chapter_image_extraction: bool,
+    pub extract_chapter_images_during_library_scan: bool,
+    pub download_images_in_advance: bool,
+    pub cache_images: bool,
+    pub exclude_from_search: bool,
+    pub enable_plex_ignore: bool,
+    pub path_infos: Vec<LibraryMediaPathInfoDto>,
+    pub ignore_hidden_files: bool,
+    pub ignore_file_extensions: Vec<String>,
+    pub save_local_metadata: bool,
+    pub save_metadata_hidden: bool,
+    pub save_local_thumbnail_sets: bool,
+    pub import_playlists: bool,
+    pub enable_automatic_series_grouping: bool,
+    pub share_embedded_music_album_images: bool,
+    pub enable_embedded_titles: bool,
+    pub enable_audio_resume: bool,
+    pub auto_generate_chapters: bool,
+    pub merge_top_level_folders: bool,
+    pub auto_generate_chapter_interval_minutes: i32,
+    pub automatic_refresh_interval_days: i32,
+    pub placeholder_metadata_refresh_interval_days: i32,
+    pub preferred_metadata_language: String,
+    pub preferred_image_language: String,
+    pub content_type: String,
+    pub metadata_country_code: String,
+    pub metadata_savers: Vec<String>,
+    pub disabled_local_metadata_readers: Vec<String>,
+    pub local_metadata_reader_order: Vec<String>,
+    pub disabled_lyrics_fetchers: Vec<String>,
+    pub save_lyrics_with_media: bool,
+    pub lyrics_download_max_age_days: i32,
+    pub lyrics_fetcher_order: Vec<String>,
+    pub lyrics_download_languages: Vec<String>,
+    pub disabled_subtitle_fetchers: Vec<String>,
+    pub subtitle_fetcher_order: Vec<String>,
+    pub skip_subtitles_if_embedded_subtitles_present: bool,
+    pub skip_subtitles_if_audio_track_matches: bool,
+    pub subtitle_download_languages: Vec<String>,
+    pub subtitle_download_max_age_days: i32,
+    pub require_perfect_subtitle_match: bool,
+    pub save_subtitles_with_media: bool,
+    pub forced_subtitles_only: bool,
+    pub hearing_impaired_subtitles_only: bool,
+    pub collapse_single_item_folders: bool,
+    pub force_collapse_single_item_folders: bool,
+    pub enable_adult_metadata: bool,
+    pub import_collections: bool,
+    pub enable_multi_version_by_files: bool,
+    pub enable_multi_version_by_metadata: bool,
+    pub enable_multi_part_items: bool,
+    pub min_collection_items: i32,
+    pub music_folder_structure: String,
+    pub min_resume_pct: i32,
+    pub max_resume_pct: i32,
+    pub min_resume_duration_seconds: i32,
+    pub thumbnail_images_interval_seconds: i32,
+    pub sample_ignore_size: i32,
+}
+
+impl LibraryDefaultOptionsDto {
+    pub(crate) fn for_content_type(content_type: &str) -> Self {
+        Self {
+            enable_archive_media_files: false,
+            enable_photos: true,
+            enable_realtime_monitor: false,
+            enable_marker_detection: false,
+            enable_marker_detection_during_library_scan: false,
+            intro_detection_fingerprint_length: 10,
+            enable_chapter_image_extraction: false,
+            extract_chapter_images_during_library_scan: false,
+            download_images_in_advance: false,
+            cache_images: true,
+            exclude_from_search: false,
+            enable_plex_ignore: true,
+            path_infos: Vec::new(),
+            ignore_hidden_files: true,
+            ignore_file_extensions: Vec::new(),
+            save_local_metadata: false,
+            save_metadata_hidden: false,
+            save_local_thumbnail_sets: false,
+            import_playlists: true,
+            enable_automatic_series_grouping: true,
+            share_embedded_music_album_images: true,
+            enable_embedded_titles: false,
+            enable_audio_resume: true,
+            auto_generate_chapters: false,
+            merge_top_level_folders: false,
+            auto_generate_chapter_interval_minutes: 5,
+            automatic_refresh_interval_days: 0,
+            placeholder_metadata_refresh_interval_days: 0,
+            preferred_metadata_language: "en".to_owned(),
+            preferred_image_language: "en".to_owned(),
+            content_type: content_type.to_owned(),
+            metadata_country_code: "US".to_owned(),
+            metadata_savers: Vec::new(),
+            disabled_local_metadata_readers: Vec::new(),
+            local_metadata_reader_order: Vec::new(),
+            disabled_lyrics_fetchers: Vec::new(),
+            save_lyrics_with_media: false,
+            lyrics_download_max_age_days: 180,
+            lyrics_fetcher_order: Vec::new(),
+            lyrics_download_languages: Vec::new(),
+            disabled_subtitle_fetchers: Vec::new(),
+            subtitle_fetcher_order: Vec::new(),
+            skip_subtitles_if_embedded_subtitles_present: false,
+            skip_subtitles_if_audio_track_matches: false,
+            subtitle_download_languages: Vec::new(),
+            subtitle_download_max_age_days: 180,
+            require_perfect_subtitle_match: false,
+            save_subtitles_with_media: false,
+            forced_subtitles_only: false,
+            hearing_impaired_subtitles_only: false,
+            collapse_single_item_folders: false,
+            force_collapse_single_item_folders: false,
+            enable_adult_metadata: false,
+            import_collections: true,
+            enable_multi_version_by_files: true,
+            enable_multi_version_by_metadata: false,
+            enable_multi_part_items: true,
+            min_collection_items: 2,
+            music_folder_structure: "Other".to_owned(),
+            min_resume_pct: 5,
+            max_resume_pct: 90,
+            min_resume_duration_seconds: 300,
+            thumbnail_images_interval_seconds: 10,
+            sample_ignore_size: 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryMediaPathInfoDto {
+    pub path: String,
+    pub network_path: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct QueryResultDto<T> {
@@ -809,6 +1090,38 @@ impl<T> QueryResultDto<T> {
             items,
             total_record_count,
             start_index,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DeleteInfoDto {
+    pub paths: Vec<String>,
+}
+
+impl DeleteInfoDto {
+    pub fn empty() -> Self {
+        Self { paths: Vec::new() }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RecommendationDto {
+    pub items: Vec<BaseItemDto>,
+    pub recommendation_type: String,
+    pub baseline_item_name: String,
+    pub category_id: i64,
+}
+
+impl RecommendationDto {
+    pub fn recently_added_movies(items: Vec<BaseItemDto>) -> Self {
+        Self {
+            items,
+            recommendation_type: "SimilarToRecentlyPlayed".to_owned(),
+            baseline_item_name: "Recently Added Movies".to_owned(),
+            category_id: 0,
         }
     }
 }
@@ -847,6 +1160,78 @@ impl AllThemeMediaResultDto {
             soundtrack_songs_result: ThemeMediaResultDto::empty(owner_id),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LyricDto {
+    pub metadata: LyricMetadataDto,
+    pub lyrics: Vec<LyricLineDto>,
+}
+
+impl LyricDto {
+    pub fn empty() -> Self {
+        Self {
+            metadata: LyricMetadataDto {
+                is_synced: false,
+                ..LyricMetadataDto::default()
+            },
+            lyrics: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoteLyricInfoDto {
+    pub id: String,
+    pub provider_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lyrics: Option<LyricDto>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LyricMetadataDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub is_synced: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LyricLineDto {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cues: Option<Vec<LyricLineCueDto>>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LyricLineCueDto {
+    pub position: u32,
+    pub end_position: u32,
+    pub start: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -904,6 +1289,7 @@ pub struct BaseItemDto {
     pub user_data: Option<UserItemDataDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_sources: Vec<MediaSourceDto>,
+    pub chapters: Vec<ChapterInfoDto>,
 }
 
 impl From<BaseItemSource> for BaseItemDto {
@@ -925,8 +1311,19 @@ impl From<BaseItemSource> for BaseItemDto {
             collection_type: None,
             user_data: None,
             media_sources: Vec::new(),
+            chapters: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChapterInfoDto {
+    pub start_position_ticks: i64,
+    pub name: String,
+    pub image_tag: Option<String>,
+    #[serde(rename = "MarkerType")]
+    pub marker_type: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -964,8 +1361,18 @@ pub struct PlaybackInfoResponseDto {
 #[serde(rename_all = "PascalCase")]
 pub struct MediaSourceDto {
     pub id: String,
+    #[serde(rename = "Type")]
+    pub source_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
     pub path: Option<String>,
     pub protocol: String,
+    pub is_remote: bool,
+    pub requires_opening: bool,
+    pub requires_closing: bool,
+    pub supports_probing: bool,
+    pub read_at_native_framerate: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -975,6 +1382,10 @@ pub struct MediaSourceDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<i32>,
     pub media_streams: Vec<MediaStreamDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_audio_stream_index: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_subtitle_stream_index: Option<i32>,
     pub supports_direct_play: bool,
     pub supports_direct_stream: bool,
     pub supports_transcoding: bool,
@@ -987,6 +1398,7 @@ pub struct MediaSourceDto {
     pub transcoding_sub_protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcoding_container: Option<String>,
+    pub chapters: Vec<ChapterInfoDto>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1020,8 +1432,7 @@ pub struct MediaStreamDto {
     pub is_forced: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlaybackProgressDto {
     pub item_id: String,
     pub user_id: Option<String>,
@@ -1029,8 +1440,125 @@ pub struct PlaybackProgressDto {
     pub play_session_id: Option<String>,
     pub media_source_id: Option<String>,
     pub play_method: Option<String>,
+    pub queueable_media_types: Vec<String>,
+    pub can_seek: Option<bool>,
+    pub event_name: Option<String>,
+    pub audio_stream_index: Option<i32>,
+    pub subtitle_stream_index: Option<i32>,
     pub position_ticks: Option<i64>,
     pub is_paused: Option<bool>,
+    pub is_muted: Option<bool>,
+    pub volume_level: Option<i32>,
+    pub live_stream_id: Option<String>,
+    pub playlist_index: Option<i32>,
+    pub playlist_length: Option<i32>,
+    pub subtitle_offset: Option<f64>,
+    pub playback_rate: Option<f64>,
+    pub now_playing_queue: Vec<Value>,
+    pub playlist_item_id: Option<String>,
+    pub playlist_item_ids: Vec<String>,
+    pub runtime_ticks: Option<i64>,
+    pub playback_start_time_ticks: Option<i64>,
+    pub brightness: Option<i32>,
+    pub aspect_ratio: Option<String>,
+    pub repeat_mode: Option<String>,
+    pub sleep_timer_mode: Option<String>,
+    pub sleep_timer_end_time: Option<String>,
+    pub shuffle: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PlaybackProgressRawDto {
+    item_id: Option<String>,
+    item: Option<PlaybackProgressItemDto>,
+    user_id: Option<String>,
+    session_id: Option<String>,
+    play_session_id: Option<String>,
+    media_source_id: Option<String>,
+    play_method: Option<String>,
+    #[serde(default)]
+    queueable_media_types: Vec<String>,
+    can_seek: Option<bool>,
+    event_name: Option<String>,
+    audio_stream_index: Option<i32>,
+    subtitle_stream_index: Option<i32>,
+    position_ticks: Option<i64>,
+    is_paused: Option<bool>,
+    is_muted: Option<bool>,
+    volume_level: Option<i32>,
+    live_stream_id: Option<String>,
+    playlist_index: Option<i32>,
+    playlist_length: Option<i32>,
+    subtitle_offset: Option<f64>,
+    playback_rate: Option<f64>,
+    #[serde(default)]
+    now_playing_queue: Vec<Value>,
+    playlist_item_id: Option<String>,
+    #[serde(default)]
+    playlist_item_ids: Vec<String>,
+    #[serde(rename = "RunTimeTicks")]
+    runtime_ticks: Option<i64>,
+    playback_start_time_ticks: Option<i64>,
+    brightness: Option<i32>,
+    aspect_ratio: Option<String>,
+    repeat_mode: Option<String>,
+    sleep_timer_mode: Option<String>,
+    sleep_timer_end_time: Option<String>,
+    shuffle: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PlaybackProgressItemDto {
+    id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for PlaybackProgressDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = PlaybackProgressRawDto::deserialize(deserializer)?;
+        let item_id = raw
+            .item_id
+            .or_else(|| raw.item.and_then(|item| item.id))
+            .ok_or_else(|| de::Error::missing_field("ItemId"))?;
+
+        Ok(Self {
+            item_id,
+            user_id: raw.user_id,
+            session_id: raw.session_id,
+            play_session_id: raw.play_session_id,
+            media_source_id: raw.media_source_id,
+            play_method: raw.play_method,
+            queueable_media_types: raw.queueable_media_types,
+            can_seek: raw.can_seek,
+            event_name: raw.event_name,
+            audio_stream_index: raw.audio_stream_index,
+            subtitle_stream_index: raw.subtitle_stream_index,
+            position_ticks: raw.position_ticks,
+            is_paused: raw.is_paused,
+            is_muted: raw.is_muted,
+            volume_level: raw.volume_level,
+            live_stream_id: raw.live_stream_id,
+            playlist_index: raw.playlist_index,
+            playlist_length: raw.playlist_length,
+            subtitle_offset: raw.subtitle_offset,
+            playback_rate: raw.playback_rate,
+            now_playing_queue: raw.now_playing_queue,
+            playlist_item_id: raw.playlist_item_id,
+            playlist_item_ids: raw.playlist_item_ids,
+            runtime_ticks: raw.runtime_ticks,
+            playback_start_time_ticks: raw.playback_start_time_ticks,
+            brightness: raw.brightness,
+            aspect_ratio: raw.aspect_ratio,
+            repeat_mode: raw.repeat_mode,
+            sleep_timer_mode: raw.sleep_timer_mode,
+            sleep_timer_end_time: raw.sleep_timer_end_time,
+            shuffle: raw.shuffle,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1229,6 +1757,7 @@ mod tests {
         assert_eq!(value["Type"], "Movie");
         assert_eq!(value["MediaType"], "Video");
         assert_eq!(value["ImageTags"], json!({}));
+        assert_eq!(value["Chapters"], json!([]));
         assert!(value.get("CollectionType").is_none());
         assert!(value.get("MediaSources").is_none());
     }
@@ -1258,6 +1787,85 @@ mod tests {
     }
 
     #[test]
+    fn virtual_folder_info_serializes_emby_shape() {
+        let mut library_options = LibraryDefaultOptionsDto::for_content_type("movies");
+        library_options.path_infos = vec![LibraryMediaPathInfoDto {
+            path: "D:/Media/Movies".to_owned(),
+            network_path: None,
+            username: None,
+            password: None,
+        }];
+        let dto = VirtualFolderInfoDto {
+            name: "Movies".to_owned(),
+            locations: vec!["D:/Media/Movies".to_owned()],
+            collection_type: "movies".to_owned(),
+            library_options,
+            item_id: "library-1".to_owned(),
+            id: "library-1".to_owned(),
+            guid: "library-1".to_owned(),
+            primary_image_item_id: None,
+            primary_image_tag: None,
+            refresh_progress: None,
+            refresh_status: "Idle".to_owned(),
+        };
+
+        let value = serde_json::to_value(dto).unwrap();
+
+        assert_eq!(value["Name"], "Movies");
+        assert_eq!(value["Locations"], json!(["D:/Media/Movies"]));
+        assert_eq!(value["CollectionType"], "movies");
+        assert_eq!(value["ItemId"], "library-1");
+        assert_eq!(value["Id"], "library-1");
+        assert_eq!(value["Guid"], "library-1");
+        assert_eq!(value["PrimaryImageItemId"], Value::Null);
+        assert_eq!(value["LibraryOptions"]["ContentType"], "movies");
+        assert_eq!(
+            value["LibraryOptions"]["PathInfos"][0]["Path"],
+            "D:/Media/Movies"
+        );
+        assert_eq!(value["RefreshStatus"], "Idle");
+    }
+
+    #[test]
+    fn library_options_result_uses_emby_pascal_case_defaults() {
+        let result = LibraryOptionsResultDto::fbz_default();
+
+        let value = serde_json::to_value(result).unwrap();
+
+        assert!(value["MetadataSavers"].as_array().unwrap().is_empty());
+        assert!(value["SubtitleFetchers"].as_array().unwrap().is_empty());
+        assert!(value["LyricsFetchers"].as_array().unwrap().is_empty());
+        assert!(
+            value["MetadataReaders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reader| reader["Name"] == "FBZ Metadata")
+        );
+        assert!(
+            value["TypeOptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option["Type"] == "movies")
+        );
+        assert_eq!(
+            value["TypeOptions"][0]["SupportedImageTypes"],
+            json!(["Primary", "Backdrop", "Logo", "Thumb"])
+        );
+        assert_eq!(
+            value["TypeOptions"][0]["DefaultImageOptions"][0]["Type"],
+            "Primary"
+        );
+        assert_eq!(value["DefaultLibraryOptions"][0]["ContentType"], "movies");
+        assert_eq!(
+            value["DefaultLibraryOptions"][0]["PreferredMetadataLanguage"],
+            "en"
+        );
+        assert_eq!(value["DefaultLibraryOptions"][0]["PathInfos"], json!([]));
+    }
+
+    #[test]
     fn query_result_wraps_items_for_browse_endpoints() {
         let result = QueryResultDto::new(
             vec![UserViewDto::from(LibraryViewSource {
@@ -1277,6 +1885,43 @@ mod tests {
     }
 
     #[test]
+    fn delete_info_uses_safe_emby_pascal_case_paths() {
+        let dto = DeleteInfoDto::empty();
+
+        let value = serde_json::to_value(dto).unwrap();
+
+        assert_eq!(value["Paths"], json!([]));
+        assert_eq!(value.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recommendation_dto_uses_emby_pascal_case_fields() {
+        let result = RecommendationDto {
+            items: vec![BaseItemDto::from(BaseItemSource {
+                id: "movie-1".to_owned(),
+                name: "Alien".to_owned(),
+                item_type: "Movie".to_owned(),
+                media_type: Some("Video".to_owned()),
+                parent_id: Some("library-1".to_owned()),
+                is_folder: false,
+                run_time_ticks: Some(7_000_000),
+                production_year: Some(1979),
+            })],
+            recommendation_type: "SimilarToRecentlyPlayed".to_owned(),
+            baseline_item_name: "Recently Added Movies".to_owned(),
+            category_id: 0,
+        };
+
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_eq!(value["RecommendationType"], "SimilarToRecentlyPlayed");
+        assert_eq!(value["BaselineItemName"], "Recently Added Movies");
+        assert_eq!(value["CategoryId"], 0);
+        assert_eq!(value["Items"][0]["Type"], "Movie");
+        assert_eq!(value["Items"][0]["MediaType"], "Video");
+    }
+
+    #[test]
     fn theme_media_results_serialize_empty_emby_shape() {
         let result = AllThemeMediaResultDto::empty("item-1".to_owned());
 
@@ -1287,6 +1932,31 @@ mod tests {
         assert_eq!(value["ThemeVideosResult"]["TotalRecordCount"], 0);
         assert_eq!(value["ThemeSongsResult"]["OwnerId"], "item-1");
         assert_eq!(value["SoundtrackSongsResult"]["OwnerId"], "item-1");
+    }
+
+    #[test]
+    fn lyric_result_serializes_empty_emby_shape() {
+        let result = LyricDto::empty();
+
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_eq!(value["Metadata"]["IsSynced"], false);
+        assert_eq!(value["Lyrics"], json!([]));
+    }
+
+    #[test]
+    fn remote_lyric_info_uses_emby_pascal_case_fields() {
+        let result = RemoteLyricInfoDto {
+            id: "lyric-1".to_owned(),
+            provider_name: "LrcLib".to_owned(),
+            lyrics: Some(LyricDto::empty()),
+        };
+
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_eq!(value["Id"], "lyric-1");
+        assert_eq!(value["ProviderName"], "LrcLib");
+        assert_eq!(value["Lyrics"]["Metadata"]["IsSynced"], false);
     }
 
     #[test]
@@ -1384,6 +2054,23 @@ mod tests {
     }
 
     #[test]
+    fn authenticate_user_accepts_emby_pw_and_password_fields() {
+        let payload: AuthenticateUserRequestDto = serde_json::from_value(json!({
+            "Pw": "secret"
+        }))
+        .unwrap();
+
+        assert_eq!(payload.password(), Some("secret"));
+
+        let payload: AuthenticateUserRequestDto = serde_json::from_value(json!({
+            "Password": "fallback-secret"
+        }))
+        .unwrap();
+
+        assert_eq!(payload.password(), Some("fallback-secret"));
+    }
+
+    #[test]
     fn playback_progress_accepts_partial_client_payload() {
         let payload: PlaybackProgressDto = serde_json::from_value(json!({
             "ItemId": "item-1",
@@ -1391,8 +2078,20 @@ mod tests {
             "PlaySessionId": "play-1",
             "MediaSourceId": "source-1",
             "PlayMethod": "DirectPlay",
+            "QueueableMediaTypes": ["Audio", "Video"],
+            "CanSeek": true,
+            "EventName": "TimeUpdate",
+            "AudioStreamIndex": 1,
+            "SubtitleStreamIndex": -1,
             "PositionTicks": 42,
-            "IsPaused": true
+            "IsPaused": true,
+            "IsMuted": false,
+            "VolumeLevel": 85,
+            "LiveStreamId": "live-1",
+            "PlaylistIndex": 2,
+            "PlaylistLength": 4,
+            "SubtitleOffset": 0,
+            "PlaybackRate": 1.25
         }))
         .unwrap();
 
@@ -1402,8 +2101,82 @@ mod tests {
         assert_eq!(payload.play_session_id.as_deref(), Some("play-1"));
         assert_eq!(payload.media_source_id.as_deref(), Some("source-1"));
         assert_eq!(payload.play_method.as_deref(), Some("DirectPlay"));
+        assert_eq!(
+            payload.queueable_media_types,
+            vec!["Audio".to_owned(), "Video".to_owned()]
+        );
+        assert_eq!(payload.can_seek, Some(true));
+        assert_eq!(payload.event_name.as_deref(), Some("TimeUpdate"));
+        assert_eq!(payload.audio_stream_index, Some(1));
+        assert_eq!(payload.subtitle_stream_index, Some(-1));
         assert_eq!(payload.position_ticks, Some(42));
         assert_eq!(payload.is_paused, Some(true));
+        assert_eq!(payload.is_muted, Some(false));
+        assert_eq!(payload.volume_level, Some(85));
+        assert_eq!(payload.live_stream_id.as_deref(), Some("live-1"));
+        assert_eq!(payload.playlist_index, Some(2));
+        assert_eq!(payload.playlist_length, Some(4));
+        assert_eq!(payload.subtitle_offset, Some(0.0));
+        assert_eq!(payload.playback_rate, Some(1.25));
+    }
+
+    #[test]
+    fn playback_progress_accepts_item_object_when_item_id_is_missing() {
+        let payload: PlaybackProgressDto = serde_json::from_value(json!({
+            "Item": {
+                "Id": "item-from-object",
+                "Name": "External item",
+                "MediaType": "Video"
+            },
+            "PlaySessionId": "play-1",
+            "PositionTicks": 42
+        }))
+        .unwrap();
+
+        assert_eq!(payload.item_id, "item-from-object");
+        assert_eq!(payload.play_session_id.as_deref(), Some("play-1"));
+        assert_eq!(payload.position_ticks, Some(42));
+    }
+
+    #[test]
+    fn playback_progress_accepts_queue_and_mode_state() {
+        let payload: PlaybackProgressDto = serde_json::from_value(json!({
+            "ItemId": "item-1",
+            "NowPlayingQueue": [
+                { "Id": "queue-1", "PlaylistItemId": "playlist-item-1" },
+                { "Id": "queue-2" }
+            ],
+            "PlaylistItemId": "playlist-item-1",
+            "PlaylistItemIds": ["playlist-item-1", "playlist-item-2"],
+            "RunTimeTicks": 9000,
+            "PlaybackStartTimeTicks": 100,
+            "Brightness": 40,
+            "AspectRatio": "16:9",
+            "RepeatMode": "RepeatAll",
+            "SleepTimerMode": "EndOfEpisode",
+            "SleepTimerEndTime": "2026-06-24T12:00:00Z",
+            "Shuffle": true
+        }))
+        .unwrap();
+
+        assert_eq!(payload.now_playing_queue.len(), 2);
+        assert_eq!(payload.now_playing_queue[0]["Id"], json!("queue-1"));
+        assert_eq!(payload.playlist_item_id.as_deref(), Some("playlist-item-1"));
+        assert_eq!(
+            payload.playlist_item_ids,
+            vec!["playlist-item-1".to_owned(), "playlist-item-2".to_owned()]
+        );
+        assert_eq!(payload.runtime_ticks, Some(9000));
+        assert_eq!(payload.playback_start_time_ticks, Some(100));
+        assert_eq!(payload.brightness, Some(40));
+        assert_eq!(payload.aspect_ratio.as_deref(), Some("16:9"));
+        assert_eq!(payload.repeat_mode.as_deref(), Some("RepeatAll"));
+        assert_eq!(payload.sleep_timer_mode.as_deref(), Some("EndOfEpisode"));
+        assert_eq!(
+            payload.sleep_timer_end_time.as_deref(),
+            Some("2026-06-24T12:00:00Z")
+        );
+        assert_eq!(payload.shuffle, Some(true));
     }
 
     #[test]
@@ -1413,12 +2186,22 @@ mod tests {
             error_code: None,
             media_sources: vec![MediaSourceDto {
                 id: "source-1".to_owned(),
+                source_type: "Default".to_owned(),
+                name: "source-1".to_owned(),
+                item_id: Some("item-1".to_owned()),
                 path: Some("D:/Media/Movie.mkv".to_owned()),
                 protocol: "File".to_owned(),
+                is_remote: false,
+                requires_opening: false,
+                requires_closing: false,
+                supports_probing: false,
+                read_at_native_framerate: false,
                 container: Some("mkv".to_owned()),
                 run_time_ticks: Some(7_200_000_000),
                 size: Some(42_000_000),
                 bitrate: Some(12_000_000),
+                default_audio_stream_index: None,
+                default_subtitle_stream_index: None,
                 supports_direct_play: true,
                 supports_direct_stream: true,
                 supports_transcoding: true,
@@ -1431,6 +2214,7 @@ mod tests {
                 ),
                 transcoding_sub_protocol: Some("hls".to_owned()),
                 transcoding_container: Some("ts".to_owned()),
+                chapters: Vec::new(),
                 media_streams: vec![MediaStreamDto {
                     index: 0,
                     stream_type: "Video".to_owned(),
@@ -1456,9 +2240,18 @@ mod tests {
         let value: Value = serde_json::to_value(response).unwrap();
 
         assert_eq!(value["PlaySessionId"], "play-1");
+        assert_eq!(value["MediaSources"][0]["Type"], "Default");
+        assert_eq!(value["MediaSources"][0]["Name"], "source-1");
+        assert_eq!(value["MediaSources"][0]["IsRemote"], false);
+        assert_eq!(value["MediaSources"][0]["RequiresOpening"], false);
+        assert_eq!(value["MediaSources"][0]["RequiresClosing"], false);
+        assert_eq!(value["MediaSources"][0]["SupportsProbing"], false);
+        assert_eq!(value["MediaSources"][0]["ReadAtNativeFramerate"], false);
+        assert_eq!(value["MediaSources"][0]["ItemId"], "item-1");
         assert_eq!(value["MediaSources"][0]["RunTimeTicks"], 7_200_000_000i64);
         assert_eq!(value["MediaSources"][0]["Size"], 42_000_000);
         assert_eq!(value["MediaSources"][0]["MediaStreams"][0]["Type"], "Video");
+        assert_eq!(value["MediaSources"][0]["Chapters"], json!([]));
         assert_eq!(
             value["MediaSources"][0]["MediaStreams"][0]["DisplayTitle"],
             "Main - 2160p HEVC"

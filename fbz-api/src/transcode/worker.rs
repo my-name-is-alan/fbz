@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use serde_json::{Value, json};
 use tokio::{
@@ -15,6 +15,7 @@ use crate::{
     media::tools::MediaToolDiagnostics,
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
     transcode::{
+        cleanup::cleanup_session_output_dir_best_effort,
         planner::{FfmpegPlan, TranscodePlanError, build_ffmpeg_plan},
         repository::{TranscodeClaimOutcome, TranscodeClaimRecord, TranscodeRepository},
         service::TranscodeQueueService,
@@ -29,6 +30,7 @@ pub fn spawn_transcode_worker(
     pool: DbPool,
     transcode_config: TranscodeConfig,
     worker_config: TranscodeWorkerConfig,
+    transcode_cache_dir: PathBuf,
     media_tools: MediaToolDiagnostics,
     mut shutdown: broadcast::Receiver<()>,
 ) -> JoinHandle<()> {
@@ -63,7 +65,7 @@ pub fn spawn_transcode_worker(
                     }
                 }
                 _ = tick.tick() => {
-                    run_once(&service, &repository, &hook_dispatcher, &transcode_config, &media_tools, &worker_id).await;
+                    run_once(&service, &repository, &hook_dispatcher, &transcode_config, &transcode_cache_dir, &media_tools, &worker_id).await;
                 }
             }
         }
@@ -77,6 +79,7 @@ async fn run_once(
     repository: &TranscodeRepository,
     hook_dispatcher: &PluginHookDispatcher,
     transcode_config: &TranscodeConfig,
+    transcode_cache_dir: &PathBuf,
     media_tools: &MediaToolDiagnostics,
     worker_id: &str,
 ) {
@@ -91,12 +94,31 @@ async fn run_once(
                 execute_claimed_session(repository, transcode_config, media_tools, session.clone())
                     .await
             {
+                let cleanup_reason = transcode_cleanup_reason(&err);
                 let message = err.to_string();
                 warn!(
                     session_id = %session.id,
+                    user_id = %session.user_id,
+                    item_id = %session.item_id,
+                    media_file_id = ?session.media_file_id,
+                    worker_id = %session.worker_id,
+                    attempts = session.attempts,
+                    max_attempts = session.max_attempts,
+                    hardware_acceleration = ?session.hardware_acceleration,
+                    video_codec = ?session.video_codec,
+                    audio_codec = ?session.audio_codec,
+                    container = ?session.container,
+                    bitrate = ?session.bitrate,
                     error = %message,
                     "transcode session failed"
                 );
+                cleanup_session_output_dir_best_effort(
+                    transcode_cache_dir,
+                    &session.id,
+                    session.output_path.as_deref(),
+                    cleanup_reason,
+                )
+                .await;
                 match repository.mark_failed(&session.id, &message).await {
                     Ok(true) => {
                         dispatch_transcode_hook(
@@ -139,6 +161,13 @@ async fn run_once(
         Err(err) => {
             warn!(error = %err, "transcode worker failed to claim session");
         }
+    }
+}
+
+fn transcode_cleanup_reason(error: &TranscodeWorkerError) -> &'static str {
+    match error {
+        TranscodeWorkerError::SessionUpdateLost(_) => "transcode_update_lost",
+        _ => "transcode_failed",
     }
 }
 
@@ -325,6 +354,40 @@ mod tests {
         assert_eq!(event.event_key, TRANSCODE_COMPLETED_EVENT);
         assert_eq!(event.payload["status"], "succeeded");
         assert!(event.payload.get("error").is_none());
+    }
+
+    #[test]
+    fn failed_or_lost_transcodes_attempt_output_cleanup() {
+        let source = include_str!("worker.rs");
+
+        assert!(source.contains("cleanup_session_output_dir_best_effort"));
+        assert!(source.contains("\"transcode_failed\""));
+        assert!(source.contains("\"transcode_update_lost\""));
+    }
+
+    #[test]
+    fn transcode_failure_logs_structured_session_context() {
+        let source = include_str!("worker.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("worker source should include production section");
+
+        assert!(production_source.contains("session_id = %session.id"));
+        assert!(production_source.contains("user_id = %session.user_id"));
+        assert!(production_source.contains("item_id = %session.item_id"));
+        assert!(production_source.contains("media_file_id = ?session.media_file_id"));
+        assert!(production_source.contains("worker_id = %session.worker_id"));
+        assert!(production_source.contains("attempts = session.attempts"));
+        assert!(production_source.contains("max_attempts = session.max_attempts"));
+        assert!(
+            production_source.contains("hardware_acceleration = ?session.hardware_acceleration")
+        );
+        assert!(production_source.contains("video_codec = ?session.video_codec"));
+        assert!(production_source.contains("audio_codec = ?session.audio_codec"));
+        assert!(production_source.contains("container = ?session.container"));
+        assert!(production_source.contains("bitrate = ?session.bitrate"));
+        assert!(production_source.contains("transcode session failed"));
     }
 
     fn claim() -> TranscodeClaimRecord {

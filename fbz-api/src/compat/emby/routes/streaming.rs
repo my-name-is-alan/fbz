@@ -26,23 +26,43 @@ use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 use crate::{
-    auth::service::AuthenticatedUser,
+    auth::{service::AuthenticatedUser, token::issue_access_token},
     config::MediaConfig,
     db::DbPool,
     error::AppError,
     media::repository::{MediaRepository, PlaybackMediaSourceRecord},
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
     state::AppState,
+    transcode::repository::{CreateTranscodeSessionInput, TranscodeRepository},
 };
 
-use super::access::authenticate_request_user;
+use super::access::{access_token_from_request, authenticate_request_user};
 
 const MEDIA_DOWNLOAD_STARTED_EVENT: &str = "media.download.started";
+const DEFAULT_UNIVERSAL_AUDIO_CODEC: &str = "aac";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct DirectStreamQuery {
     pub media_source_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UniversalAudioQuery {
+    pub user_id: Option<String>,
+    pub device_id: Option<String>,
+    pub media_source_id: Option<String>,
+    pub max_streaming_bitrate: Option<i64>,
+    pub container: Option<String>,
+    pub max_sample_rate: Option<i32>,
+    pub play_session_id: Option<String>,
+    pub transcoding_protocol: Option<String>,
+    pub transcoding_container: Option<String>,
+    pub audio_codec: Option<String>,
+    pub enable_redirection: Option<bool>,
+    pub enable_remote_media: Option<bool>,
+    pub start_time_ticks: Option<i64>,
 }
 
 pub async fn video_stream(
@@ -63,6 +83,39 @@ pub async fn video_stream_container(
     uri: Uri,
 ) -> Result<Response, AppError> {
     stream_source(state, item_id, query, headers, uri).await
+}
+
+pub async fn video_stream_file(
+    State(state): State<AppState>,
+    AxumPath((item_id, stream_file_name)): AxumPath<(String, String)>,
+    Query(query): Query<DirectStreamQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    validate_stream_file_name(&stream_file_name)?;
+    stream_source(state, item_id, query, headers, uri).await
+}
+
+pub async fn universal_audio_stream(
+    State(state): State<AppState>,
+    AxumPath(item_id): AxumPath<String>,
+    Query(query): Query<UniversalAudioQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let input = universal_audio_input(&query)?;
+    if input.requests_hls_transcode() {
+        return universal_audio_hls_stream(state, item_id, input, headers, uri).await;
+    }
+
+    stream_source(
+        state,
+        item_id,
+        input.into_direct_stream_query(),
+        headers,
+        uri,
+    )
+    .await
 }
 
 pub async fn audio_stream(
@@ -134,11 +187,75 @@ async fn stream_source(
         .map_err(|err| AppError::internal(format!("failed to get stream source: {err}")))?
         .ok_or_else(|| AppError::not_found("stream source not found"))?;
 
+    stream_source_response(&state, &source, headers.get(RANGE)).await
+}
+
+async fn stream_source_response(
+    state: &AppState,
+    source: &PlaybackMediaSourceRecord,
+    range_header: Option<&HeaderValue>,
+) -> Result<Response, AppError> {
     if source.is_strm {
         return strm_redirect_response(&state.config().media, &source);
     }
 
-    local_file_response(&source, headers.get(RANGE)).await
+    local_file_response(source, range_header).await
+}
+
+async fn universal_audio_hls_stream(
+    state: AppState,
+    item_id: String,
+    input: UniversalAudioInput,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let access_token = access_token_from_request(&headers, uri.query())?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    assert_universal_audio_user(&user, input.user_id.as_deref())?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let source = MediaRepository::new(database.clone())
+        .find_playback_media_source(
+            user.id,
+            &item_id,
+            media_source_id_as_i64(input.media_source_id.as_deref()),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get universal audio source: {err}")))?
+        .ok_or_else(|| AppError::not_found("universal audio source not found"))?;
+
+    let output_base_path = state
+        .config()
+        .storage
+        .transcode_cache_dir
+        .to_string_lossy()
+        .into_owned();
+    let play_session_id = input
+        .play_session_id
+        .clone()
+        .unwrap_or_else(|| issue_access_token().token);
+    let Some(session_input) = universal_audio_transcode_session_input(
+        user.id,
+        &source,
+        &input,
+        &output_base_path,
+        &play_session_id,
+    ) else {
+        return stream_source_response(&state, &source, headers.get(RANGE)).await;
+    };
+    let session = TranscodeRepository::new(database.clone())
+        .create_session(session_input)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to queue universal audio hls: {err}")))?;
+
+    redirect_response(&universal_audio_hls_manifest_location(
+        &source,
+        &session.id,
+        &play_session_id,
+        &access_token,
+    ))
 }
 
 fn download_content_disposition(source: &PlaybackMediaSourceRecord) -> String {
@@ -228,6 +345,275 @@ fn validate_stream_file_name(value: &str) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UniversalAudioInput {
+    media_source_id: Option<String>,
+    user_id: Option<String>,
+    device_id: Option<String>,
+    containers: Vec<String>,
+    transcoding_protocol: Option<String>,
+    transcoding_container: Option<String>,
+    audio_codec: Option<String>,
+    max_streaming_bitrate: Option<i64>,
+    max_sample_rate: Option<i32>,
+    play_session_id: Option<String>,
+    enable_redirection: Option<bool>,
+    enable_remote_media: Option<bool>,
+    start_time_ticks: Option<i64>,
+}
+
+impl UniversalAudioInput {
+    fn requests_hls_transcode(&self) -> bool {
+        self.transcoding_protocol.as_deref() == Some("hls")
+    }
+
+    fn into_direct_stream_query(self) -> DirectStreamQuery {
+        let Self {
+            media_source_id,
+            user_id: _,
+            device_id: _,
+            containers: _,
+            transcoding_protocol: _,
+            transcoding_container: _,
+            audio_codec: _,
+            max_streaming_bitrate: _,
+            max_sample_rate: _,
+            play_session_id: _,
+            enable_redirection: _,
+            enable_remote_media: _,
+            start_time_ticks: _,
+        } = self;
+
+        DirectStreamQuery { media_source_id }
+    }
+}
+
+fn assert_universal_audio_user(
+    user: &AuthenticatedUser,
+    requested_user_id: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(requested_user_id) = requested_user_id
+        && requested_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match universal audio user",
+        ));
+    }
+
+    Ok(())
+}
+
+fn universal_audio_transcode_session_input(
+    user_id: i64,
+    source: &PlaybackMediaSourceRecord,
+    input: &UniversalAudioInput,
+    output_base_path: &str,
+    play_session_id: &str,
+) -> Option<CreateTranscodeSessionInput> {
+    if !source.supports_transcoding {
+        return None;
+    }
+    let input_path = transcode_input_path(source)?;
+
+    Some(CreateTranscodeSessionInput {
+        user_id,
+        media_item_id: source.media_item_id,
+        media_file_id: Some(source.media_file_id),
+        input_path,
+        output_base_path: output_base_path.to_owned(),
+        play_session_id: Some(play_session_id.to_owned()),
+        device_id: input.device_id.clone(),
+        video_codec: None,
+        audio_codec: Some(
+            input
+                .audio_codec
+                .clone()
+                .unwrap_or_else(|| DEFAULT_UNIVERSAL_AUDIO_CODEC.to_owned()),
+        ),
+        container: Some("hls".to_owned()),
+        bitrate: input
+            .max_streaming_bitrate
+            .map(|bitrate| bitrate.min(i64::from(i32::MAX)) as i32),
+    })
+}
+
+fn transcode_input_path(source: &PlaybackMediaSourceRecord) -> Option<String> {
+    let path = if source.is_strm {
+        source.strm_target.as_deref().unwrap_or(&source.path)
+    } else {
+        &source.path
+    };
+
+    let trimmed = path.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn universal_audio_hls_manifest_location(
+    source: &PlaybackMediaSourceRecord,
+    session_id: &str,
+    play_session_id: &str,
+    access_token: &str,
+) -> String {
+    format!(
+        "/emby/Audio/{}/master.m3u8?MediaSourceId={}&TranscodeSessionId={}&PlaySessionId={}&api_key={}",
+        source.item_id, source.media_file_id, session_id, play_session_id, access_token
+    )
+}
+
+fn redirect_response(location: &str) -> Result<Response, AppError> {
+    let location = HeaderValue::from_str(location)
+        .map_err(|_| AppError::internal("universal audio hls location is invalid"))?;
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::FOUND;
+    response.headers_mut().insert(LOCATION, location);
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+fn universal_audio_input(query: &UniversalAudioQuery) -> Result<UniversalAudioInput, AppError> {
+    Ok(UniversalAudioInput {
+        media_source_id: normalize_optional_id(query.media_source_id.as_deref(), "MediaSourceId")?,
+        user_id: normalize_optional_id(query.user_id.as_deref(), "UserId")?,
+        device_id: normalize_optional_id(query.device_id.as_deref(), "DeviceId")?,
+        containers: normalize_token_list(
+            query.container.as_deref(),
+            &[
+                "aac", "ape", "flac", "m4a", "mp2", "mp3", "mpa", "oga", "ogg", "opus", "wav",
+                "webm", "webma", "wma",
+            ],
+        ),
+        transcoding_protocol: normalize_optional_token(
+            query.transcoding_protocol.as_deref(),
+            "TranscodingProtocol",
+            &["hls"],
+        )?,
+        transcoding_container: normalize_optional_token(
+            query.transcoding_container.as_deref(),
+            "TranscodingContainer",
+            &["aac", "mp3", "ts"],
+        )?,
+        audio_codec: normalize_optional_token(
+            query.audio_codec.as_deref(),
+            "AudioCodec",
+            &["aac", "flac", "mp3", "opus", "vorbis", "wma"],
+        )?,
+        max_streaming_bitrate: bounded_positive_i64(
+            query.max_streaming_bitrate,
+            "MaxStreamingBitrate",
+            1_000_000_000,
+        )?,
+        max_sample_rate: bounded_positive_i32(query.max_sample_rate, "MaxSampleRate", 768_000)?,
+        play_session_id: normalize_optional_id(query.play_session_id.as_deref(), "PlaySessionId")?,
+        enable_redirection: query.enable_redirection,
+        enable_remote_media: query.enable_remote_media,
+        start_time_ticks: bounded_non_negative_i64(
+            query.start_time_ticks,
+            "StartTimeTicks",
+            3_153_600_000_000_000,
+        )?,
+    })
+}
+
+fn normalize_optional_id(
+    value: Option<&str>,
+    name: &'static str,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 128
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        return Err(AppError::unprocessable(format!("{name} is invalid")));
+    }
+
+    Ok(Some(value.to_owned()))
+}
+
+fn normalize_token_list(value: Option<&str>, allowed: &[&str]) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+
+    let mut tokens = Vec::new();
+    for raw in value.split(',') {
+        let token = raw.trim().to_ascii_lowercase();
+        if allowed.contains(&token.as_str()) && !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+
+    tokens
+}
+
+fn normalize_optional_token(
+    value: Option<&str>,
+    name: &'static str,
+    allowed: &[&str],
+) -> Result<Option<String>, AppError> {
+    let Some(token) = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Ok(None);
+    };
+    if !allowed.contains(&token.as_str()) {
+        return Err(AppError::unprocessable(format!("{name} is invalid")));
+    }
+
+    Ok(Some(token))
+}
+
+fn bounded_positive_i64(
+    value: Option<i64>,
+    name: &'static str,
+    max: i64,
+) -> Result<Option<i64>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !(1..=max).contains(&value) {
+        return Err(AppError::unprocessable(format!("{name} is out of range")));
+    }
+
+    Ok(Some(value))
+}
+
+fn bounded_positive_i32(
+    value: Option<i32>,
+    name: &'static str,
+    max: i32,
+) -> Result<Option<i32>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !(1..=max).contains(&value) {
+        return Err(AppError::unprocessable(format!("{name} is out of range")));
+    }
+
+    Ok(Some(value))
+}
+
+fn bounded_non_negative_i64(
+    value: Option<i64>,
+    name: &'static str,
+    max: i64,
+) -> Result<Option<i64>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !(0..=max).contains(&value) {
+        return Err(AppError::unprocessable(format!("{name} is out of range")));
+    }
+
+    Ok(Some(value))
 }
 
 fn strm_redirect_response(
@@ -555,6 +941,104 @@ mod tests {
         assert_eq!(
             stream_content_type(None, Path::new("song.mp3")),
             "audio/mpeg"
+        );
+    }
+
+    #[test]
+    fn universal_audio_query_normalizes_safe_values() {
+        let input = universal_audio_input(&UniversalAudioQuery {
+            media_source_id: Some("42".to_owned()),
+            container: Some(" mp3, AAC,../bad,flac,mp3, ".to_owned()),
+            transcoding_protocol: Some(" HLS ".to_owned()),
+            transcoding_container: Some(" TS ".to_owned()),
+            audio_codec: Some(" AAC ".to_owned()),
+            max_streaming_bitrate: Some(140_000_000),
+            start_time_ticks: Some(123_000),
+            ..UniversalAudioQuery::default()
+        })
+        .expect("safe universal audio query should normalize");
+
+        assert_eq!(input.media_source_id.as_deref(), Some("42"));
+        assert_eq!(input.containers, ["mp3", "aac", "flac"]);
+        assert_eq!(input.transcoding_protocol.as_deref(), Some("hls"));
+        assert_eq!(input.transcoding_container.as_deref(), Some("ts"));
+        assert_eq!(input.audio_codec.as_deref(), Some("aac"));
+        assert_eq!(input.max_streaming_bitrate, Some(140_000_000));
+        assert_eq!(input.start_time_ticks, Some(123_000));
+    }
+
+    #[test]
+    fn universal_audio_query_rejects_unsafe_or_unbounded_values() {
+        assert!(
+            universal_audio_input(&UniversalAudioQuery {
+                max_streaming_bitrate: Some(0),
+                ..UniversalAudioQuery::default()
+            })
+            .is_err()
+        );
+        assert!(
+            universal_audio_input(&UniversalAudioQuery {
+                start_time_ticks: Some(-1),
+                ..UniversalAudioQuery::default()
+            })
+            .is_err()
+        );
+        assert!(
+            universal_audio_input(&UniversalAudioQuery {
+                transcoding_protocol: Some("../hls".to_owned()),
+                ..UniversalAudioQuery::default()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn universal_audio_hls_transcode_uses_audio_manifest_and_audio_only_session() {
+        let source = PlaybackMediaSourceRecord {
+            item_id: "track-1".to_owned(),
+            item_type: "track".to_owned(),
+            path: "song.flac".to_owned(),
+            container: Some("flac".to_owned()),
+            bitrate: Some(1_200_000),
+            supports_transcoding: true,
+            ..test_source()
+        };
+        let input = universal_audio_input(&UniversalAudioQuery {
+            media_source_id: Some("2".to_owned()),
+            transcoding_protocol: Some("hls".to_owned()),
+            transcoding_container: Some("ts".to_owned()),
+            audio_codec: Some("mp3".to_owned()),
+            max_streaming_bitrate: Some(320_000),
+            play_session_id: Some("play-1".to_owned()),
+            ..UniversalAudioQuery::default()
+        })
+        .expect("hls universal audio query should normalize");
+
+        assert!(input.requests_hls_transcode());
+
+        let session = universal_audio_transcode_session_input(
+            7,
+            &source,
+            &input,
+            "./var/transcode",
+            "play-1",
+        )
+        .expect("source should be transcodable");
+
+        assert_eq!(session.user_id, 7);
+        assert_eq!(session.media_item_id, 1);
+        assert_eq!(session.media_file_id, Some(2));
+        assert_eq!(session.input_path, "song.flac");
+        assert_eq!(session.output_base_path, "./var/transcode");
+        assert_eq!(session.play_session_id.as_deref(), Some("play-1"));
+        assert_eq!(session.device_id.as_deref(), None);
+        assert_eq!(session.video_codec, None);
+        assert_eq!(session.audio_codec.as_deref(), Some("mp3"));
+        assert_eq!(session.container.as_deref(), Some("hls"));
+        assert_eq!(session.bitrate, Some(320_000));
+        assert_eq!(
+            universal_audio_hls_manifest_location(&source, "session-1", "play-1", "token-1"),
+            "/emby/Audio/track-1/master.m3u8?MediaSourceId=2&TranscodeSessionId=session-1&PlaySessionId=play-1&api_key=token-1"
         );
     }
 

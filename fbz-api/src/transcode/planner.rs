@@ -71,7 +71,16 @@ pub fn build_ffmpeg_plan(
         .map(PathBuf::from)
         .or_else(|| manifest_path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
-    let hardware = choose_hardware(config)?;
+    let has_video = session
+        .video_codec
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|codec| !codec.is_empty());
+    let hardware = if has_video {
+        choose_hardware(config)?
+    } else {
+        None
+    };
 
     let mut args = vec!["-hide_banner".to_owned(), "-y".to_owned()];
     if let Some(acceleration) = &hardware {
@@ -80,17 +89,20 @@ pub fn build_ffmpeg_plan(
             hardware_accel_arg(acceleration).to_owned(),
         ]);
     }
+    args.extend(["-i".to_owned(), input_path.to_owned()]);
+    if has_video {
+        args.extend([
+            "-map".to_owned(),
+            "0:v:0?".to_owned(),
+            "-c:v".to_owned(),
+            video_encoder(hardware.as_deref()).to_owned(),
+        ]);
+    }
     args.extend([
-        "-i".to_owned(),
-        input_path.to_owned(),
-        "-map".to_owned(),
-        "0:v:0?".to_owned(),
         "-map".to_owned(),
         "0:a:0?".to_owned(),
-        "-c:v".to_owned(),
-        video_encoder(hardware.as_deref()).to_owned(),
         "-c:a".to_owned(),
-        "aac".to_owned(),
+        audio_encoder(session.audio_codec.as_deref()).to_owned(),
         "-f".to_owned(),
         "hls".to_owned(),
         "-hls_time".to_owned(),
@@ -141,6 +153,13 @@ fn video_encoder(hardware: Option<&str>) -> &'static str {
     }
 }
 
+fn audio_encoder(codec: Option<&str>) -> &str {
+    codec
+        .map(str::trim)
+        .filter(|codec| !codec.is_empty())
+        .unwrap_or("aac")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +203,35 @@ mod tests {
 
         assert_eq!(plan.hardware_acceleration, None);
         assert!(plan.args.contains(&"libx264".to_owned()));
+    }
+
+    #[test]
+    fn ffmpeg_plan_omits_video_encoder_for_audio_only_hls_sessions() {
+        let session = TranscodeClaimRecord {
+            video_codec: None,
+            audio_codec: Some("mp3".to_owned()),
+            ..claim()
+        };
+
+        let plan = build_ffmpeg_plan(
+            &TranscodeConfig {
+                max_concurrent: 3,
+                lease_seconds: 900,
+                hardware_mode: HardwareMode::Auto,
+                hardware_priority: vec!["nvidia".to_owned()],
+                software_fallback: true,
+            },
+            &tools(),
+            &session,
+        )
+        .unwrap();
+
+        assert_eq!(plan.hardware_acceleration, None);
+        assert!(!plan.args.contains(&"0:v:0?".to_owned()));
+        assert!(!plan.args.contains(&"-c:v".to_owned()));
+        assert!(!plan.args.contains(&"libx264".to_owned()));
+        assert!(plan.args.contains(&"0:a:0?".to_owned()));
+        assert!(plan.args.windows(2).any(|args| args == ["-c:a", "mp3"]));
     }
 
     fn tools() -> MediaToolDiagnostics {

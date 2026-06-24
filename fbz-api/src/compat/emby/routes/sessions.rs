@@ -1,11 +1,10 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, Uri},
 };
 use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
@@ -14,7 +13,7 @@ use crate::{
         service::{AuthService, AuthenticatedUser},
     },
     compat::emby::auth::{EmbyCredential, parse_auth_context},
-    compat::emby::dto::{NameIdPairDto, SessionInfoDto},
+    compat::emby::dto::{BaseItemDto, NameIdPairDto, QueryResultDto, SessionInfoDto},
     compat::emby::payload::parse_emby_body,
     error::AppError,
     state::AppState,
@@ -22,16 +21,33 @@ use crate::{
 
 use super::access::authenticate_request_user;
 
-#[derive(Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct LogoutResponseDto {
-    pub success: bool,
-}
-
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SessionsQuery {
     pub user_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlayQueueQuery {
+    pub id: Option<String>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AuthKeysQuery {
+    #[serde(alias = "startIndex", alias = "start_index")]
+    pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateAuthKeyQuery {
+    #[serde(alias = "app")]
+    pub app: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -62,24 +78,123 @@ pub struct ClientCapabilitiesDto {
     pub app_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemotePlayQuery {
+    pub item_ids: Option<String>,
+    pub play_command: Option<String>,
+    pub start_position_ticks: Option<i64>,
+    pub media_source_id: Option<String>,
+    pub audio_stream_index: Option<i32>,
+    pub subtitle_stream_index: Option<i32>,
+    pub start_index: Option<i32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemotePlayRequestDto {
+    pub item_ids: Option<RemoteItemIdsDto>,
+    pub play_command: Option<String>,
+    pub start_position_ticks: Option<i64>,
+    pub media_source_id: Option<String>,
+    pub audio_stream_index: Option<i32>,
+    pub subtitle_stream_index: Option<i32>,
+    pub start_index: Option<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RemoteItemIdsDto {
+    Csv(String),
+    List(Vec<String>),
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemotePlaystateCommandQuery {
+    pub seek_position_ticks: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoteGeneralCommandDto {
+    pub name: Option<String>,
+    pub command: Option<String>,
+    pub arguments: Option<Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoteViewingDto {
+    pub item_id: Option<String>,
+    pub item_name: Option<String>,
+    pub item_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoteMessageDto {
+    pub header: Option<String>,
+    pub text: Option<String>,
+    pub timeout_ms: Option<i64>,
+}
+
 const MAX_SESSION_LIST_LIMIT: i64 = 100;
 const MAX_CAPABILITY_VALUES: usize = 128;
 const MAX_CAPABILITY_VALUE_LEN: usize = 128;
 const MAX_CAPABILITY_TEXT_LEN: usize = 512;
+const MAX_AUTH_KEY_LIMIT: u32 = 200;
+const MAX_AUTH_KEY_TEXT_LEN: usize = 128;
+const MAX_REMOTE_ITEM_IDS: usize = 256;
+const MAX_REMOTE_ID_LEN: usize = 128;
+const MAX_REMOTE_COMMAND_LEN: usize = 64;
 
 pub async fn auth_providers(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<Vec<NameIdPairDto>>, AppError> {
-    let user = authenticate_request_user(&state, &headers, &uri).await?;
-    if !user.can_manage_server() {
-        return Err(AppError::forbidden(
-            "authenticated user cannot manage authentication providers",
-        ));
-    }
+    authenticate_admin_user(&state, &headers, &uri).await?;
 
     Ok(Json(auth_provider_items()))
+}
+
+pub async fn auth_keys(
+    State(state): State<AppState>,
+    Query(query): Query<AuthKeysQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<Value>>, AppError> {
+    authenticate_admin_user(&state, &headers, &uri).await?;
+    let input = auth_keys_query_input(&query);
+    let _limit = input.limit;
+
+    Ok(Json(empty_auth_keys_result(input.start_index)))
+}
+
+pub async fn create_auth_key(
+    State(state): State<AppState>,
+    Query(query): Query<CreateAuthKeyQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_admin_user(&state, &headers, &uri).await?;
+    let input = create_auth_key_input(&query)?;
+    let _app = input.app;
+
+    Err(AppError::forbidden("auth key creation is not enabled"))
+}
+
+pub async fn delete_auth_key(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_admin_user(&state, &headers, &uri).await?;
+    let _key = auth_key_path_input(&key)?;
+
+    Ok(StatusCode::OK)
 }
 
 pub async fn list_sessions(
@@ -112,11 +227,33 @@ pub async fn list_sessions(
     Ok(Json(sessions))
 }
 
+pub async fn session_by_id(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<SessionInfoDto>, AppError> {
+    let authenticated = authenticate_request_user(&state, &headers, &uri).await?;
+    let session_id = normalize_session_id(Some(&session_id))?;
+
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let session = AuthRepository::new(database.clone())
+        .find_active_session_for_user(authenticated.id, &session_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get session: {err}")))?
+        .ok_or_else(|| AppError::not_found("session not found"))?;
+
+    Ok(Json(session_record_to_dto(session)))
+}
+
 pub async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<LogoutResponseDto>, AppError> {
+) -> Result<StatusCode, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
@@ -137,7 +274,19 @@ pub async fn logout(
         .await
         .map_err(|err| AppError::internal(err.to_string()))?;
 
-    Ok(Json(LogoutResponseDto { success: revoked }))
+    Ok(logout_response(revoked))
+}
+
+pub async fn play_queue(
+    State(state): State<AppState>,
+    Query(query): Query<PlayQueueQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _scope = play_queue_scope_from_query(&query)?;
+
+    Ok(Json(empty_play_queue_result()))
 }
 
 pub async fn update_capabilities(
@@ -164,6 +313,153 @@ pub async fn update_capabilities_full(
     let request: ClientCapabilitiesDto = parse_emby_body(&headers, &body)?;
     let input = capabilities_input_from_full(&user, query, request)?;
     persist_capabilities(&state, input).await?;
+
+    Ok(StatusCode::OK)
+}
+
+pub async fn remote_play(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<RemotePlayQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let request = parse_optional_emby_body::<RemotePlayRequestDto>(&headers, &body)?;
+    let _input = remote_play_input(&session_id, query, request)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_playstate_command(
+    State(state): State<AppState>,
+    Path((session_id, command)): Path<(String, String)>,
+    Query(query): Query<RemotePlaystateCommandQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _input = remote_playstate_command_input(&session_id, &command, query)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_general_command(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let request = parse_optional_emby_body::<RemoteGeneralCommandDto>(&headers, &body)?;
+    let _input = remote_general_command_input(Some(&session_id), None, request)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_general_command_without_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let request = parse_optional_emby_body::<RemoteGeneralCommandDto>(&headers, &body)?;
+    let _input = remote_general_command_input(None, None, request)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_general_command_by_name(
+    State(state): State<AppState>,
+    Path((session_id, command)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let request = parse_optional_emby_body::<RemoteGeneralCommandDto>(&headers, &body)?;
+    let _input = remote_general_command_input(Some(&session_id), Some(&command), request)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_general_command_by_name_without_session(
+    State(state): State<AppState>,
+    Path(command): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let request = parse_optional_emby_body::<RemoteGeneralCommandDto>(&headers, &body)?;
+    let _input = remote_general_command_input(None, Some(&command), request)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_system_command(
+    State(state): State<AppState>,
+    Path((session_id, command)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _input = remote_named_session_input(&session_id, &command)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_message(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _message = parse_optional_emby_body::<RemoteMessageDto>(&headers, &body)?;
+    normalize_session_id(Some(&session_id))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_viewing(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _viewing = parse_optional_emby_body::<RemoteViewingDto>(&headers, &body)?;
+    normalize_session_id(Some(&session_id))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remote_add_session_user(
+    State(state): State<AppState>,
+    Path((session_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _input = remote_session_user_input(&session_id, &user_id)?;
+
+    Ok(StatusCode::OK)
+}
+
+pub async fn remote_remove_session_user(
+    State(state): State<AppState>,
+    Path((session_id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _input = remote_session_user_input(&session_id, &user_id)?;
 
     Ok(StatusCode::OK)
 }
@@ -201,6 +497,23 @@ async fn persist_capabilities(
     }
 
     Ok(())
+}
+
+fn logout_response(_revoked: bool) -> StatusCode {
+    StatusCode::OK
+}
+
+async fn authenticate_admin_user(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<AuthenticatedUser, AppError> {
+    let user = authenticate_request_user(state, headers, uri).await?;
+    if !user.can_manage_server() {
+        return Err(AppError::forbidden("server management permission required"));
+    }
+
+    Ok(user)
 }
 
 fn capabilities_input_from_query(
@@ -242,6 +555,185 @@ fn capabilities_input_from_full(
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemotePlayInput {
+    session_id: String,
+    item_ids: Vec<String>,
+    play_command: Option<String>,
+    start_position_ticks: Option<i64>,
+    media_source_id: Option<String>,
+    audio_stream_index: Option<i32>,
+    subtitle_stream_index: Option<i32>,
+    start_index: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemotePlaystateCommandInput {
+    session_id: String,
+    command: String,
+    seek_position_ticks: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteSessionUserInput {
+    session_id: String,
+    user_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RemoteGeneralCommandInput {
+    session_id: Option<String>,
+    command: Option<String>,
+    arguments: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlayQueueScope {
+    session_id: Option<String>,
+    device_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthKeysInput {
+    start_index: u32,
+    limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreateAuthKeyInput {
+    app: String,
+}
+
+fn auth_keys_query_input(query: &AuthKeysQuery) -> AuthKeysInput {
+    AuthKeysInput {
+        start_index: query.start_index.unwrap_or(0),
+        limit: query
+            .limit
+            .unwrap_or(MAX_AUTH_KEY_LIMIT)
+            .min(MAX_AUTH_KEY_LIMIT),
+    }
+}
+
+fn empty_auth_keys_result(start_index: u32) -> QueryResultDto<Value> {
+    QueryResultDto::new(Vec::new(), 0, start_index)
+}
+
+fn create_auth_key_input(query: &CreateAuthKeyQuery) -> Result<CreateAuthKeyInput, AppError> {
+    Ok(CreateAuthKeyInput {
+        app: normalize_required_auth_key_text(query.app.as_deref(), "App")?,
+    })
+}
+
+fn auth_key_path_input(key: &str) -> Result<String, AppError> {
+    normalize_required_auth_key_text(Some(key), "Key")
+}
+
+fn play_queue_scope_from_query(query: &PlayQueueQuery) -> Result<PlayQueueScope, AppError> {
+    Ok(PlayQueueScope {
+        session_id: query
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| normalize_session_id(Some(value)))
+            .transpose()?,
+        device_id: normalize_optional_remote_id(query.device_id.as_deref())?,
+    })
+}
+
+fn empty_play_queue_result() -> QueryResultDto<BaseItemDto> {
+    QueryResultDto::new(Vec::new(), 0, 0)
+}
+
+fn remote_play_input(
+    session_id: &str,
+    query: RemotePlayQuery,
+    request: RemotePlayRequestDto,
+) -> Result<RemotePlayInput, AppError> {
+    Ok(RemotePlayInput {
+        session_id: normalize_session_id(Some(session_id))?,
+        item_ids: normalize_remote_item_ids(
+            request
+                .item_ids
+                .as_ref()
+                .map(remote_item_ids_to_values)
+                .or_else(|| query.item_ids.as_deref().map(csv_values))
+                .unwrap_or_default(),
+        )?,
+        play_command: normalize_optional_remote_name(
+            request
+                .play_command
+                .as_deref()
+                .or(query.play_command.as_deref()),
+        )?,
+        start_position_ticks: non_negative_ticks(
+            request.start_position_ticks.or(query.start_position_ticks),
+        ),
+        media_source_id: normalize_optional_remote_id(
+            request
+                .media_source_id
+                .as_deref()
+                .or(query.media_source_id.as_deref()),
+        )?,
+        audio_stream_index: request.audio_stream_index.or(query.audio_stream_index),
+        subtitle_stream_index: request
+            .subtitle_stream_index
+            .or(query.subtitle_stream_index),
+        start_index: request.start_index.or(query.start_index),
+    })
+}
+
+fn remote_playstate_command_input(
+    session_id: &str,
+    command: &str,
+    query: RemotePlaystateCommandQuery,
+) -> Result<RemotePlaystateCommandInput, AppError> {
+    let (session_id, command) = remote_named_session_input(session_id, command)?;
+    Ok(RemotePlaystateCommandInput {
+        session_id,
+        command,
+        seek_position_ticks: non_negative_ticks(query.seek_position_ticks),
+    })
+}
+
+fn remote_general_command_input(
+    session_id: Option<&str>,
+    path_command: Option<&str>,
+    request: RemoteGeneralCommandDto,
+) -> Result<RemoteGeneralCommandInput, AppError> {
+    Ok(RemoteGeneralCommandInput {
+        session_id: session_id
+            .map(|value| normalize_session_id(Some(value)))
+            .transpose()?,
+        command: normalize_optional_remote_name(
+            path_command
+                .or(request.command.as_deref())
+                .or(request.name.as_deref()),
+        )?,
+        arguments: request.arguments,
+    })
+}
+
+fn remote_named_session_input(
+    session_id: &str,
+    command: &str,
+) -> Result<(String, String), AppError> {
+    Ok((
+        normalize_session_id(Some(session_id))?,
+        normalize_remote_name(command)?,
+    ))
+}
+
+fn remote_session_user_input(
+    session_id: &str,
+    user_id: &str,
+) -> Result<RemoteSessionUserInput, AppError> {
+    Ok(RemoteSessionUserInput {
+        session_id: normalize_session_id(Some(session_id))?,
+        user_id: normalize_remote_id(user_id)?,
+    })
+}
+
 fn normalize_session_id(value: Option<&str>) -> Result<String, AppError> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Err(AppError::unprocessable("session Id is required"));
@@ -252,6 +744,99 @@ fn normalize_session_id(value: Option<&str>) -> Result<String, AppError> {
     }
 
     Ok(value.to_owned())
+}
+
+fn parse_optional_emby_body<T>(headers: &HeaderMap, body: &Bytes) -> Result<T, AppError>
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    if body.is_empty() {
+        return Ok(T::default());
+    }
+
+    parse_emby_body(headers, body)
+}
+
+fn remote_item_ids_to_values(value: &RemoteItemIdsDto) -> Vec<String> {
+    match value {
+        RemoteItemIdsDto::Csv(value) => csv_values(value),
+        RemoteItemIdsDto::List(values) => values.clone(),
+    }
+}
+
+fn csv_values(value: &str) -> Vec<String> {
+    value.split(',').map(str::to_owned).collect()
+}
+
+fn normalize_remote_item_ids(values: Vec<String>) -> Result<Vec<String>, AppError> {
+    let mut normalized = Vec::new();
+
+    for value in values {
+        if value.trim().is_empty() {
+            continue;
+        }
+        let value = normalize_remote_id(&value)?;
+        if normalized.iter().all(|existing| existing != &value) {
+            normalized.push(value);
+        }
+        if normalized.len() > MAX_REMOTE_ITEM_IDS {
+            return Err(AppError::unprocessable("too many remote item ids"));
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_optional_remote_id(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    Ok(Some(normalize_remote_id(value)?))
+}
+
+fn normalize_remote_id(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::unprocessable("remote id is required"));
+    }
+    if value.len() > MAX_REMOTE_ID_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return Err(AppError::unprocessable("remote id is invalid"));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn normalize_optional_remote_name(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    Ok(Some(normalize_remote_name(value)?))
+}
+
+fn normalize_remote_name(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::unprocessable("remote command is required"));
+    }
+    if value.len() > MAX_REMOTE_COMMAND_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return Err(AppError::unprocessable("remote command is invalid"));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn non_negative_ticks(value: Option<i64>) -> Option<i64> {
+    value.map(|ticks| ticks.max(0))
 }
 
 fn capability_values_from_csv(value: Option<&str>) -> Result<Vec<String>, AppError> {
@@ -300,6 +885,22 @@ fn normalize_optional_text(value: Option<String>) -> Result<Option<String>, AppE
     Ok(Some(value))
 }
 
+fn normalize_required_auth_key_text(value: Option<&str>, field: &str) -> Result<String, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(AppError::unprocessable(format!("{field} is required")));
+    };
+
+    if value.len() > MAX_AUTH_KEY_TEXT_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(AppError::unprocessable(format!("{field} is invalid")));
+    }
+
+    Ok(value.to_owned())
+}
+
 fn auth_provider_items() -> Vec<NameIdPairDto> {
     vec![NameIdPairDto {
         name: "Local".to_owned(),
@@ -318,6 +919,39 @@ mod tests {
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].name, "Local");
         assert_eq!(providers[0].id, "local");
+    }
+
+    #[test]
+    fn auth_keys_query_normalizes_paging_and_caps_limit() {
+        let input = auth_keys_query_input(&AuthKeysQuery {
+            start_index: Some(25),
+            limit: Some(500),
+        });
+
+        assert_eq!(input.start_index, 25);
+        assert_eq!(input.limit, MAX_AUTH_KEY_LIMIT);
+
+        let input = auth_keys_query_input(&AuthKeysQuery::default());
+
+        assert_eq!(input.start_index, 0);
+        assert_eq!(input.limit, MAX_AUTH_KEY_LIMIT);
+    }
+
+    #[test]
+    fn auth_key_inputs_require_bounded_safe_text() {
+        let input = create_auth_key_input(&CreateAuthKeyQuery {
+            app: Some(" Test.Client-1 ".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(input.app, "Test.Client-1");
+        assert_eq!(auth_key_path_input(" key_1 ").unwrap(), "key_1");
+
+        let err = create_auth_key_input(&CreateAuthKeyQuery { app: None }).unwrap_err();
+        assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
+
+        let err = auth_key_path_input("bad key!").unwrap_err();
+        assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[test]
@@ -424,5 +1058,120 @@ mod tests {
         let err = normalize_session_id(Some("not a uuid")).unwrap_err();
 
         assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn session_id_path_normalization_trims_uuid() {
+        let session_id =
+            normalize_session_id(Some(" 00000000-0000-0000-0000-000000000001 ")).unwrap();
+
+        assert_eq!(session_id, "00000000-0000-0000-0000-000000000001");
+    }
+
+    #[test]
+    fn logout_response_is_empty_success_status() {
+        assert_eq!(logout_response(true), StatusCode::OK);
+        assert_eq!(logout_response(false), StatusCode::OK);
+    }
+
+    #[test]
+    fn remote_session_user_input_normalizes_session_and_user_ids() {
+        let input = remote_session_user_input(" 00000000-0000-0000-0000-000000000001 ", " user-2 ")
+            .unwrap();
+
+        assert_eq!(input.session_id, "00000000-0000-0000-0000-000000000001");
+        assert_eq!(input.user_id, "user-2");
+
+        let err = remote_session_user_input("00000000-0000-0000-0000-000000000001", "bad user!")
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn remote_play_input_merges_query_and_body_values() {
+        let input = remote_play_input(
+            " 00000000-0000-0000-0000-000000000001 ",
+            RemotePlayQuery {
+                item_ids: Some(" song-1,song-2,,song-1 ".to_owned()),
+                play_command: Some("PlayNext".to_owned()),
+                start_position_ticks: Some(-50),
+                media_source_id: Some(" 42 ".to_owned()),
+                audio_stream_index: Some(1),
+                subtitle_stream_index: Some(-1),
+                start_index: Some(2),
+            },
+            RemotePlayRequestDto::default(),
+        )
+        .unwrap();
+
+        assert_eq!(input.session_id, "00000000-0000-0000-0000-000000000001");
+        assert_eq!(input.item_ids, ["song-1", "song-2"]);
+        assert_eq!(input.play_command.as_deref(), Some("PlayNext"));
+        assert_eq!(input.start_position_ticks, Some(0));
+        assert_eq!(input.media_source_id.as_deref(), Some("42"));
+        assert_eq!(input.audio_stream_index, Some(1));
+        assert_eq!(input.subtitle_stream_index, Some(-1));
+        assert_eq!(input.start_index, Some(2));
+    }
+
+    #[test]
+    fn remote_playstate_command_input_normalizes_seek_ticks() {
+        let input = remote_playstate_command_input(
+            "00000000-0000-0000-0000-000000000001",
+            " Seek ",
+            RemotePlaystateCommandQuery {
+                seek_position_ticks: Some(-10),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(input.session_id, "00000000-0000-0000-0000-000000000001");
+        assert_eq!(input.command, "Seek");
+        assert_eq!(input.seek_position_ticks, Some(0));
+    }
+
+    #[test]
+    fn remote_general_command_input_accepts_no_session_alias() {
+        let input = remote_general_command_input(
+            None,
+            Some(" DisplayMessage "),
+            RemoteGeneralCommandDto {
+                arguments: Some(serde_json::json!({"Header": "Now playing"})),
+                ..RemoteGeneralCommandDto::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(input.session_id, None);
+        assert_eq!(input.command.as_deref(), Some("DisplayMessage"));
+        assert_eq!(
+            input.arguments.as_ref().unwrap()["Header"],
+            serde_json::json!("Now playing")
+        );
+    }
+
+    #[test]
+    fn play_queue_query_normalizes_optional_session_and_device_scope() {
+        let scope = play_queue_scope_from_query(&PlayQueueQuery {
+            id: Some(" 00000000-0000-0000-0000-000000000001 ".to_owned()),
+            device_id: Some(" device-1 ".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            scope.session_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(scope.device_id.as_deref(), Some("device-1"));
+
+        let scope = play_queue_scope_from_query(&PlayQueueQuery {
+            id: None,
+            device_id: Some(" ".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(scope.session_id, None);
+        assert_eq!(scope.device_id, None);
     }
 }

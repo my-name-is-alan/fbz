@@ -26,13 +26,16 @@ function toggleFavorite() {
   if (!contextMenu.value.item) return;
   const item = contextMenu.value.item;
   item.isFavorite = !item.isFavorite;
-  alert(item.isFavorite ? "⭐ 已成功添加到收藏夹！" : "💔 已从收藏夹中移除。");
+  uiStore.showToast(item.isFavorite ? "已成功添加到收藏夹！" : "已从收藏夹中移除。", "success");
   uiStore.closeContextMenu();
 }
 
 function refreshMetadata() {
   if (!contextMenu.value.item) return;
-  alert(`🔄 正在重新连接搜刮源并刷新【${contextMenu.value.item.title}】的元数据...`);
+  uiStore.showToast(
+    `正在重新连接搜刮源并刷新【${contextMenu.value.item.title}】的元数据...`,
+    "info",
+  );
   uiStore.closeContextMenu();
 }
 
@@ -44,9 +47,18 @@ function openEditMetadata() {
 function deleteItem() {
   if (!contextMenu.value.item) return;
   // Simulating removal
-  alert(`🗑️ 条目【${contextMenu.value.item.title}】已成功从本地物理磁盘及数据库中删除！`);
+  uiStore.showToast(
+    `条目【${contextMenu.value.item.title}】已成功从本地物理磁盘及数据库中删除！`,
+    "success",
+  );
   uiStore.closeContextMenu();
 }
+
+useEventListener(window, "keydown", (e) => {
+  if (e.key === "Escape" && contextMenu.value.open) {
+    uiStore.closeContextMenu();
+  }
+});
 </script>
 
 <template>
@@ -54,6 +66,8 @@ function deleteItem() {
     v-if="contextMenu.open"
     ref="menuRef"
     class="context-menu"
+    role="menu"
+    aria-label="快捷操作"
     :style="{
       top: `${contextMenu.y}px`,
       left: `${contextMenu.x}px`,
@@ -61,30 +75,60 @@ function deleteItem() {
   >
     <!-- Regular Menu List -->
     <ul v-if="!showDeleteConfirm" class="menu-list">
-      <li class="menu-item" @click="toggleFavorite">
-        <span class="icon">⭐</span>
+      <li
+        class="menu-item"
+        tabindex="0"
+        role="menuitem"
+        @click="toggleFavorite"
+        @keydown.enter="toggleFavorite"
+        @keydown.space.prevent="toggleFavorite"
+      >
+        <span class="icon" aria-hidden="true">⭐</span>
         <span>{{ contextMenu.item?.isFavorite ? "取消收藏" : "加入收藏" }}</span>
       </li>
-      <li class="menu-item" @click="refreshMetadata">
-        <span class="icon">🔄</span>
+      <li
+        class="menu-item"
+        tabindex="0"
+        role="menuitem"
+        @click="refreshMetadata"
+        @keydown.enter="refreshMetadata"
+        @keydown.space.prevent="refreshMetadata"
+      >
+        <span class="icon" aria-hidden="true">🔄</span>
         <span>刷新元数据</span>
       </li>
-      <li class="menu-item" @click="openEditMetadata">
-        <span class="icon">✏️</span>
+      <li
+        class="menu-item"
+        tabindex="0"
+        role="menuitem"
+        @click="openEditMetadata"
+        @keydown.enter="openEditMetadata"
+        @keydown.space.prevent="openEditMetadata"
+      >
+        <span class="icon" aria-hidden="true">✏️</span>
         <span>修改元数据</span>
       </li>
 
-      <li class="menu-separator" />
+      <li class="menu-separator" aria-hidden="true" />
 
-      <li class="menu-item danger-item" @click="showDeleteConfirm = true">
-        <span class="icon">🗑️</span>
+      <li
+        class="menu-item danger-item"
+        tabindex="0"
+        role="menuitem"
+        @click="showDeleteConfirm = true"
+        @keydown.enter="showDeleteConfirm = true"
+        @keydown.space.prevent="showDeleteConfirm = true"
+      >
+        <span class="icon" aria-hidden="true">🗑️</span>
         <span>删除条目</span>
       </li>
     </ul>
 
     <!-- Inline Secondary Confirmation -->
-    <div v-else class="confirm-box">
-      <span class="confirm-title">⚠️ 确认永久删除视频及 NFO 元数据文件吗？</span>
+    <div v-else class="confirm-box" role="dialog" aria-modal="true" aria-label="确认删除">
+      <span class="confirm-title"
+        ><span aria-hidden="true">⚠️ </span>确认永久删除视频及 NFO 元数据文件吗？</span
+      >
       <div class="confirm-actions">
         <button class="confirm-btn cancel" type="button" @click="showDeleteConfirm = false">
           取消
@@ -145,17 +189,21 @@ function deleteItem() {
   user-select: none;
   transition: all var(--fbz-motion-fast);
 
-  &:hover {
+  &:hover,
+  &:focus-visible {
     background: var(--fbz-color-panel-strong);
     color: var(--fbz-color-text);
+    outline: none;
   }
 
   &.danger-item {
     color: var(--fbz-color-danger-500);
 
-    &:hover {
+    &:hover,
+    &:focus-visible {
       background: color-mix(in srgb, var(--fbz-color-danger-500) 8%, transparent);
       color: var(--fbz-color-danger-500);
+      outline: none;
     }
   }
 

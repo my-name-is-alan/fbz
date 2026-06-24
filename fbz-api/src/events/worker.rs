@@ -124,7 +124,21 @@ impl EventStreamMirrorService {
             return Ok(EventStreamMirrorSummary {
                 claimed: 0,
                 published: 0,
+                recovered_stale_leases: 0,
             });
+        }
+        let recovered_stale_leases = events
+            .iter()
+            .filter(|event| event.stale_mirror_lease)
+            .count();
+        if recovered_stale_leases > 0 {
+            warn!(
+                stream_key = %self.config.event_stream_key,
+                worker_id = %self.worker_id,
+                recovered_stale_leases,
+                claimed,
+                "recovered stale event stream mirror leases"
+            );
         }
 
         let mut published = 0;
@@ -133,7 +147,11 @@ impl EventStreamMirrorService {
             published += 1;
         }
 
-        Ok(EventStreamMirrorSummary { claimed, published })
+        Ok(EventStreamMirrorSummary {
+            claimed,
+            published,
+            recovered_stale_leases,
+        })
     }
 
     async fn publish_one(
@@ -152,6 +170,16 @@ impl EventStreamMirrorService {
                 self.repository
                     .mark_failed(event.id, &self.worker_id, &message, retry_delay_seconds)
                     .await?;
+                warn!(
+                    event_id = event.id,
+                    event_public_id = %event.public_id,
+                    event_type = %event.event_type,
+                    stream_key = %self.config.event_stream_key,
+                    mirror_attempts = event.stream_mirror_attempts,
+                    retry_delay_seconds,
+                    error = %message,
+                    "event stream mirror publish failed; scheduled retry"
+                );
                 return Err(EventStreamMirrorError::Redis(err));
             }
         };
@@ -167,6 +195,7 @@ impl EventStreamMirrorService {
 struct EventStreamMirrorSummary {
     claimed: usize,
     published: usize,
+    recovered_stale_leases: usize,
 }
 
 #[derive(Debug)]
@@ -211,6 +240,8 @@ fn stream_mirror_retry_delay_seconds(attempts: i32, base_seconds: u64, max_secon
 mod tests {
     use super::stream_mirror_retry_delay_seconds;
 
+    const WORKER_SOURCE: &str = include_str!("worker.rs");
+
     #[test]
     fn stream_mirror_retry_delay_is_bounded_exponential_backoff() {
         assert_eq!(stream_mirror_retry_delay_seconds(0, 5, 300), 5);
@@ -219,5 +250,33 @@ mod tests {
         assert_eq!(stream_mirror_retry_delay_seconds(3, 5, 300), 20);
         assert_eq!(stream_mirror_retry_delay_seconds(20, 5, 300), 300);
         assert_eq!(stream_mirror_retry_delay_seconds(i32::MAX, 5, 300), 300);
+    }
+
+    #[test]
+    fn stream_mirror_retry_logs_structured_event_context() {
+        let production_source = WORKER_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("worker source should include production section");
+
+        assert!(production_source.contains("event_public_id = %event.public_id"));
+        assert!(production_source.contains("event_type = %event.event_type"));
+        assert!(production_source.contains("stream_key = %self.config.event_stream_key"));
+        assert!(production_source.contains("mirror_attempts = event.stream_mirror_attempts"));
+        assert!(production_source.contains("retry_delay_seconds"));
+        assert!(production_source.contains("event stream mirror publish failed; scheduled retry"));
+    }
+
+    #[test]
+    fn stream_mirror_stale_lease_recovery_logs_structured_summary_fields() {
+        let production_source = WORKER_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("worker source should include production section");
+
+        assert!(production_source.contains("recovered_stale_leases"));
+        assert!(production_source.contains("stream_key = %self.config.event_stream_key"));
+        assert!(production_source.contains("worker_id = %self.worker_id"));
+        assert!(production_source.contains("recovered stale event stream mirror leases"));
     }
 }

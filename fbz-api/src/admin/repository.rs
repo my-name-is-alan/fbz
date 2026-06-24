@@ -3528,6 +3528,10 @@ impl NotificationTargetRecord {
 mod tests {
     use super::*;
 
+    fn repository_source() -> String {
+        include_str!("repository.rs").replace("\r\n", "\n")
+    }
+
     #[test]
     fn normalize_path_is_stable_for_dedupe() {
         assert_eq!(normalize_path(" D:\\Media\\Movies "), "d:/media/movies");
@@ -3543,7 +3547,7 @@ mod tests {
         let migration = include_str!("../../migrations/0038_scheduled_task_run_recent_index.sql");
         let status_migration =
             include_str!("../../migrations/0049_scheduled_task_run_admin_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_scheduled_task_runs_task_recent"));
         assert!(migration.contains("task_id, started_at desc, id desc"));
@@ -3575,7 +3579,7 @@ mod tests {
     fn admin_job_run_event_keyset_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0050_admin_job_run_event_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_job_runs_job_started_keyset"));
         assert!(migration.contains("job_id, started_at desc, id desc"));
@@ -3626,7 +3630,7 @@ mod tests {
     #[test]
     fn admin_job_list_keyset_indexes_match_query_shape() {
         let migration = include_str!("../../migrations/0054_admin_job_list_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_jobs_admin_recent_keyset"));
         assert!(migration.contains("created_at desc, id desc"));
@@ -3660,7 +3664,7 @@ mod tests {
     #[test]
     fn admin_user_list_keyset_indexes_match_query_shape() {
         let migration = include_str!("../../migrations/0055_admin_user_list_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_users_admin_username_keyset"));
         assert!(migration.contains("username_normalized asc, id asc"));
@@ -3694,7 +3698,7 @@ mod tests {
     fn admin_user_library_permission_keyset_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0056_admin_user_library_permission_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_libraries_admin_name_keyset"));
         assert!(migration.contains("name asc, id asc"));
@@ -3724,7 +3728,7 @@ mod tests {
     #[test]
     fn notification_admin_indexes_match_recent_audit_queries() {
         let migration = include_str!("../../migrations/0039_notification_admin_recent_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_plugin_notification_requests_recent"));
         assert!(migration.contains("created_at desc, id desc"));
@@ -3740,7 +3744,7 @@ mod tests {
     fn notification_target_admin_keyset_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0057_notification_target_admin_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_notification_targets_admin_recent_keyset"));
         assert!(migration.contains("target_type, name asc, id asc"));
@@ -3778,7 +3782,7 @@ mod tests {
     fn notification_admin_keyset_filter_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0047_notification_admin_keyset_filter_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_plugin_notification_requests_status_recent_keyset"));
         assert!(migration.contains("status, created_at desc, id desc"));
@@ -3832,7 +3836,7 @@ mod tests {
     fn scheduled_task_admin_keyset_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0058_scheduled_task_admin_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_scheduled_tasks_admin_keyset"));
         assert!(
@@ -3875,7 +3879,9 @@ mod tests {
     fn plugin_host_api_call_keyset_indexes_match_admin_query_shape() {
         let migration =
             include_str!("../../migrations/0045_plugin_host_api_call_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let combined_filter_migration =
+            include_str!("../../migrations/0060_plugin_host_api_call_combined_filter_indexes.sql");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_plugin_host_api_calls_recent_keyset"));
         assert!(migration.contains("finished_at desc, id desc"));
@@ -3885,6 +3891,21 @@ mod tests {
         assert!(migration.contains("execution_run_id, finished_at desc, id desc"));
         assert!(migration.contains("idx_plugin_host_api_calls_status_finished_keyset"));
         assert!(migration.contains("status_code, finished_at desc, id desc"));
+        assert!(
+            combined_filter_migration
+                .contains("idx_plugin_host_api_calls_plugin_status_finished_keyset")
+        );
+        assert!(
+            combined_filter_migration.contains("plugin_id, status_code, finished_at desc, id desc")
+        );
+        assert!(
+            combined_filter_migration
+                .contains("idx_plugin_host_api_calls_execution_status_finished_keyset")
+        );
+        assert!(
+            combined_filter_migration
+                .contains("execution_run_id, status_code, finished_at desc, id desc")
+        );
 
         let query_start = repository
             .find("pub async fn list_plugin_host_api_calls_page")
@@ -3898,6 +3919,9 @@ mod tests {
         assert!(repository.contains("QueryBuilder::<Postgres>"));
         assert!(host_api_call_query.contains("cursor_call"));
         assert!(host_api_call_query.contains("(calls.finished_at, calls.id) <"));
+        assert!(host_api_call_query.contains("calls.plugin_id ="));
+        assert!(host_api_call_query.contains("calls.execution_run_id ="));
+        assert!(host_api_call_query.contains("calls.status_code ="));
         assert!(host_api_call_query.contains("order by calls.finished_at desc, calls.id desc"));
         assert!(!host_api_call_query.contains("offset "));
         assert!(repository.contains("pub async fn list_plugin_host_api_calls_for_run_page"));
@@ -3908,7 +3932,7 @@ mod tests {
     fn plugin_dispatch_keyset_indexes_match_admin_query_shape() {
         let migration =
             include_str!("../../migrations/0046_plugin_dispatch_admin_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_event_outbox_plugin_dispatch_recent_keyset"));
         assert!(migration.contains("created_at desc, id desc"));
@@ -3937,7 +3961,7 @@ mod tests {
     fn plugin_execution_run_keyset_indexes_match_admin_query_shape() {
         let migration =
             include_str!("../../migrations/0048_plugin_execution_run_admin_keyset_indexes.sql");
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
 
         assert!(migration.contains("idx_plugin_execution_runs_dispatch_started_keyset"));
         assert!(migration.contains("outbox_event_public_id, started_at desc, id desc"));
@@ -3964,7 +3988,7 @@ mod tests {
 
     #[test]
     fn admin_public_id_entrypoints_keep_uuid_index_shape() {
-        let repository = include_str!("repository.rs");
+        let repository = repository_source();
         let bad_public_id_filter = format!("{}{}", "where public_id::text = ", "$1");
         let bad_run_filter = format!("{}{}", "run.public_id::text = ", "$2");
 

@@ -1,24 +1,76 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, Uri},
+    http::{HeaderMap, StatusCode, Uri},
 };
 use serde::Deserialize;
+use std::collections::HashSet;
 
 use crate::{
     compat::emby::dto::UserItemDataDto,
+    compat::emby::payload::parse_emby_body,
     error::AppError,
-    media::repository::{MediaRepository, UserItemDataRecord},
+    media::repository::{MediaRepository, UserItemDataRecord, UserItemDataUpdateInput},
     state::AppState,
 };
 
+use super::access::authenticate_request_user;
 use super::access::authenticate_route_user;
+
+const MAX_LIBRARY_ACCESS_IDS: usize = 1000;
+const MAX_LIBRARY_ACCESS_ID_LEN: usize = 128;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RatingQuery {
     pub likes: Option<bool>,
     pub rating: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct HideFromResumeQuery {
+    pub hide: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UserItemDataUpdateDto {
+    pub playback_position_ticks: Option<i64>,
+    pub play_count: Option<i32>,
+    pub played: Option<bool>,
+    pub is_favorite: Option<bool>,
+    pub rating: Option<f64>,
+    pub last_played_date: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateUserItemAccessDto {
+    pub item_ids: Vec<String>,
+    pub user_ids: Vec<String>,
+    pub item_access: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LeaveSharedItemsDto {
+    pub item_ids: Vec<String>,
+    pub user_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UserItemAccessUpdateInput {
+    item_ids: Vec<String>,
+    user_ids: Vec<String>,
+    item_access: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LeaveSharedItemsInput {
+    item_ids: Vec<String>,
+    user_id: Option<String>,
 }
 
 pub async fn mark_played(
@@ -48,6 +100,104 @@ pub async fn mark_favorite(
     set_favorite(&state, &user_id, &item_id, true, &headers, &uri).await
 }
 
+pub async fn item_user_data(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let data = MediaRepository::new(database.clone())
+        .find_user_item_data(user.id, &item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get item user data: {err}")))?
+        .ok_or_else(|| AppError::not_found("item not found"))?;
+
+    Ok(Json(user_item_data_to_dto(data)))
+}
+
+pub async fn update_item_user_data(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let payload: UserItemDataUpdateDto = parse_emby_body(&headers, &body)?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let input = user_item_data_update_input(user.id, &item_id, payload)?;
+    let data = MediaRepository::new(database.clone())
+        .update_user_item_data(input)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to update item user data: {err}")))?
+        .ok_or_else(|| AppError::not_found("item not found"))?;
+
+    Ok(Json(user_item_data_to_dto(data)))
+}
+
+pub async fn update_item_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let payload: UpdateUserItemAccessDto = parse_emby_body(&headers, &body)?;
+    let input = user_item_access_update_input(payload)?;
+    let _item_ids = input.item_ids;
+    let _user_ids = input.user_ids;
+    let _item_access = input.item_access;
+
+    Err(library_access_write_disabled_error())
+}
+
+pub async fn make_item_private(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _item_id = normalize_library_access_id(&item_id, "Id")?;
+
+    Err(library_access_write_disabled_error())
+}
+
+pub async fn make_item_public(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _item_id = normalize_library_access_id(&item_id, "Id")?;
+
+    Err(library_access_write_disabled_error())
+}
+
+pub async fn leave_shared_items(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let payload: LeaveSharedItemsDto = parse_emby_body(&headers, &body)?;
+    let input = leave_shared_items_input(payload)?;
+    let _item_ids = input.item_ids;
+    let _user_id = input.user_id;
+
+    Err(library_access_write_disabled_error())
+}
+
 pub async fn unmark_favorite(
     State(state): State<AppState>,
     Path((user_id, item_id)): Path<(String, String)>,
@@ -75,6 +225,28 @@ pub async fn delete_rating(
     uri: Uri,
 ) -> Result<Json<UserItemDataDto>, AppError> {
     update_rating(&state, &user_id, &item_id, None, &headers, &uri).await
+}
+
+pub async fn hide_from_resume(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<HideFromResumeQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let input = hide_from_resume_update_input(user.id, &item_id, query)?;
+    let data = MediaRepository::new(database.clone())
+        .update_user_item_data(input)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to update hide from resume: {err}")))?
+        .ok_or_else(|| AppError::not_found("item not found"))?;
+
+    Ok(Json(user_item_data_to_dto(data)))
 }
 
 async fn set_played(
@@ -156,6 +328,138 @@ fn rating_from_query(query: &RatingQuery) -> Result<f64, AppError> {
     Ok((rating * 100.0).round() / 100.0)
 }
 
+fn user_item_data_update_input(
+    user_id: i64,
+    item_id: &str,
+    payload: UserItemDataUpdateDto,
+) -> Result<UserItemDataUpdateInput, AppError> {
+    let item_id = item_id.trim();
+    if item_id.is_empty() || item_id.len() > 128 {
+        return Err(AppError::unprocessable("item id is invalid"));
+    }
+
+    Ok(UserItemDataUpdateInput {
+        user_id,
+        item_id: item_id.to_owned(),
+        playback_position_ticks: payload.playback_position_ticks.map(|ticks| ticks.max(0)),
+        play_count: payload.play_count.map(|count| count.max(0)),
+        is_favorite: payload.is_favorite,
+        rating: payload.rating.map(normalize_user_rating).transpose()?,
+        played: payload.played,
+    })
+}
+
+fn hide_from_resume_update_input(
+    user_id: i64,
+    item_id: &str,
+    query: HideFromResumeQuery,
+) -> Result<UserItemDataUpdateInput, AppError> {
+    let hide = query
+        .hide
+        .ok_or_else(|| AppError::unprocessable("Hide query parameter is required"))?;
+
+    let mut input =
+        user_item_data_update_input(user_id, item_id, UserItemDataUpdateDto::default())?;
+    if hide {
+        input.playback_position_ticks = Some(0);
+    }
+
+    Ok(input)
+}
+
+fn user_item_access_update_input(
+    payload: UpdateUserItemAccessDto,
+) -> Result<UserItemAccessUpdateInput, AppError> {
+    Ok(UserItemAccessUpdateInput {
+        item_ids: normalize_library_access_ids(payload.item_ids, "ItemIds")?,
+        user_ids: normalize_library_access_ids(payload.user_ids, "UserIds")?,
+        item_access: Some(normalize_item_access(payload.item_access.as_deref())?),
+    })
+}
+
+fn leave_shared_items_input(
+    payload: LeaveSharedItemsDto,
+) -> Result<LeaveSharedItemsInput, AppError> {
+    Ok(LeaveSharedItemsInput {
+        item_ids: normalize_library_access_ids(payload.item_ids, "ItemIds")?,
+        user_id: payload
+            .user_id
+            .as_deref()
+            .map(|value| normalize_library_access_id(value, "UserId"))
+            .transpose()?,
+    })
+}
+
+fn normalize_library_access_ids(
+    values: Vec<String>,
+    field: &'static str,
+) -> Result<Vec<String>, AppError> {
+    if values.is_empty() {
+        return Err(AppError::unprocessable(format!("{field} is required")));
+    }
+    if values.len() > MAX_LIBRARY_ACCESS_IDS {
+        return Err(AppError::unprocessable(format!(
+            "{field} has too many values"
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = normalize_library_access_id(&value, field)?;
+        if seen.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(AppError::unprocessable(format!("{field} is required")));
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_library_access_id(value: &str, field: &'static str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_LIBRARY_ACCESS_ID_LEN
+        || value.chars().any(char::is_control)
+    {
+        return Err(AppError::unprocessable(format!("{field} is invalid")));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn normalize_item_access(value: Option<&str>) -> Result<String, AppError> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::unprocessable("ItemAccess is required"))?;
+
+    match value.to_ascii_lowercase().as_str() {
+        "none" => Ok("None".to_owned()),
+        "read" => Ok("Read".to_owned()),
+        "write" => Ok("Write".to_owned()),
+        "manage" => Ok("Manage".to_owned()),
+        "managedelete" => Ok("ManageDelete".to_owned()),
+        _ => Err(AppError::unprocessable("ItemAccess is invalid")),
+    }
+}
+
+fn library_access_write_disabled_error() -> AppError {
+    AppError::conflict(
+        "Emby library access sharing writes are disabled; use FBZ library permission APIs",
+    )
+}
+
+fn normalize_user_rating(rating: f64) -> Result<f64, AppError> {
+    if !(0.0..=10.0).contains(&rating) {
+        return Err(AppError::unprocessable("rating must be between 0 and 10"));
+    }
+
+    Ok((rating * 100.0).round() / 100.0)
+}
+
 fn user_item_data_to_dto(record: UserItemDataRecord) -> UserItemDataDto {
     UserItemDataDto {
         rating: record.rating,
@@ -228,5 +532,121 @@ mod tests {
         assert!(dto.is_favorite);
         assert_eq!(dto.rating, Some(9.0));
         assert!(dto.played);
+    }
+
+    #[test]
+    fn user_item_data_update_payload_is_normalized_and_bounded() {
+        let input = user_item_data_update_input(
+            42,
+            " item-1 ",
+            UserItemDataUpdateDto {
+                playback_position_ticks: Some(-1),
+                play_count: Some(-2),
+                played: Some(false),
+                is_favorite: Some(true),
+                rating: Some(8.456),
+                last_played_date: Some("2026-01-01T00:00:00Z".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(input.user_id, 42);
+        assert_eq!(input.item_id, "item-1");
+        assert_eq!(input.playback_position_ticks, Some(0));
+        assert_eq!(input.play_count, Some(0));
+        assert_eq!(input.played, Some(false));
+        assert_eq!(input.is_favorite, Some(true));
+        assert_eq!(input.rating, Some(8.46));
+
+        assert!(
+            user_item_data_update_input(
+                42,
+                "item-1",
+                UserItemDataUpdateDto {
+                    rating: Some(10.01),
+                    ..UserItemDataUpdateDto::default()
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hide_from_resume_query_clears_resume_position_when_hidden() {
+        let input =
+            hide_from_resume_update_input(42, " item-1 ", HideFromResumeQuery { hide: Some(true) })
+                .unwrap();
+
+        assert_eq!(input.user_id, 42);
+        assert_eq!(input.item_id, "item-1");
+        assert_eq!(input.playback_position_ticks, Some(0));
+        assert_eq!(input.play_count, None);
+        assert_eq!(input.played, None);
+        assert_eq!(input.is_favorite, None);
+        assert_eq!(input.rating, None);
+
+        let err = hide_from_resume_update_input(42, "item-1", HideFromResumeQuery { hide: None })
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn user_item_access_payload_is_normalized_and_bounded() {
+        let input = user_item_access_update_input(UpdateUserItemAccessDto {
+            item_ids: vec![
+                " item-1 ".to_owned(),
+                "item-2".to_owned(),
+                "item-1".to_owned(),
+            ],
+            user_ids: vec![" user-1 ".to_owned(), "user-1".to_owned()],
+            item_access: Some("ManageDelete".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(input.item_ids, ["item-1", "item-2"]);
+        assert_eq!(input.user_ids, ["user-1"]);
+        assert_eq!(input.item_access.as_deref(), Some("ManageDelete"));
+
+        let err = user_item_access_update_input(UpdateUserItemAccessDto {
+            item_ids: Vec::new(),
+            user_ids: vec!["user-1".to_owned()],
+            item_access: Some("Read".to_owned()),
+        })
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn leave_shared_items_payload_is_normalized_and_bounded() {
+        let input = leave_shared_items_input(LeaveSharedItemsDto {
+            item_ids: vec![
+                " item-1 ".to_owned(),
+                "item-2".to_owned(),
+                "item-1".to_owned(),
+            ],
+            user_id: Some(" user-1 ".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(input.item_ids, ["item-1", "item-2"]);
+        assert_eq!(input.user_id.as_deref(), Some("user-1"));
+
+        let err = leave_shared_items_input(LeaveSharedItemsDto {
+            item_ids: Vec::new(),
+            user_id: Some("user-1".to_owned()),
+        })
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn library_access_write_disabled_error_is_conflict() {
+        let err = library_access_write_disabled_error();
+
+        assert_eq!(err.status_code(), http::StatusCode::CONFLICT);
+        assert_eq!(err.code(), "conflict");
     }
 }

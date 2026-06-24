@@ -13,13 +13,19 @@ function close() {
 // 路由变化时自动收起
 const route = useRoute();
 watch(() => route.fullPath, close);
+
+useEventListener(window, "keydown", (e) => {
+  if (e.key === "Escape" && open.value) {
+    close();
+  }
+});
 </script>
 
 <template>
   <Teleport to="body">
     <div class="drawer" :class="{ open }">
       <div class="mask" @click="close" />
-      <nav class="panel">
+      <nav class="panel" role="dialog" aria-modal="true" aria-label="移动端导航菜单">
         <RouterLink to="/" class="link" @click="close">首页</RouterLink>
         <RouterLink to="/" class="link" @click="close">最近添加</RouterLink>
         <RouterLink to="/library" class="link" @click="close">媒体库总览</RouterLink>

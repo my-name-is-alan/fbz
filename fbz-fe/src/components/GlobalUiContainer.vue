@@ -5,9 +5,11 @@
 <template>
   <SetupWizardModal />
   <FilePickerModal />
+  <LibrarySettingsModal />
   <MetadataManagerModal />
   <GuidedTourOverlay />
   <ContextMenu />
+  <GlobalToast />
 </template>
 
 <style scoped>

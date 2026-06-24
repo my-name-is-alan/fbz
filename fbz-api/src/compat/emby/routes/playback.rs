@@ -1,10 +1,17 @@
 use axum::{
     Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{
+        HeaderMap, HeaderValue, StatusCode, Uri,
+        header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE},
+    },
+    response::Response,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::io::{self, AsyncReadExt};
+use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 use crate::{
@@ -26,10 +33,97 @@ use crate::{
 
 use super::access::{
     access_token_from_request, authenticate_request_user, authenticate_route_user,
+    client_device_id_from_request,
 };
 
 const PLAYBACK_STARTED_EVENT: &str = "playback.started";
 const PLAYBACK_STOPPED_EVENT: &str = "playback.stopped";
+const MAX_BITRATE_TEST_SIZE: usize = 64 * 1024 * 1024;
+const MAX_PLAY_SESSION_ID_LEN: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct BitrateTestQuery {
+    pub size: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct PlaybackPingQuery {
+    pub play_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct LiveStreamQuery {
+    pub live_stream_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct LiveStreamRequestDto {
+    pub open_token: Option<String>,
+    pub user_id: Option<String>,
+    pub play_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LiveStreamResponseDto {
+    pub media_source: Option<MediaSourceDto>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PlaybackPingInput {
+    play_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LiveStreamOpenInput {
+    open_token: Option<String>,
+    user_id: Option<String>,
+    play_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct PlaybackProgressPathDto {
+    pub item_id: Option<String>,
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
+    pub play_session_id: Option<String>,
+    pub media_source_id: Option<String>,
+    pub play_method: Option<String>,
+    #[serde(default)]
+    pub queueable_media_types: Vec<String>,
+    pub can_seek: Option<bool>,
+    pub event_name: Option<String>,
+    pub audio_stream_index: Option<i32>,
+    pub subtitle_stream_index: Option<i32>,
+    pub position_ticks: Option<i64>,
+    pub is_paused: Option<bool>,
+    pub is_muted: Option<bool>,
+    pub volume_level: Option<i32>,
+    pub live_stream_id: Option<String>,
+    pub playlist_index: Option<i32>,
+    pub playlist_length: Option<i32>,
+    pub subtitle_offset: Option<f64>,
+    pub playback_rate: Option<f64>,
+    #[serde(default)]
+    pub now_playing_queue: Vec<Value>,
+    pub playlist_item_id: Option<String>,
+    #[serde(default)]
+    pub playlist_item_ids: Vec<String>,
+    #[serde(rename = "RunTimeTicks")]
+    pub runtime_ticks: Option<i64>,
+    pub playback_start_time_ticks: Option<i64>,
+    pub brightness: Option<i32>,
+    pub aspect_ratio: Option<String>,
+    pub repeat_mode: Option<String>,
+    pub sleep_timer_mode: Option<String>,
+    pub sleep_timer_end_time: Option<String>,
+    pub shuffle: Option<bool>,
+}
 
 pub async fn playback_info(
     State(state): State<AppState>,
@@ -39,9 +133,18 @@ pub async fn playback_info(
     uri: Uri,
 ) -> Result<Json<PlaybackInfoResponseDto>, AppError> {
     let access_token = access_token_from_request(&headers, uri.query())?;
+    let device_id = client_device_id_from_request(&headers, uri.query())?;
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     assert_request_user(&user, query.user_id.as_deref())?;
-    playback_info_for_user(&state, user, item_id, &query, &access_token).await
+    playback_info_for_user(
+        &state,
+        user,
+        item_id,
+        &query,
+        &access_token,
+        device_id.as_deref(),
+    )
+    .await
 }
 
 pub async fn post_playback_info(
@@ -53,9 +156,18 @@ pub async fn post_playback_info(
 ) -> Result<Json<PlaybackInfoResponseDto>, AppError> {
     let payload: PlaybackInfoRequestDto = parse_emby_body(&headers, &body)?;
     let access_token = access_token_from_request(&headers, uri.query())?;
+    let device_id = client_device_id_from_request(&headers, uri.query())?;
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     assert_request_user(&user, payload.user_id.as_deref())?;
-    playback_info_for_user(&state, user, item_id, &payload, &access_token).await
+    playback_info_for_user(
+        &state,
+        user,
+        item_id,
+        &payload,
+        &access_token,
+        device_id.as_deref(),
+    )
+    .await
 }
 
 pub async fn user_playback_info(
@@ -66,9 +178,18 @@ pub async fn user_playback_info(
     uri: Uri,
 ) -> Result<Json<PlaybackInfoResponseDto>, AppError> {
     let access_token = access_token_from_request(&headers, uri.query())?;
+    let device_id = client_device_id_from_request(&headers, uri.query())?;
     let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
     assert_request_user(&user, query.user_id.as_deref())?;
-    playback_info_for_user(&state, user, item_id, &query, &access_token).await
+    playback_info_for_user(
+        &state,
+        user,
+        item_id,
+        &query,
+        &access_token,
+        device_id.as_deref(),
+    )
+    .await
 }
 
 pub async fn post_user_playback_info(
@@ -80,9 +201,68 @@ pub async fn post_user_playback_info(
 ) -> Result<Json<PlaybackInfoResponseDto>, AppError> {
     let payload: PlaybackInfoRequestDto = parse_emby_body(&headers, &body)?;
     let access_token = access_token_from_request(&headers, uri.query())?;
+    let device_id = client_device_id_from_request(&headers, uri.query())?;
     let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
     assert_request_user(&user, payload.user_id.as_deref())?;
-    playback_info_for_user(&state, user, item_id, &payload, &access_token).await
+    playback_info_for_user(
+        &state,
+        user,
+        item_id,
+        &payload,
+        &access_token,
+        device_id.as_deref(),
+    )
+    .await
+}
+
+pub async fn bitrate_test(
+    State(state): State<AppState>,
+    Query(query): Query<BitrateTestQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let _user = authenticate_request_user(&state, &headers, &uri).await?;
+    let size = validated_bitrate_test_size(query)?;
+
+    Ok(bitrate_test_response(size))
+}
+
+pub async fn live_stream_open(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Json<LiveStreamResponseDto>, AppError> {
+    let request: LiveStreamRequestDto = parse_emby_body(&headers, &body)?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    assert_request_user(&user, request.user_id.as_deref())?;
+    let _input = live_stream_open_input(request)?;
+
+    Ok(Json(empty_live_stream_response()))
+}
+
+pub async fn live_stream_media_info(
+    State(state): State<AppState>,
+    Query(query): Query<LiveStreamQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<PlaybackInfoResponseDto>, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _live_stream_id = required_live_stream_id(query.live_stream_id.as_deref())?;
+
+    Ok(Json(empty_live_stream_media_info()))
+}
+
+pub async fn live_stream_close(
+    State(state): State<AppState>,
+    Query(query): Query<LiveStreamQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _live_stream_id = required_live_stream_id(query.live_stream_id.as_deref())?;
+
+    Ok(StatusCode::OK)
 }
 
 pub async fn playing(
@@ -94,6 +274,40 @@ pub async fn playing(
     let payload: PlaybackProgressDto = parse_emby_body(&headers, &body)?;
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     assert_request_user(&user, payload.user_id.as_deref())?;
+    start_playback_for_user(&state, user, payload).await
+}
+
+pub async fn playing_ping(
+    State(state): State<AppState>,
+    Query(query): Query<PlaybackPingQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let _user = authenticate_request_user(&state, &headers, &uri).await?;
+    let _input = playback_ping_input(query)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn user_playing_item(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<PlaybackProgressPathDto>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    let payload = playback_payload_from_user_item_path(&headers, &body, query, &user_id, &item_id)?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    assert_request_user(&user, payload.user_id.as_deref())?;
+    start_playback_for_user(&state, user, payload).await
+}
+
+async fn start_playback_for_user(
+    state: &AppState,
+    user: AuthenticatedUser,
+    payload: PlaybackProgressDto,
+) -> Result<StatusCode, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
@@ -129,6 +343,28 @@ pub async fn playing_progress(
     let payload: PlaybackProgressDto = parse_emby_body(&headers, &body)?;
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     assert_request_user(&user, payload.user_id.as_deref())?;
+    update_playback_progress_for_user(&state, user, payload).await
+}
+
+pub async fn user_playing_item_progress(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<PlaybackProgressPathDto>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    let payload = playback_payload_from_user_item_path(&headers, &body, query, &user_id, &item_id)?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    assert_request_user(&user, payload.user_id.as_deref())?;
+    update_playback_progress_for_user(&state, user, payload).await
+}
+
+async fn update_playback_progress_for_user(
+    state: &AppState,
+    user: AuthenticatedUser,
+    payload: PlaybackProgressDto,
+) -> Result<StatusCode, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
@@ -154,6 +390,28 @@ pub async fn playing_stopped(
     let payload: PlaybackProgressDto = parse_emby_body(&headers, &body)?;
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     assert_request_user(&user, payload.user_id.as_deref())?;
+    stop_playback_for_user(&state, user, payload).await
+}
+
+pub async fn user_playing_item_stopped(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<PlaybackProgressPathDto>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    let payload = playback_payload_from_user_item_path(&headers, &body, query, &user_id, &item_id)?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    assert_request_user(&user, payload.user_id.as_deref())?;
+    stop_playback_for_user(&state, user, payload).await
+}
+
+async fn stop_playback_for_user(
+    state: &AppState,
+    user: AuthenticatedUser,
+    payload: PlaybackProgressDto,
+) -> Result<StatusCode, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
@@ -179,6 +437,7 @@ async fn playback_info_for_user(
     item_id: String,
     request: &PlaybackInfoRequestDto,
     access_token: &str,
+    device_id: Option<&str>,
 ) -> Result<Json<PlaybackInfoResponseDto>, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
@@ -204,6 +463,7 @@ async fn playback_info_for_user(
         request,
         &play_session_id,
         access_token,
+        device_id,
     )
     .await?;
 
@@ -231,6 +491,216 @@ fn assert_request_user(
     }
 
     Ok(())
+}
+
+fn validated_bitrate_test_size(query: BitrateTestQuery) -> Result<usize, AppError> {
+    let Some(size) = query.size else {
+        return Err(AppError::unprocessable("bitrate test size is required"));
+    };
+    if size == 0 {
+        return Err(AppError::unprocessable(
+            "bitrate test size must be greater than zero",
+        ));
+    }
+    if size > MAX_BITRATE_TEST_SIZE {
+        return Err(AppError::unprocessable(format!(
+            "bitrate test size must be less than or equal to {MAX_BITRATE_TEST_SIZE}",
+        )));
+    }
+
+    Ok(size)
+}
+
+fn bitrate_test_response(size: usize) -> Response {
+    let stream = ReaderStream::new(io::repeat(0).take(size as u64));
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(value) = HeaderValue::from_str(&size.to_string()) {
+        response.headers_mut().insert(CONTENT_LENGTH, value);
+    }
+
+    response
+}
+
+fn playback_ping_input(query: PlaybackPingQuery) -> Result<PlaybackPingInput, AppError> {
+    Ok(PlaybackPingInput {
+        play_session_id: normalize_play_session_id(query.play_session_id.as_deref())?,
+    })
+}
+
+fn live_stream_open_input(request: LiveStreamRequestDto) -> Result<LiveStreamOpenInput, AppError> {
+    Ok(LiveStreamOpenInput {
+        open_token: normalize_live_stream_text(request.open_token.as_deref(), "OpenToken")?,
+        user_id: normalize_live_stream_text(request.user_id.as_deref(), "UserId")?,
+        play_session_id: normalize_live_stream_text(
+            request.play_session_id.as_deref(),
+            "PlaySessionId",
+        )?,
+    })
+}
+
+fn empty_live_stream_response() -> LiveStreamResponseDto {
+    LiveStreamResponseDto { media_source: None }
+}
+
+fn empty_live_stream_media_info() -> PlaybackInfoResponseDto {
+    PlaybackInfoResponseDto {
+        media_sources: Vec::new(),
+        play_session_id: String::new(),
+        error_code: None,
+    }
+}
+
+fn normalize_play_session_id(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_PLAY_SESSION_ID_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return Err(AppError::unprocessable("play session id is invalid"));
+    }
+
+    Ok(Some(value.to_owned()))
+}
+
+fn required_live_stream_id(value: Option<&str>) -> Result<String, AppError> {
+    normalize_live_stream_text(value, "LiveStreamId")?
+        .ok_or_else(|| AppError::unprocessable("live stream id is required"))
+}
+
+fn normalize_live_stream_text(
+    value: Option<&str>,
+    name: &'static str,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_PLAY_SESSION_ID_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        return Err(AppError::unprocessable(format!("{name} is invalid")));
+    }
+
+    Ok(Some(value.to_owned()))
+}
+
+fn playback_payload_from_user_item_path(
+    headers: &HeaderMap,
+    body: &Bytes,
+    query: PlaybackProgressPathDto,
+    route_user_id: &str,
+    route_item_id: &str,
+) -> Result<PlaybackProgressDto, AppError> {
+    let body_payload = if body.is_empty() {
+        PlaybackProgressPathDto::default()
+    } else {
+        parse_emby_body(headers, body)?
+    };
+    let payload = PlaybackProgressPathDto {
+        item_id: body_payload.item_id.or(query.item_id),
+        user_id: body_payload.user_id.or(query.user_id),
+        session_id: body_payload.session_id.or(query.session_id),
+        play_session_id: body_payload.play_session_id.or(query.play_session_id),
+        media_source_id: body_payload.media_source_id.or(query.media_source_id),
+        play_method: body_payload.play_method.or(query.play_method),
+        queueable_media_types: if body_payload.queueable_media_types.is_empty() {
+            query.queueable_media_types
+        } else {
+            body_payload.queueable_media_types
+        },
+        can_seek: body_payload.can_seek.or(query.can_seek),
+        event_name: body_payload.event_name.or(query.event_name),
+        audio_stream_index: body_payload.audio_stream_index.or(query.audio_stream_index),
+        subtitle_stream_index: body_payload
+            .subtitle_stream_index
+            .or(query.subtitle_stream_index),
+        position_ticks: body_payload.position_ticks.or(query.position_ticks),
+        is_paused: body_payload.is_paused.or(query.is_paused),
+        is_muted: body_payload.is_muted.or(query.is_muted),
+        volume_level: body_payload.volume_level.or(query.volume_level),
+        live_stream_id: body_payload.live_stream_id.or(query.live_stream_id),
+        playlist_index: body_payload.playlist_index.or(query.playlist_index),
+        playlist_length: body_payload.playlist_length.or(query.playlist_length),
+        subtitle_offset: body_payload.subtitle_offset.or(query.subtitle_offset),
+        playback_rate: body_payload.playback_rate.or(query.playback_rate),
+        now_playing_queue: if body_payload.now_playing_queue.is_empty() {
+            query.now_playing_queue
+        } else {
+            body_payload.now_playing_queue
+        },
+        playlist_item_id: body_payload.playlist_item_id.or(query.playlist_item_id),
+        playlist_item_ids: if body_payload.playlist_item_ids.is_empty() {
+            query.playlist_item_ids
+        } else {
+            body_payload.playlist_item_ids
+        },
+        runtime_ticks: body_payload.runtime_ticks.or(query.runtime_ticks),
+        playback_start_time_ticks: body_payload
+            .playback_start_time_ticks
+            .or(query.playback_start_time_ticks),
+        brightness: body_payload.brightness.or(query.brightness),
+        aspect_ratio: body_payload.aspect_ratio.or(query.aspect_ratio),
+        repeat_mode: body_payload.repeat_mode.or(query.repeat_mode),
+        sleep_timer_mode: body_payload.sleep_timer_mode.or(query.sleep_timer_mode),
+        sleep_timer_end_time: body_payload
+            .sleep_timer_end_time
+            .or(query.sleep_timer_end_time),
+        shuffle: body_payload.shuffle.or(query.shuffle),
+    };
+    let item_id = match payload.item_id {
+        Some(body_item_id) if body_item_id != route_item_id => {
+            return Err(AppError::unprocessable(
+                "playback item id does not match route item",
+            ));
+        }
+        Some(body_item_id) => body_item_id,
+        None => route_item_id.to_owned(),
+    };
+
+    Ok(PlaybackProgressDto {
+        item_id,
+        user_id: payload.user_id.or_else(|| Some(route_user_id.to_owned())),
+        session_id: payload.session_id,
+        play_session_id: payload.play_session_id,
+        media_source_id: payload.media_source_id,
+        play_method: payload.play_method,
+        queueable_media_types: payload.queueable_media_types,
+        can_seek: payload.can_seek,
+        event_name: payload.event_name,
+        audio_stream_index: payload.audio_stream_index,
+        subtitle_stream_index: payload.subtitle_stream_index,
+        position_ticks: payload.position_ticks,
+        is_paused: payload.is_paused,
+        is_muted: payload.is_muted,
+        volume_level: payload.volume_level,
+        live_stream_id: payload.live_stream_id,
+        playlist_index: payload.playlist_index,
+        playlist_length: payload.playlist_length,
+        subtitle_offset: payload.subtitle_offset,
+        playback_rate: payload.playback_rate,
+        now_playing_queue: payload.now_playing_queue,
+        playlist_item_id: payload.playlist_item_id,
+        playlist_item_ids: payload.playlist_item_ids,
+        runtime_ticks: payload.runtime_ticks,
+        playback_start_time_ticks: payload.playback_start_time_ticks,
+        brightness: payload.brightness,
+        aspect_ratio: payload.aspect_ratio,
+        repeat_mode: payload.repeat_mode,
+        sleep_timer_mode: payload.sleep_timer_mode,
+        sleep_timer_end_time: payload.sleep_timer_end_time,
+        shuffle: payload.shuffle,
+    })
 }
 
 fn report_input(user_id: i64, payload: &PlaybackProgressDto) -> PlaybackReportInput {
@@ -329,6 +799,7 @@ async fn queue_transcode_if_needed(
     request: &PlaybackInfoRequestDto,
     play_session_id: &str,
     access_token: &str,
+    device_id: Option<&str>,
 ) -> Result<Option<PlaybackTranscodeInfo>, AppError> {
     if !should_queue_transcode(source, request) {
         return Ok(None);
@@ -355,6 +826,8 @@ async fn queue_transcode_if_needed(
             media_file_id: Some(source.media_file_id),
             input_path,
             output_base_path,
+            play_session_id: Some(play_session_id.to_owned()),
+            device_id: device_id.map(str::to_owned),
             video_codec: Some("h264".to_owned()),
             audio_codec: Some("aac".to_owned()),
             container: Some("hls".to_owned()),
@@ -412,7 +885,7 @@ fn transcode_url(
     access_token: &str,
 ) -> String {
     format!(
-        "/emby/videos/{}/master.m3u8?MediaSourceId={}&TranscodeSessionId={}&PlaySessionId={}&api_key={}",
+        "/emby/Videos/{}/master.m3u8?MediaSourceId={}&TranscodeSessionId={}&PlaySessionId={}&api_key={}",
         source.item_id, source.media_file_id, session_id, play_session_id, access_token
     )
 }
@@ -425,14 +898,24 @@ fn media_source_to_dto(
     let protocol = media_source_protocol(&source);
     MediaSourceDto {
         id: source.media_file_id.to_string(),
+        source_type: "Default".to_owned(),
+        name: source.media_file_id.to_string(),
+        item_id: Some(source.item_id.clone()),
         path: Some(media_source_path(&source)),
         protocol: protocol.to_owned(),
+        is_remote: protocol == "Http",
+        requires_opening: false,
+        requires_closing: false,
+        supports_probing: false,
+        read_at_native_framerate: false,
         container: source.container.clone(),
         run_time_ticks: source.runtime_ticks,
         size: source.file_size,
         bitrate: transcode
             .and_then(|session| session.bitrate)
             .or(source.bitrate),
+        default_audio_stream_index: default_stream_index(&source.streams, "audio"),
+        default_subtitle_stream_index: default_stream_index(&source.streams, "subtitle"),
         media_streams: source
             .streams
             .iter()
@@ -447,7 +930,20 @@ fn media_source_to_dto(
         transcoding_url: transcode.map(|session| session.url.clone()),
         transcoding_sub_protocol: transcode.map(|_| "hls".to_owned()),
         transcoding_container: transcode.map(|_| "ts".to_owned()),
+        chapters: Vec::new(),
     }
+}
+
+fn default_stream_index(streams: &[PlaybackMediaStreamRecord], stream_type: &str) -> Option<i32> {
+    streams
+        .iter()
+        .find(|stream| stream.stream_type.eq_ignore_ascii_case(stream_type) && stream.is_default)
+        .or_else(|| {
+            streams
+                .iter()
+                .find(|stream| stream.stream_type.eq_ignore_ascii_case(stream_type))
+        })
+        .map(|stream| stream.stream_index)
 }
 
 fn direct_stream_url(source: &PlaybackMediaSourceRecord, access_token: &str) -> String {
@@ -633,7 +1129,15 @@ mod tests {
         let dto = media_source_to_dto(&source, None, "token-1");
 
         assert_eq!(dto.id, "42");
+        assert_eq!(dto.source_type, "Default");
+        assert_eq!(dto.name, "42");
+        assert_eq!(dto.item_id.as_deref(), Some("item-1"));
         assert_eq!(dto.protocol, "Http");
+        assert!(dto.is_remote);
+        assert!(!dto.requires_opening);
+        assert!(!dto.requires_closing);
+        assert!(!dto.supports_probing);
+        assert!(!dto.read_at_native_framerate);
         assert_eq!(dto.path.as_deref(), Some("http://192.168.1.10/movie.mkv"));
         assert_eq!(
             dto.direct_stream_url.as_deref(),
@@ -672,8 +1176,31 @@ mod tests {
                 play_session_id: Some("play-1".to_owned()),
                 media_source_id: Some("42".to_owned()),
                 play_method: Some("DirectStream".to_owned()),
+                queueable_media_types: vec!["Audio".to_owned(), "Video".to_owned()],
+                can_seek: Some(true),
+                event_name: Some("TimeUpdate".to_owned()),
+                audio_stream_index: Some(1),
+                subtitle_stream_index: Some(-1),
                 position_ticks: Some(-10),
                 is_paused: Some(true),
+                is_muted: Some(false),
+                volume_level: Some(85),
+                live_stream_id: Some("live-1".to_owned()),
+                playlist_index: Some(2),
+                playlist_length: Some(4),
+                subtitle_offset: Some(0.0),
+                playback_rate: Some(1.0),
+                now_playing_queue: Vec::new(),
+                playlist_item_id: None,
+                playlist_item_ids: Vec::new(),
+                runtime_ticks: None,
+                playback_start_time_ticks: None,
+                brightness: None,
+                aspect_ratio: None,
+                repeat_mode: None,
+                sleep_timer_mode: None,
+                sleep_timer_end_time: None,
+                shuffle: None,
             },
         );
 
@@ -683,6 +1210,194 @@ mod tests {
         assert_eq!(input.position_ticks, 0);
         assert!(input.is_paused);
         assert_eq!(input.play_method, "direct_stream");
+    }
+
+    #[test]
+    fn user_item_playback_payload_uses_path_ids_when_body_omits_them() {
+        let headers = HeaderMap::new();
+        let query = PlaybackProgressPathDto::default();
+        let body = Bytes::from_static(
+            br#"{"PlaySessionId":"play-1","MediaSourceId":"42","PositionTicks":42,"QueueableMediaTypes":["Audio","Video"],"CanSeek":true,"EventName":"Pause","AudioStreamIndex":1,"SubtitleStreamIndex":-1,"IsMuted":false,"VolumeLevel":75,"LiveStreamId":"live-1","PlaylistIndex":2,"PlaylistLength":4,"SubtitleOffset":0,"PlaybackRate":1.5,"NowPlayingQueue":[{"Id":"queue-1"}],"PlaylistItemId":"playlist-item-1","PlaylistItemIds":["playlist-item-1","playlist-item-2"],"RunTimeTicks":9000,"PlaybackStartTimeTicks":100,"Brightness":40,"AspectRatio":"16:9","RepeatMode":"RepeatAll","SleepTimerMode":"EndOfEpisode","SleepTimerEndTime":"2026-06-24T12:00:00Z","Shuffle":true}"#,
+        );
+
+        let payload =
+            playback_payload_from_user_item_path(&headers, &body, query, "user-1", "item-1")
+                .unwrap();
+
+        assert_eq!(payload.item_id, "item-1");
+        assert_eq!(payload.user_id.as_deref(), Some("user-1"));
+        assert_eq!(payload.play_session_id.as_deref(), Some("play-1"));
+        assert_eq!(payload.media_source_id.as_deref(), Some("42"));
+        assert_eq!(payload.position_ticks, Some(42));
+        assert_eq!(
+            payload.queueable_media_types,
+            vec!["Audio".to_owned(), "Video".to_owned()]
+        );
+        assert_eq!(payload.can_seek, Some(true));
+        assert_eq!(payload.event_name.as_deref(), Some("Pause"));
+        assert_eq!(payload.audio_stream_index, Some(1));
+        assert_eq!(payload.subtitle_stream_index, Some(-1));
+        assert_eq!(payload.is_muted, Some(false));
+        assert_eq!(payload.volume_level, Some(75));
+        assert_eq!(payload.live_stream_id.as_deref(), Some("live-1"));
+        assert_eq!(payload.playlist_index, Some(2));
+        assert_eq!(payload.playlist_length, Some(4));
+        assert_eq!(payload.subtitle_offset, Some(0.0));
+        assert_eq!(payload.playback_rate, Some(1.5));
+        assert_eq!(payload.now_playing_queue.len(), 1);
+        assert_eq!(payload.playlist_item_id.as_deref(), Some("playlist-item-1"));
+        assert_eq!(
+            payload.playlist_item_ids,
+            vec!["playlist-item-1".to_owned(), "playlist-item-2".to_owned()]
+        );
+        assert_eq!(payload.runtime_ticks, Some(9000));
+        assert_eq!(payload.playback_start_time_ticks, Some(100));
+        assert_eq!(payload.brightness, Some(40));
+        assert_eq!(payload.aspect_ratio.as_deref(), Some("16:9"));
+        assert_eq!(payload.repeat_mode.as_deref(), Some("RepeatAll"));
+        assert_eq!(payload.sleep_timer_mode.as_deref(), Some("EndOfEpisode"));
+        assert_eq!(
+            payload.sleep_timer_end_time.as_deref(),
+            Some("2026-06-24T12:00:00Z")
+        );
+        assert_eq!(payload.shuffle, Some(true));
+    }
+
+    #[test]
+    fn user_item_playback_payload_rejects_conflicting_body_item_id() {
+        let headers = HeaderMap::new();
+        let query = PlaybackProgressPathDto::default();
+        let body = Bytes::from_static(br#"{"ItemId":"other-item","PositionTicks":42}"#);
+
+        let err = playback_payload_from_user_item_path(&headers, &body, query, "user-1", "item-1")
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn user_item_playback_payload_accepts_query_only_reports() {
+        let headers = HeaderMap::new();
+        let body = Bytes::new();
+        let query = PlaybackProgressPathDto {
+            item_id: None,
+            user_id: None,
+            session_id: None,
+            play_session_id: Some("play-1".to_owned()),
+            media_source_id: Some("42".to_owned()),
+            play_method: Some("DirectStream".to_owned()),
+            queueable_media_types: vec!["Video".to_owned()],
+            can_seek: Some(false),
+            event_name: Some("TimeUpdate".to_owned()),
+            audio_stream_index: Some(2),
+            subtitle_stream_index: Some(-1),
+            position_ticks: Some(42),
+            is_paused: Some(false),
+            is_muted: Some(true),
+            volume_level: Some(0),
+            live_stream_id: Some("live-2".to_owned()),
+            playlist_index: Some(3),
+            playlist_length: Some(8),
+            subtitle_offset: Some(250.0),
+            playback_rate: Some(0.75),
+            ..PlaybackProgressPathDto::default()
+        };
+
+        let payload =
+            playback_payload_from_user_item_path(&headers, &body, query, "user-1", "item-1")
+                .unwrap();
+
+        assert_eq!(payload.item_id, "item-1");
+        assert_eq!(payload.user_id.as_deref(), Some("user-1"));
+        assert_eq!(payload.play_session_id.as_deref(), Some("play-1"));
+        assert_eq!(payload.media_source_id.as_deref(), Some("42"));
+        assert_eq!(payload.position_ticks, Some(42));
+        assert_eq!(payload.is_paused, Some(false));
+        assert_eq!(payload.queueable_media_types, vec!["Video".to_owned()]);
+        assert_eq!(payload.can_seek, Some(false));
+        assert_eq!(payload.event_name.as_deref(), Some("TimeUpdate"));
+        assert_eq!(payload.audio_stream_index, Some(2));
+        assert_eq!(payload.subtitle_stream_index, Some(-1));
+        assert_eq!(payload.is_muted, Some(true));
+        assert_eq!(payload.volume_level, Some(0));
+        assert_eq!(payload.live_stream_id.as_deref(), Some("live-2"));
+        assert_eq!(payload.playlist_index, Some(3));
+        assert_eq!(payload.playlist_length, Some(8));
+        assert_eq!(payload.subtitle_offset, Some(250.0));
+        assert_eq!(payload.playback_rate, Some(0.75));
+    }
+
+    #[test]
+    fn live_stream_compat_responses_use_stable_empty_shapes() {
+        assert_eq!(
+            serde_json::to_value(empty_live_stream_response()).unwrap(),
+            json!({ "MediaSource": null })
+        );
+        assert_eq!(
+            serde_json::to_value(empty_live_stream_media_info()).unwrap(),
+            json!({
+                "MediaSources": [],
+                "PlaySessionId": "",
+                "ErrorCode": null
+            })
+        );
+    }
+
+    #[test]
+    fn bitrate_test_size_requires_positive_bounded_size() {
+        assert_eq!(
+            validated_bitrate_test_size(BitrateTestQuery { size: Some(1024) }).unwrap(),
+            1024
+        );
+        assert_eq!(
+            validated_bitrate_test_size(BitrateTestQuery { size: None })
+                .unwrap_err()
+                .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            validated_bitrate_test_size(BitrateTestQuery { size: Some(0) })
+                .unwrap_err()
+                .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            validated_bitrate_test_size(BitrateTestQuery {
+                size: Some(MAX_BITRATE_TEST_SIZE + 1),
+            })
+            .unwrap_err()
+            .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn playback_ping_query_trims_and_bounds_play_session_id() {
+        assert_eq!(
+            playback_ping_input(PlaybackPingQuery {
+                play_session_id: Some(" play-1 ".to_owned()),
+            })
+            .unwrap()
+            .play_session_id
+            .as_deref(),
+            Some("play-1")
+        );
+        assert_eq!(
+            playback_ping_input(PlaybackPingQuery {
+                play_session_id: Some(" ".to_owned()),
+            })
+            .unwrap()
+            .play_session_id,
+            None
+        );
+        assert_eq!(
+            playback_ping_input(PlaybackPingQuery {
+                play_session_id: Some("x".repeat(MAX_PLAY_SESSION_ID_LEN + 1)),
+            })
+            .unwrap_err()
+            .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[test]
@@ -764,6 +1479,9 @@ mod tests {
         assert_eq!(dto.bitrate, Some(8_000_000));
         assert_eq!(dto.run_time_ticks, Some(7_200_000_000));
         assert_eq!(dto.size, Some(42_000_000));
+        assert_eq!(dto.source_type, "Default");
+        assert_eq!(dto.name, "42");
+        assert_eq!(dto.item_id.as_deref(), Some("item-1"));
         assert_eq!(
             dto.direct_stream_url.as_deref(),
             Some("/emby/Videos/item-1/stream?MediaSourceId=42&Static=true&api_key=token-1")
@@ -774,9 +1492,40 @@ mod tests {
         assert_eq!(
             dto.transcoding_url.as_deref(),
             Some(
-                "/emby/videos/item-1/master.m3u8?MediaSourceId=42&TranscodeSessionId=session-1&PlaySessionId=play-1&api_key=token-1"
+                "/emby/Videos/item-1/master.m3u8?MediaSourceId=42&TranscodeSessionId=session-1&PlaySessionId=play-1&api_key=token-1"
             )
         );
+    }
+
+    #[test]
+    fn media_source_exposes_default_stream_indices() {
+        let source = PlaybackMediaSourceRecord {
+            streams: vec![
+                PlaybackMediaStreamRecord {
+                    stream_index: 0,
+                    stream_type: "audio".to_owned(),
+                    is_default: false,
+                    ..test_stream()
+                },
+                PlaybackMediaStreamRecord {
+                    stream_index: 1,
+                    stream_type: "audio".to_owned(),
+                    is_default: true,
+                    ..test_stream()
+                },
+                PlaybackMediaStreamRecord {
+                    stream_index: 2,
+                    stream_type: "subtitle".to_owned(),
+                    is_default: false,
+                    ..test_stream()
+                },
+            ],
+            ..test_source()
+        };
+        let dto = media_source_to_dto(&source, None, "token-1");
+
+        assert_eq!(dto.default_audio_stream_index, Some(1));
+        assert_eq!(dto.default_subtitle_stream_index, Some(2));
     }
 
     #[test]

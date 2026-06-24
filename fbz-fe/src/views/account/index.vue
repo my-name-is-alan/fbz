@@ -14,6 +14,10 @@ const pageMap: Record<string, { title: string; desc: string }> = {
     title: "控制面板",
     desc: "媒体库状态总览、系统资源监控和最近入库动态。",
   },
+  "admin-profile": {
+    title: "个人信息",
+    desc: "更新您的账户昵称、登录账号、密码以及多媒体点播默认语言偏好设置。",
+  },
   "admin-theme": {
     title: "主题设置",
     desc: "个性化系统界面主题、自定义品牌高亮主题色，配置系统视觉交互样式。",
@@ -37,6 +41,14 @@ const pageMap: Record<string, { title: string; desc: string }> = {
   "admin-users": {
     title: "用户管理",
     desc: "管理系统用户账户、权限和访问控制。",
+  },
+  "admin-users-create": {
+    title: "添加用户",
+    desc: "创建自托管系统的新访问账号及媒体库浏览权限。",
+  },
+  "admin-users-edit": {
+    title: "编辑用户控制权限",
+    desc: "修改系统用户基本信息、系统控制权限组和授权媒体库。",
   },
   "admin-plugins": {
     title: "插件设置",
@@ -72,36 +84,12 @@ const presetColors = [
 ];
 
 /* ---------- Admin: Library Settings Section ---------- */
-interface LibSettings {
-  id: string;
-  name: string;
-  kind: "movie" | "series" | "anime" | "documentary" | "music";
-  paths: string[];
-  scrapers: string[];
-  metadataLanguage: string;
-  preferOriginalPoster: boolean;
-  imageCache: boolean;
-  preloadMetadata: boolean;
-  realtimeMonitor: boolean;
-  pushNotification: boolean;
-}
-
-const selectedLib = ref<LibSettings | null>(null);
-const showDeleteConfirm = ref(false);
-const isNewLibrary = ref(false);
-
 const libraryTypeOptions = [
   { label: "电影 (Movie)", value: "movie" },
   { label: "电视剧 (TV Series)", value: "series" },
   { label: "动漫 (Anime)", value: "anime" },
   { label: "纪录片 (Documentary)", value: "documentary" },
   { label: "音乐 (Music)", value: "music" },
-];
-
-const languageOptions = [
-  { label: "继承系统全局语言", value: "system" },
-  { label: "简体中文 (zh-CN)", value: "zh" },
-  { label: "英语 (en-US)", value: "en" },
 ];
 
 /** Library type → icon SVG path data and accent color */
@@ -144,134 +132,11 @@ function getLibCover(libId: string): string | undefined {
 }
 
 function handleEditLibrary(lib: any) {
-  isNewLibrary.value = false;
-  showDeleteConfirm.value = false;
-
-  selectedLib.value = {
-    id: lib.id,
-    name: lib.name,
-    kind: lib.kind,
-    paths: lib.paths || ["/media/nas/" + (lib.kind === "series" ? "电视剧" : lib.name)],
-    scrapers: lib.scrapers || ["tmdb", "local"],
-    metadataLanguage: lib.metadataLanguage || "system",
-    preferOriginalPoster: lib.preferOriginalPoster ?? true,
-    imageCache: lib.imageCache ?? true,
-    preloadMetadata: lib.preloadMetadata ?? true,
-    realtimeMonitor: lib.realtimeMonitor ?? true,
-    pushNotification: lib.pushNotification ?? false,
-  };
+  uiStore.openLibraryEditor(lib.id);
 }
 
 function handleAddLibrary() {
-  isNewLibrary.value = true;
-  showDeleteConfirm.value = false;
-
-  selectedLib.value = {
-    id: `lib-${Date.now()}`,
-    name: "",
-    kind: "movie",
-    paths: ["/media/nas/电影"],
-    scrapers: ["tmdb"],
-    metadataLanguage: "system",
-    preferOriginalPoster: true,
-    imageCache: true,
-    preloadMetadata: true,
-    realtimeMonitor: true,
-    pushNotification: false,
-  };
-}
-
-async function handleBrowsePath(index: number) {
-  if (!selectedLib.value) return;
-  try {
-    const chosenPath = await uiStore.openFilePicker();
-    if (chosenPath) {
-      selectedLib.value.paths[index] = chosenPath;
-    }
-  } catch (err) {
-    console.error("Browse failed", err);
-  }
-}
-
-function addPathField() {
-  if (!selectedLib.value) return;
-  selectedLib.value.paths.push("/media/nas");
-}
-
-function removePathField(index: number) {
-  if (!selectedLib.value) return;
-  if (selectedLib.value.paths.length > 1) {
-    selectedLib.value.paths.splice(index, 1);
-  }
-}
-
-function toggleScraper(scraper: string) {
-  if (!selectedLib.value) return;
-  const scrapers = selectedLib.value.scrapers;
-  const idx = scrapers.indexOf(scraper);
-  if (idx > -1) {
-    if (scrapers.length > 1) scrapers.splice(idx, 1);
-  } else {
-    scrapers.push(scraper);
-  }
-}
-
-function handleSaveLibrary() {
-  if (!selectedLib.value) return;
-  if (!selectedLib.value.name.trim()) {
-    alert("请输入媒体库标题！");
-    return;
-  }
-
-  const store = libraryStore;
-  if (isNewLibrary.value) {
-    store.libraries.push({
-      id: selectedLib.value.id,
-      name: selectedLib.value.name,
-      kind: selectedLib.value.kind,
-      count: 0,
-      paths: selectedLib.value.paths,
-      scrapers: selectedLib.value.scrapers,
-      metadataLanguage: selectedLib.value.metadataLanguage,
-      preferOriginalPoster: selectedLib.value.preferOriginalPoster,
-      imageCache: selectedLib.value.imageCache,
-      preloadMetadata: selectedLib.value.preloadMetadata,
-      realtimeMonitor: selectedLib.value.realtimeMonitor,
-      pushNotification: selectedLib.value.pushNotification,
-    } as any);
-    alert("✨ 媒体库创建成功！已开始扫描物理路径，匹配 TMDB 元数据中。");
-  } else {
-    const existing = store.libraries.find((l) => l.id === selectedLib.value?.id);
-    if (existing) {
-      Object.assign(existing, {
-        name: selectedLib.value.name,
-        kind: selectedLib.value.kind,
-        paths: selectedLib.value.paths,
-        scrapers: selectedLib.value.scrapers,
-        metadataLanguage: selectedLib.value.metadataLanguage,
-        preferOriginalPoster: selectedLib.value.preferOriginalPoster,
-        imageCache: selectedLib.value.imageCache,
-        preloadMetadata: selectedLib.value.preloadMetadata,
-        realtimeMonitor: selectedLib.value.realtimeMonitor,
-        pushNotification: selectedLib.value.pushNotification,
-      });
-      alert("💾 媒体库配置已保存，系统正在自动重构相关索引并清理图片缓存。");
-    }
-  }
-
-  selectedLib.value = null;
-}
-
-function handleDeleteLibrary() {
-  if (!selectedLib.value) return;
-  const store = libraryStore;
-  const idx = store.libraries.findIndex((l) => l.id === selectedLib.value?.id);
-  if (idx > -1) {
-    store.libraries.splice(idx, 1);
-    alert(`🗑️ 媒体库【${selectedLib.value.name}】已成功从系统卸载。物理文件未受损。`);
-  }
-  selectedLib.value = null;
-  showDeleteConfirm.value = false;
+  uiStore.openLibraryEditor(null);
 }
 </script>
 
@@ -282,9 +147,11 @@ function handleDeleteLibrary() {
       <h1 class="page-heading">{{ page.title }}</h1>
       <p class="description-text">{{ page.desc }}</p>
     </div>
+    <!-- 控制面板 -->
+    <AdminDashboard v-if="route.name === 'admin-dashboard'" />
 
     <!-- 媒体库管理 -->
-    <div v-if="route.name === 'admin-libraries'" class="admin-section">
+    <div v-else-if="route.name === 'admin-libraries'" class="admin-section">
       <div class="lib-manager-view">
         <div class="section-label">
           <span class="label-text">已挂载影视媒体库</span>
@@ -390,386 +257,11 @@ function handleDeleteLibrary() {
           </button>
         </div>
       </div>
-
-      <!-- 2. Library Config Form Dialog Overlay (Interactive Modal) -->
-      <Transition name="modal-fade">
-        <div v-if="selectedLib" class="editor-modal-overlay" @click="selectedLib = null">
-          <div class="editor-modal-container" @click.stop>
-            <header class="modal-title-bar">
-              <div class="title-left">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="18"
-                  height="18"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  class="header-icon"
-                >
-                  <path
-                    d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-                  />
-                </svg>
-                <h2>{{ isNewLibrary ? "新建媒体库" : "配置媒体库参数" }}</h2>
-              </div>
-              <button class="modal-close-btn" type="button" @click="selectedLib = null">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="16"
-                  height="16"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            </header>
-
-            <div class="modal-scroll-body">
-              <div class="settings-cards-stack">
-                <!-- Section 1: Basic Parameters -->
-                <section class="settings-card">
-                  <div class="card-header">
-                    <span class="indicator" />
-                    <h3>基础挂载参数</h3>
-                  </div>
-
-                  <div class="card-body">
-                    <div class="form-group">
-                      <label>媒体库标题</label>
-                      <input
-                        v-model="selectedLib.name"
-                        type="text"
-                        placeholder="例如：电影库、4K 原盘"
-                        class="control-input"
-                      />
-                    </div>
-
-                    <div class="form-group">
-                      <label>媒体类型</label>
-                      <BaseSelect
-                        v-model="selectedLib.kind"
-                        :options="libraryTypeOptions"
-                        class="w-full"
-                      />
-                    </div>
-
-                    <!-- Path List Builder -->
-                    <div class="form-group">
-                      <label>物理存储目录 (支持挂载多个物理磁盘目录)</label>
-                      <div class="paths-stack">
-                        <div
-                          v-for="(path, idx) in selectedLib.paths"
-                          :key="idx"
-                          class="path-row-item"
-                        >
-                          <div class="input-glow-wrapper">
-                            <svg
-                              viewBox="0 0 24 24"
-                              width="14"
-                              height="14"
-                              fill="none"
-                              stroke="currentColor"
-                              stroke-width="2"
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                              class="path-svg"
-                            >
-                              <path
-                                d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-                              />
-                            </svg>
-                            <input
-                              v-model="selectedLib.paths[idx]"
-                              type="text"
-                              placeholder="绝对路径，如：/media/nas/电影"
-                              class="control-input flex-1"
-                            />
-                          </div>
-                          <button
-                            class="browse-action-btn"
-                            type="button"
-                            @click="handleBrowsePath(idx)"
-                          >
-                            浏览
-                          </button>
-                          <button
-                            class="remove-action-btn"
-                            type="button"
-                            @click="removePathField(idx)"
-                            :disabled="selectedLib.paths.length <= 1"
-                            title="删除路径"
-                          >
-                            <svg
-                              viewBox="0 0 24 24"
-                              width="14"
-                              height="14"
-                              fill="none"
-                              stroke="currentColor"
-                              stroke-width="2"
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                            >
-                              <line x1="18" y1="6" x2="6" y2="18" />
-                              <line x1="6" y1="6" x2="18" y2="18" />
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
-                      <button class="add-path-action-btn" type="button" @click="addPathField">
-                        <svg
-                          viewBox="0 0 24 24"
-                          width="12"
-                          height="12"
-                          fill="none"
-                          stroke="currentColor"
-                          stroke-width="2.5"
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
-                        >
-                          <line x1="12" y1="5" x2="12" y2="19" />
-                          <line x1="5" y1="12" x2="19" y2="12" />
-                        </svg>
-                        添加额外媒体目录
-                      </button>
-                    </div>
-                  </div>
-                </section>
-
-                <!-- Section 2: Metadata options -->
-                <section class="settings-card">
-                  <div class="card-header">
-                    <span class="indicator" />
-                    <h3>元数据与搜刮设置</h3>
-                  </div>
-
-                  <div class="card-body">
-                    <div class="form-group">
-                      <label>元数据搜刮源</label>
-                      <div class="scrapers-grid">
-                        <label
-                          class="scraper-item-card"
-                          :class="{ active: selectedLib.scrapers.includes('tmdb') }"
-                        >
-                          <input
-                            type="checkbox"
-                            :checked="selectedLib.scrapers.includes('tmdb')"
-                            @change="toggleScraper('tmdb')"
-                          />
-                          <span class="scraper-logo tmdb-logo">TMDB</span>
-                          <span class="scraper-name">The Movie DB</span>
-                        </label>
-
-                        <label
-                          class="scraper-item-card"
-                          :class="{ active: selectedLib.scrapers.includes('imdb') }"
-                        >
-                          <input
-                            type="checkbox"
-                            :checked="selectedLib.scrapers.includes('imdb')"
-                            @change="toggleScraper('imdb')"
-                          />
-                          <span class="scraper-logo imdb-logo">IMDb</span>
-                          <span class="scraper-name">Internet Movie DB</span>
-                        </label>
-
-                        <label
-                          class="scraper-item-card"
-                          :class="{ active: selectedLib.scrapers.includes('local') }"
-                        >
-                          <input
-                            type="checkbox"
-                            :checked="selectedLib.scrapers.includes('local')"
-                            @change="toggleScraper('local')"
-                          />
-                          <span class="scraper-logo nfo-logo">NFO</span>
-                          <span class="scraper-name">本地 NFO 配置文件</span>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div class="form-group">
-                      <label>搜刮元数据语言偏好</label>
-                      <BaseSelect
-                        v-model="selectedLib.metadataLanguage"
-                        :options="languageOptions"
-                        class="w-full"
-                      />
-                    </div>
-
-                    <div class="toggles-list">
-                      <div class="toggle-row-item">
-                        <div class="toggle-text">
-                          <span class="title">优先原语言海报</span>
-                          <span class="desc"
-                            >即使设定语言为中文，海报封面抓取也优先选用原产国语言版本。</span
-                          >
-                        </div>
-                        <label class="glow-switch">
-                          <input v-model="selectedLib.preferOriginalPoster" type="checkbox" />
-                          <span class="switch-slide-thumb" />
-                        </label>
-                      </div>
-
-                      <div class="toggle-row-item">
-                        <div class="toggle-text">
-                          <span class="title">图片本地物理缓存</span>
-                          <span class="desc"
-                            >开启时，搜刮的海报和剧照将自动缓存在本地服务器中，显著缩短前台渲染响应时间。</span
-                          >
-                        </div>
-                        <label class="glow-switch">
-                          <input v-model="selectedLib.imageCache" type="checkbox" />
-                          <span class="switch-slide-thumb" />
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-
-                <!-- Section 3: Sync and Performance -->
-                <section class="settings-card">
-                  <div class="card-header">
-                    <span class="indicator" />
-                    <h3>监控与同步选项</h3>
-                  </div>
-
-                  <div class="card-body">
-                    <div class="toggles-list">
-                      <div class="toggle-row-item">
-                        <div class="toggle-text">
-                          <span class="title">预加载媒体信息 (Preload)</span>
-                          <span class="desc"
-                            >利用后台任务静默提取视频编码、音轨声道布局、分辨率规格及字幕流。</span
-                          >
-                        </div>
-                        <label class="glow-switch">
-                          <input v-model="selectedLib.preloadMetadata" type="checkbox" />
-                          <span class="switch-slide-thumb" />
-                        </label>
-                      </div>
-
-                      <div class="toggle-row-item">
-                        <div class="toggle-text">
-                          <span class="title">开启实时文件系统监控 (Realtime Monitor)</span>
-                          <span class="desc"
-                            >使用 File Watcher
-                            监听，物理磁盘内一经新增或修改视频文件立即执行搜刮。</span
-                          >
-                        </div>
-                        <label class="glow-switch">
-                          <input v-model="selectedLib.realtimeMonitor" type="checkbox" />
-                          <span class="switch-slide-thumb" />
-                        </label>
-                      </div>
-
-                      <div class="toggle-row-item">
-                        <div class="toggle-text">
-                          <span class="title">消息推送通知</span>
-                          <span class="desc"
-                            >新视频搜刮入库成功后，向控制中心和配置推送终端发送即时消息。</span
-                          >
-                        </div>
-                        <label class="glow-switch">
-                          <input v-model="selectedLib.pushNotification" type="checkbox" />
-                          <span class="switch-slide-thumb" />
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-              </div>
-            </div>
-
-            <!-- Bottom Actions Inside Modal -->
-            <footer class="editor-actions-footer">
-              <button
-                v-if="!isNewLibrary"
-                class="action-btn-danger"
-                type="button"
-                @click="showDeleteConfirm = true"
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  width="14"
-                  height="14"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <polyline points="3 6 5 6 21 6" />
-                  <path
-                    d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
-                  />
-                  <line x1="10" y1="11" x2="10" y2="17" />
-                  <line x1="14" y1="11" x2="14" y2="17" />
-                </svg>
-                <span>删除媒体库</span>
-              </button>
-              <div class="spacer" />
-              <button class="action-btn-secondary" type="button" @click="selectedLib = null">
-                取消
-              </button>
-              <button class="action-btn-primary" type="button" @click="handleSaveLibrary">
-                保存修改
-              </button>
-            </footer>
-
-            <!-- Deletion Double Confirm In Modal -->
-            <Transition name="fade">
-              <div v-if="showDeleteConfirm" class="confirm-glass-overlay">
-                <div class="confirm-panel-card">
-                  <div class="warn-icon">
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="24"
-                      height="24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    >
-                      <path
-                        d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
-                      />
-                      <line x1="12" y1="9" x2="12" y2="13" />
-                      <line x1="12" y1="17" x2="12.01" y2="17" />
-                    </svg>
-                  </div>
-                  <h3>确认卸载媒体库【{{ selectedLib.name }}】吗？</h3>
-                  <p>
-                    卸载只会删除 Fbz 元数据映射及数据库索引，<b>绝不会</b>删除您磁盘上的视频源文件。
-                  </p>
-                  <div class="actions-row">
-                    <button
-                      class="confirm-btn cancel"
-                      type="button"
-                      @click="showDeleteConfirm = false"
-                    >
-                      取消
-                    </button>
-                    <button class="confirm-btn confirm" type="button" @click="handleDeleteLibrary">
-                      确认删除
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </Transition>
-          </div>
-        </div>
-      </Transition>
     </div>
 
-    <!-- TAB 2: Personalization (Profile settings) -->
+    <!-- 个人信息 -->
+    <AdminProfile v-else-if="route.name === 'admin-profile'" />
+
     <!-- 主题设置 -->
     <div v-else-if="route.name === 'admin-theme'" class="personalization-section">
       <div class="style-settings-stack">
@@ -895,51 +387,33 @@ function handleDeleteLibrary() {
       </div>
     </div>
 
-    <!-- 系统日志 -->
-    <div v-else-if="route.name === 'admin-logs'" class="messages-log-container">
-      <div class="messages-empty-state">
-        <svg
-          viewBox="0 0 24 24"
-          width="36"
-          height="36"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="empty-svg-icon"
-        >
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <path d="M14 2v6h6" />
-          <path d="M12 18v-6 M8 18v-4 M16 18v-2" />
-        </svg>
-        <h3>暂无系统日志提醒</h3>
-        <p>系统后台扫描任务运行正常，暂无新增日志信息。</p>
-      </div>
-    </div>
+    <!-- 媒体库排序 -->
+    <AdminLibSort v-else-if="route.name === 'admin-lib-sort'" />
 
-    <!-- 通用占位（尚未实现的页面） -->
-    <div v-else class="stub-container">
-      <div class="stub-state">
-        <svg
-          viewBox="0 0 24 24"
-          width="40"
-          height="40"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="stub-icon"
-        >
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
-        </svg>
-        <h3>{{ page.title }}</h3>
-        <p>该功能模块正在开发中，敬请期待。</p>
-      </div>
-    </div>
+    <!-- 元数据设置 -->
+    <AdminMetadata v-else-if="route.name === 'admin-metadata'" />
+
+    <!-- 转码设置 -->
+    <AdminTranscode v-else-if="route.name === 'admin-transcode'" />
+
+    <!-- 用户管理 -->
+    <AdminUsers v-else-if="route.name === 'admin-users'" />
+
+    <AdminUserEdit
+      v-else-if="route.name === 'admin-users-create' || route.name === 'admin-users-edit'"
+    />
+
+    <!-- 插件设置 -->
+    <AdminPlugins v-else-if="route.name === 'admin-plugins'" />
+
+    <!-- 元数据管理 -->
+    <AdminMetadataMgr v-else-if="route.name === 'admin-metadata-mgr'" />
+
+    <!-- 系统日志 -->
+    <AdminLogs v-else-if="route.name === 'admin-logs'" />
+
+    <!-- 关于 -->
+    <AdminAbout v-else-if="route.name === 'admin-about'" />
   </main>
 </template>
 
@@ -1018,11 +492,16 @@ function handleDeleteLibrary() {
   transition: all var(--fbz-motion-base);
   overflow: hidden;
   position: relative;
+  height: 160px;
 
   .card-cover {
-    position: relative;
-    height: 80px;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     overflow: hidden;
+    transform: translateZ(0);
+    z-index: 0;
 
     .cover-img {
       width: 100%;
@@ -1030,6 +509,8 @@ function handleDeleteLibrary() {
       object-fit: cover;
       display: block;
       transition: transform var(--fbz-motion-slow);
+      backface-visibility: hidden;
+      will-change: transform;
     }
 
     .cover-gradient {
@@ -1037,10 +518,34 @@ function handleDeleteLibrary() {
       inset: 0;
       background: linear-gradient(
         to bottom,
-        rgba(28, 28, 32, 0) 0%,
-        rgba(28, 28, 32, 0.7) 70%,
-        rgba(28, 28, 32, 1) 100%
+        rgba(10, 10, 11, 0.1) 0%,
+        rgba(10, 10, 11, 0.5) 45%,
+        rgba(10, 10, 11, 0.95) 100%
       );
+      z-index: 1;
+    }
+  }
+
+  &.has-cover {
+    .lib-name,
+    .num {
+      color: #ffffff;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    }
+    .lib-badge,
+    .lbl,
+    .path-val,
+    .path-icon {
+      color: rgba(255, 255, 255, 0.7);
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    }
+    .card-bottom {
+      border-top-color: rgba(255, 255, 255, 0.1);
+    }
+    .lib-icon-container {
+      background: rgba(10, 10, 11, 0.6);
+      backdrop-filter: blur(4px);
+      border-color: rgba(255, 255, 255, 0.1);
     }
   }
 
@@ -1056,7 +561,7 @@ function handleDeleteLibrary() {
   }
 
   &:hover {
-    border-color: var(--fbz-color-line-bright);
+    border-color: var(--fbz-color-brand-500);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
     transform: translateY(-1px);
 
@@ -1078,13 +583,10 @@ function handleDeleteLibrary() {
     padding: 16px 18px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    justify-content: space-between;
     position: relative;
-    z-index: 1;
-  }
-
-  &.has-cover .card-content {
-    margin-top: -20px;
+    z-index: 2;
+    height: 100%;
   }
 
   .card-top {
@@ -1194,7 +696,7 @@ function handleDeleteLibrary() {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  min-height: 120px;
+  height: 160px;
   color: var(--fbz-color-text-muted);
   cursor: pointer;
   transition: all var(--fbz-motion-base);
@@ -2009,6 +1511,44 @@ function handleDeleteLibrary() {
   h3 {
     margin: 0 0 6px;
     font-size: 15px;
+    font-weight: 700;
+    color: var(--fbz-color-text-soft);
+  }
+
+  p {
+    margin: 0;
+    font-size: var(--fbz-font-size-sm);
+  }
+}
+
+/* ---------- General Stub Page / Empty State ---------- */
+.stub-container {
+  border: 1px dashed var(--fbz-color-line-soft);
+  background: var(--fbz-color-panel-strong);
+  border-radius: 6px;
+  padding: 60px var(--fbz-space-5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.stub-state {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  color: var(--fbz-color-text-muted);
+
+  .stub-icon {
+    margin-bottom: var(--fbz-space-4);
+    color: var(--fbz-color-text-muted);
+    opacity: 0.4;
+  }
+
+  h3 {
+    margin: 0 0 8px;
+    font-size: 16px;
     font-weight: 700;
     color: var(--fbz-color-text-soft);
   }

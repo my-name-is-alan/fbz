@@ -37,6 +37,10 @@ use crate::{
             PluginPermissionRecord, PluginRepository, PluginScheduleDefinitionRecord,
             PluginStateError, PluginStateRecord, PluginSummaryRecord,
         },
+        signing::{
+            PLUGIN_PACKAGE_SIGNATURE_SCHEME, parse_ed25519_signature_hex,
+            plugin_package_signature_message, validate_plugin_signature_key_id,
+        },
     },
     state::AppState,
 };
@@ -45,8 +49,6 @@ const PLUGIN_PACKAGE_MANIFEST_PATH: &str = "manifest.json";
 const PLUGIN_PACKAGE_EXTRACTED_DIR: &str = "extracted";
 const MAX_PLUGIN_ZIP_ENTRIES: usize = 4096;
 const MAX_PLUGIN_ZIP_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
-const PLUGIN_PACKAGE_SIGNATURE_SCHEME: &str = "ed25519";
-const PLUGIN_PACKAGE_SIGNATURE_CONTEXT: &str = "fbz-plugin-package-v1";
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -1266,7 +1268,8 @@ fn validate_plugin_package_signature(
         ));
     };
 
-    let signature_bytes = parse_signature_hex(signature_hex)?;
+    let signature_bytes = parse_ed25519_signature_hex(signature_hex)
+        .map_err(|err| AppError::unprocessable(err.message()))?;
     let verifying_key = VerifyingKey::from_bytes(&trusted_key.public_key)
         .map_err(|_| AppError::internal("trusted plugin signature public key is invalid"))?;
     let signature_value = Signature::from_bytes(&signature_bytes);
@@ -1291,66 +1294,9 @@ fn parse_plugin_signature_envelope(signature: &str) -> Result<(&str, &str, &str)
             "plugin package signature must use ed25519:keyId:signatureHex",
         ));
     }
-    validate_plugin_signature_key_id(key_id)?;
+    validate_plugin_signature_key_id(key_id)
+        .map_err(|err| AppError::unprocessable(err.message()))?;
     Ok((scheme, key_id, signature_hex))
-}
-
-fn validate_plugin_signature_key_id(key_id: &str) -> Result<(), AppError> {
-    if key_id.len() > 64
-        || !key_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err(AppError::unprocessable(
-            "plugin package signature key id is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn parse_signature_hex(value: &str) -> Result<[u8; 64], AppError> {
-    if value.len() != 128 {
-        return Err(AppError::unprocessable(
-            "plugin package signature hex must be 128 characters",
-        ));
-    }
-    let bytes = parse_hex_bytes(value, "plugin package signature hex is invalid")?;
-    bytes
-        .try_into()
-        .map_err(|_| AppError::unprocessable("plugin package signature hex is invalid"))
-}
-
-fn parse_hex_bytes(value: &str, invalid_message: &'static str) -> Result<Vec<u8>, AppError> {
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    for index in (0..value.len()).step_by(2) {
-        let byte = u8::from_str_radix(&value[index..index + 2], 16)
-            .map_err(|_| AppError::unprocessable(invalid_message))?;
-        bytes.push(byte);
-    }
-    Ok(bytes)
-}
-
-fn plugin_package_signature_message(
-    validated_manifest: &ValidatedPluginManifest,
-    checksum_sha256: &[u8],
-) -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}",
-        PLUGIN_PACKAGE_SIGNATURE_CONTEXT,
-        validated_manifest.manifest.id.trim(),
-        validated_manifest.manifest.version.trim(),
-        hex_encode(checksum_sha256),
-        hex_encode(&validated_manifest.manifest_hash),
-    )
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
 }
 
 fn plugin_manifest_error_to_app_error(error: PluginManifestError) -> AppError {
@@ -1620,6 +1566,7 @@ mod tests {
     use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::*;
+    use crate::plugins::signing::hex_encode;
 
     #[test]
     fn package_path_must_be_relative_and_contained() {

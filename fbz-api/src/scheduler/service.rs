@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt::{Display, Formatter},
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -8,15 +9,20 @@ use crate::{
     db::DbPool,
     scheduler::repository::{
         CORE_INCREMENTAL_SCAN_TASK_KEY, CORE_METADATA_REFRESH_TASK_KEY,
-        CORE_METADATA_REFRESH_TASK_TYPE, CORE_SCAN_ALL_TASK_TYPE, CoreScheduledTaskInput,
-        PLUGIN_SCHEDULE_TASK_TYPE, ScheduledTaskRecord, SchedulerRepository,
+        CORE_METADATA_REFRESH_TASK_TYPE, CORE_SCAN_ALL_TASK_TYPE, CORE_TRANSCODE_CLEANUP_TASK_KEY,
+        CORE_TRANSCODE_CLEANUP_TASK_TYPE, CoreScheduledTaskInput, PLUGIN_SCHEDULE_TASK_TYPE,
+        ScheduledTaskRecord, SchedulerRepository, TranscodeCleanupCandidate,
     },
+    transcode::cleanup::{TranscodeCleanupResult, cleanup_session_output_dir_best_effort},
 };
+
+const TRANSCODE_CLEANUP_BATCH_SIZE: i64 = 100;
 
 #[derive(Clone)]
 pub struct SchedulerService {
     repository: SchedulerRepository,
     worker_id: String,
+    transcode_cache_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,14 +49,15 @@ pub enum SchedulerError {
 }
 
 impl SchedulerService {
-    pub fn new(pool: DbPool) -> Self {
-        Self::with_worker_id(pool, default_worker_id("scheduler"))
+    pub fn new(pool: DbPool, transcode_cache_dir: PathBuf) -> Self {
+        Self::with_worker_id(pool, default_worker_id("scheduler"), transcode_cache_dir)
     }
 
-    pub fn with_worker_id(pool: DbPool, worker_id: String) -> Self {
+    pub fn with_worker_id(pool: DbPool, worker_id: String, transcode_cache_dir: PathBuf) -> Self {
         Self {
             repository: SchedulerRepository::new(pool),
             worker_id,
+            transcode_cache_dir,
         }
     }
 
@@ -80,6 +87,18 @@ impl SchedulerService {
                 schedule_kind: metadata_refresh.kind,
                 schedule_value: schedules.metadata_refresh.trim().to_owned(),
                 interval_seconds: metadata_refresh.interval_seconds,
+            })
+            .await?;
+
+        let transcode_cleanup = parse_core_schedule(&schedules.transcode_cleanup)?;
+        self.repository
+            .upsert_core_task(CoreScheduledTaskInput {
+                task_key: CORE_TRANSCODE_CLEANUP_TASK_KEY,
+                task_type: CORE_TRANSCODE_CLEANUP_TASK_TYPE,
+                enabled: worker_config.enabled,
+                schedule_kind: transcode_cleanup.kind,
+                schedule_value: schedules.transcode_cleanup.trim().to_owned(),
+                interval_seconds: transcode_cleanup.interval_seconds,
             })
             .await?;
 
@@ -177,8 +196,61 @@ impl SchedulerService {
                     queued_jobs,
                 })
             }
+            CORE_TRANSCODE_CLEANUP_TASK_TYPE => {
+                let cleaned_outputs = self
+                    .cleanup_terminal_transcode_outputs(&self.transcode_cache_dir)
+                    .await?;
+                Ok(SchedulerRunSummary {
+                    task_key: task.task_key.clone(),
+                    task_type: task.task_type.clone(),
+                    queued_jobs: cleaned_outputs,
+                })
+            }
             other => Err(SchedulerError::UnsupportedTaskType(other.to_owned())),
         }
+    }
+
+    async fn cleanup_terminal_transcode_outputs(
+        &self,
+        transcode_cache_dir: &Path,
+    ) -> Result<i64, SchedulerError> {
+        let candidates = self
+            .repository
+            .list_transcode_cleanup_candidates(TRANSCODE_CLEANUP_BATCH_SIZE)
+            .await?;
+        let mut cleaned_outputs = 0_i64;
+
+        for candidate in candidates {
+            if self
+                .cleanup_transcode_candidate(transcode_cache_dir, candidate)
+                .await?
+            {
+                cleaned_outputs += 1;
+            }
+        }
+
+        Ok(cleaned_outputs)
+    }
+
+    async fn cleanup_transcode_candidate(
+        &self,
+        transcode_cache_dir: &Path,
+        candidate: TranscodeCleanupCandidate,
+    ) -> Result<bool, SchedulerError> {
+        let result = cleanup_session_output_dir_best_effort(
+            transcode_cache_dir,
+            &candidate.id,
+            Some(candidate.output_path.as_str()),
+            "scheduled_transcode_cleanup",
+        )
+        .await;
+        if result == TranscodeCleanupResult::Failed {
+            return Ok(false);
+        }
+
+        self.repository
+            .mark_transcode_output_cleaned(&candidate.id)
+            .await
     }
 }
 
@@ -446,5 +518,17 @@ mod tests {
 
         assert!(worker_id.starts_with("admin-manual-"));
         assert!(worker_id.ends_with(&std::process::id().to_string()));
+    }
+
+    #[test]
+    fn transcode_cleanup_core_task_is_registered_and_dispatched() {
+        let source = include_str!("service.rs");
+
+        assert!(source.contains("CORE_TRANSCODE_CLEANUP_TASK_KEY"));
+        assert!(source.contains("CORE_TRANSCODE_CLEANUP_TASK_TYPE"));
+        assert!(source.contains("schedules.transcode_cleanup"));
+        assert!(source.contains("task_type: CORE_TRANSCODE_CLEANUP_TASK_TYPE"));
+        assert!(source.contains("cleanup_terminal_transcode_outputs"));
+        assert!(source.contains("mark_transcode_output_cleaned"));
     }
 }

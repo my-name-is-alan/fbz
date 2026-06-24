@@ -39,7 +39,10 @@ use crate::{
         SchedulerError, SchedulerRunSummary, SchedulerService, default_worker_id,
     },
     state::AppState,
-    transcode::repository::{TranscodeRepository, TranscodeSessionFilter, TranscodeSessionRecord},
+    transcode::{
+        cleanup::cleanup_session_output_dir_best_effort,
+        repository::{TranscodeRepository, TranscodeSessionFilter, TranscodeSessionRecord},
+    },
 };
 
 const MAX_NOTIFICATION_TARGETS_LIST_LIMIT: i64 = 200;
@@ -1391,11 +1394,14 @@ pub async fn run_scheduled_task(
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let summary =
-        SchedulerService::with_worker_id(database.clone(), default_worker_id("admin-manual"))
-            .run_task_once(task_key)
-            .await
-            .map_err(scheduler_error_to_app_error)?;
+    let summary = SchedulerService::with_worker_id(
+        database.clone(),
+        default_worker_id("admin-manual"),
+        state.config().storage.transcode_cache_dir.clone(),
+    )
+    .run_task_once(task_key)
+    .await
+    .map_err(scheduler_error_to_app_error)?;
 
     Ok(Json(ScheduledTaskRunDto::from(summary)))
 }
@@ -1467,6 +1473,13 @@ pub async fn cancel_transcoding_session(
         .await
         .map_err(|err| AppError::internal(format!("failed to cancel transcoding session: {err}")))?
     {
+        cleanup_session_output_dir_best_effort(
+            &state.config().storage.transcode_cache_dir,
+            &session.id,
+            session.output_path.as_deref(),
+            "admin_cancel",
+        )
+        .await;
         return Ok(Json(TranscodeSessionDto::from(session)));
     }
 
@@ -3565,6 +3578,15 @@ mod tests {
         assert!(validate_uuid_public_id("jobId", "00000000-0000-0000-0000-000000000001").is_ok());
         assert!(validate_uuid_public_id("jobId", "job-1").is_err());
         assert!(validate_uuid_public_id("jobId", "00000000-0000-0000-0000-00000000000x").is_err());
+    }
+
+    #[test]
+    fn admin_transcode_cancel_attempts_output_cleanup() {
+        let routes = include_str!("routes.rs");
+
+        assert!(routes.contains("cleanup_session_output_dir_best_effort"));
+        assert!(routes.contains("state.config().storage.transcode_cache_dir"));
+        assert!(routes.contains("\"admin_cancel\""));
     }
 
     #[test]

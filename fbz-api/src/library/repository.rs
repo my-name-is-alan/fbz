@@ -438,6 +438,16 @@ pub struct ItemPrefixesInput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemsFiltersInput {
+    pub user_id: i64,
+    pub parent_id: Option<String>,
+    pub recursive: bool,
+    pub item_types: ItemTypeFilter,
+    pub media_types: StringListFilter,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenreListInput {
     pub user_id: i64,
     pub parent_id: Option<String>,
@@ -497,6 +507,93 @@ pub struct PersonListInput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StudioListInput {
+    pub user_id: i64,
+    pub parent_id: Option<String>,
+    pub start_index: i64,
+    pub limit: i64,
+    pub recursive: bool,
+    pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
+    pub name_starts_with_or_greater: Option<String>,
+    pub sort_direction: SortDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagListInput {
+    pub user_id: i64,
+    pub parent_id: Option<String>,
+    pub start_index: i64,
+    pub limit: i64,
+    pub recursive: bool,
+    pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
+    pub name_starts_with_or_greater: Option<String>,
+    pub sort_direction: SortDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficialRatingListInput {
+    pub user_id: i64,
+    pub parent_id: Option<String>,
+    pub start_index: i64,
+    pub limit: i64,
+    pub recursive: bool,
+    pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
+    pub name_starts_with_or_greater: Option<String>,
+    pub sort_direction: SortDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YearListInput {
+    pub user_id: i64,
+    pub parent_id: Option<String>,
+    pub start_index: i64,
+    pub limit: i64,
+    pub recursive: bool,
+    pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
+    pub name_starts_with_or_greater: Option<String>,
+    pub sort_direction: SortDirection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TechnicalFacetKind {
+    Container,
+    AudioCodec,
+    VideoCodec,
+    SubtitleCodec,
+    StreamLanguage,
+}
+
+impl TechnicalFacetKind {
+    pub fn as_sql_key(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::AudioCodec => "audio_codec",
+            Self::VideoCodec => "video_codec",
+            Self::SubtitleCodec => "subtitle_codec",
+            Self::StreamLanguage => "stream_language",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TechnicalFacetListInput {
+    pub user_id: i64,
+    pub parent_id: Option<String>,
+    pub start_index: i64,
+    pub limit: i64,
+    pub recursive: bool,
+    pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
+    pub name_starts_with_or_greater: Option<String>,
+    pub sort_direction: SortDirection,
+    pub kind: TechnicalFacetKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShowItemsInput {
     pub user_id: i64,
     pub series_id: String,
@@ -535,6 +632,14 @@ pub struct GenreRecord {
     pub total_record_count: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemsFiltersResult {
+    pub genres: Vec<String>,
+    pub tags: Vec<String>,
+    pub official_ratings: Vec<String>,
+    pub years: Vec<i32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtistListResult {
     pub items: Vec<ArtistRecord>,
@@ -555,6 +660,36 @@ pub struct PersonListResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StudioListResult {
+    pub items: Vec<StudioRecord>,
+    pub total_record_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagListResult {
+    pub items: Vec<TagRecord>,
+    pub total_record_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficialRatingListResult {
+    pub items: Vec<OfficialRatingRecord>,
+    pub total_record_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YearListResult {
+    pub items: Vec<YearRecord>,
+    pub total_record_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TechnicalFacetListResult {
+    pub items: Vec<TechnicalFacetRecord>,
+    pub total_record_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaylistListResult {
     pub items: Vec<PlaylistRecord>,
     pub total_record_count: u32,
@@ -562,6 +697,39 @@ pub struct PlaylistListResult {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersonRecord {
+    pub id: String,
+    pub name: String,
+    pub total_record_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StudioRecord {
+    pub id: String,
+    pub name: String,
+    pub total_record_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagRecord {
+    pub id: String,
+    pub name: String,
+    pub total_record_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfficialRatingRecord {
+    pub name: String,
+    pub total_record_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YearRecord {
+    pub year: i32,
+    pub total_record_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TechnicalFacetRecord {
     pub id: String,
     pub name: String,
     pub total_record_count: i64,
@@ -693,6 +861,16 @@ impl LibraryRepository {
         .await?;
 
         media_folders_from_rows(rows)
+    }
+
+    pub async fn list_admin_physical_paths(&self) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query(admin_physical_paths_query())
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get::<String, _>("path"))
+            .collect()
     }
 
     pub async fn find_user_view_by_id(
@@ -941,6 +1119,168 @@ impl LibraryRepository {
         browse_result_from_rows(rows)
     }
 
+    pub async fn list_user_item_filters(
+        &self,
+        input: ItemsFiltersInput,
+    ) -> Result<ItemsFiltersResult, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            with recursive requested_parent as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            allowed_libraries as (
+                select l.id,
+                       l.public_id
+                from libraries l
+                join library_permissions lp on lp.library_id = l.id
+                where lp.user_id = $1
+                  and lp.can_view = true
+                  and l.is_hidden = false
+            ),
+            parent_library as (
+                select al.id as library_id
+                from allowed_libraries al
+                join requested_parent rp on rp.public_id = al.public_id
+            ),
+            parent_item as (
+                select mi.id as item_id,
+                       mi.library_id
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                join requested_parent rp on rp.public_id = mi.public_id
+                where mi.is_deleted = false
+            ),
+            parent_descendants as (
+                select pi.item_id
+                from parent_item pi
+                union all
+                select child.id
+                from media_items child
+                join parent_descendants parent on parent.item_id = child.parent_id
+                where child.is_deleted = false
+            ),
+            visible_items as (
+                select
+                    mi.id,
+                    mi.item_type,
+                    btrim(mi.official_rating) as official_rating,
+                    mi.production_year
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                left join parent_library pl on pl.library_id = mi.library_id
+                left join parent_item pi on pi.library_id = mi.library_id
+                where mi.is_deleted = false
+                  and (
+                        $2::text is null
+                     or pl.library_id is not null
+                     or (
+                            pi.item_id is not null
+                        and (
+                                mi.id = pi.item_id
+                             or ($7::boolean = false and mi.parent_id = pi.item_id)
+                             or ($7::boolean = true and mi.id in (
+                                    select item_id from parent_descendants
+                                ))
+                        )
+                     )
+                  )
+                  and (
+                        $3::boolean = false
+                     or mi.item_type = any($4::text[])
+                  )
+                  and (
+                        $5::boolean = false
+                     or case
+                            when mi.item_type in ('movie', 'series', 'season', 'episode') then 'video'
+                            when mi.item_type in ('artist', 'album', 'track') then 'audio'
+                            else null
+                        end = any($6::text[])
+                  )
+            ),
+            genre_candidates as (
+                select distinct
+                    g.name
+                from media_item_genres mig
+                join visible_items vi on vi.id = mig.media_item_id
+                join genres g on g.id = mig.genre_id
+            ),
+            tag_candidates as (
+                select distinct
+                    t.name
+                from media_item_tags mit
+                join visible_items vi on vi.id = mit.media_item_id
+                join tags t on t.id = mit.tag_id
+            ),
+            rating_candidates as (
+                select distinct
+                    vi.official_rating as name
+                from visible_items vi
+                where vi.official_rating is not null
+                  and length(vi.official_rating) > 0
+            ),
+            year_candidates as (
+                select distinct
+                    vi.production_year as year
+                from visible_items vi
+                where vi.production_year is not null
+            )
+            select
+                coalesce((
+                    select array_agg(name order by lower(name), name)
+                    from (
+                        select name
+                        from genre_candidates
+                        order by lower(name), name
+                        limit $8
+                    ) selected_genres
+                ), array[]::text[]) as genres,
+                coalesce((
+                    select array_agg(name order by lower(name), name)
+                    from (
+                        select name
+                        from tag_candidates
+                        order by lower(name), name
+                        limit $8
+                    ) selected_tags
+                ), array[]::text[]) as tags,
+                coalesce((
+                    select array_agg(name order by lower(name), name)
+                    from (
+                        select name
+                        from rating_candidates
+                        order by lower(name), name
+                        limit $8
+                    ) selected_ratings
+                ), array[]::text[]) as official_ratings,
+                coalesce((
+                    select array_agg(year order by year desc)
+                    from (
+                        select year
+                        from year_candidates
+                        order by year desc
+                        limit $8
+                    ) selected_years
+                ), array[]::int[]) as years
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.parent_id)
+        .bind(input.item_types.enabled)
+        .bind(&input.item_types.item_types)
+        .bind(input.media_types.enabled)
+        .bind(&input.media_types.values)
+        .bind(input.recursive)
+        .bind(input.limit)
+        .fetch_one(&self.pool)
+        .await?;
+
+        items_filters_result_from_row(row)
+    }
+
     pub async fn list_user_genres(
         &self,
         input: GenreListInput,
@@ -1100,6 +1440,642 @@ impl LibraryRepository {
         .await?
         .map(GenreRecord::from_row)
         .transpose()
+    }
+
+    pub async fn list_user_studios(
+        &self,
+        input: StudioListInput,
+    ) -> Result<StudioListResult, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            with recursive requested_parent as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            allowed_libraries as (
+                select l.id,
+                       l.public_id
+                from libraries l
+                join library_permissions lp on lp.library_id = l.id
+                where lp.user_id = $1
+                  and lp.can_view = true
+                  and l.is_hidden = false
+            ),
+            parent_library as (
+                select al.id as library_id
+                from allowed_libraries al
+                join requested_parent rp on rp.public_id = al.public_id
+            ),
+            parent_item as (
+                select mi.id as item_id,
+                       mi.library_id
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                join requested_parent rp on rp.public_id = mi.public_id
+                where mi.is_deleted = false
+            ),
+            parent_descendants as (
+                select pi.item_id
+                from parent_item pi
+                union all
+                select child.id
+                from media_items child
+                join parent_descendants parent on parent.item_id = child.parent_id
+                where child.is_deleted = false
+            ),
+            studio_candidates as (
+                select distinct
+                    s.public_id::text as id,
+                    s.name
+                from media_item_studios mis
+                join studios s on s.id = mis.studio_id
+                join media_items mi on mi.id = mis.media_item_id
+                join allowed_libraries al on al.id = mi.library_id
+                left join parent_library pl on pl.library_id = mi.library_id
+                left join parent_item pi on pi.library_id = mi.library_id
+                where mi.is_deleted = false
+                  and (
+                        $2::text is null
+                     or pl.library_id is not null
+                     or (
+                            pi.item_id is not null
+                        and (
+                                mi.id = pi.item_id
+                             or ($5::boolean = false and mi.parent_id = pi.item_id)
+                             or ($5::boolean = true and mi.id in (
+                                    select item_id from parent_descendants
+                                ))
+                        )
+                     )
+                  )
+                  and (
+                        $6::text is null
+                     or lower(s.name) like '%' || lower($6::text) || '%'
+                  )
+                  and (
+                        $7::text is null
+                     or lower(s.name) like lower($7::text) || '%'
+                  )
+                  and (
+                        $8::text is null
+                     or lower(s.name) >= lower($8::text)
+                  )
+            )
+            select
+                id,
+                name,
+                count(*) over() as total_record_count
+            from studio_candidates
+            order by
+                case when $9 = 'asc' then lower(name) end asc nulls last,
+                case when $9 = 'desc' then lower(name) end desc nulls last,
+                id asc
+            limit $3
+            offset $4
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.parent_id)
+        .bind(input.limit)
+        .bind(input.start_index)
+        .bind(input.recursive)
+        .bind(input.search_term)
+        .bind(input.name_starts_with)
+        .bind(input.name_starts_with_or_greater)
+        .bind(input.sort_direction.as_sql_key())
+        .fetch_all(&self.pool)
+        .await?;
+
+        studio_result_from_rows(rows)
+    }
+
+    pub async fn find_user_studio_by_name(
+        &self,
+        user_id: i64,
+        name: &str,
+    ) -> Result<Option<StudioRecord>, sqlx::Error> {
+        sqlx::query(
+            r#"
+            select
+                s.public_id::text as id,
+                s.name,
+                1::bigint as total_record_count
+            from studios s
+            where s.name_normalized = lower($2)
+              and exists (
+                    select 1
+                    from media_item_studios mis
+                    join media_items mi on mi.id = mis.media_item_id
+                    join libraries l on l.id = mi.library_id
+                    join library_permissions lp on lp.library_id = mi.library_id
+                    where mis.studio_id = s.id
+                      and lp.user_id = $1
+                      and lp.can_view = true
+                      and mi.is_deleted = false
+                      and l.is_hidden = false
+              )
+            order by s.id
+            limit 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(name.trim().to_lowercase())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(StudioRecord::from_row)
+        .transpose()
+    }
+
+    pub async fn list_user_tags(&self, input: TagListInput) -> Result<TagListResult, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            with recursive requested_parent as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            allowed_libraries as (
+                select l.id,
+                       l.public_id
+                from libraries l
+                join library_permissions lp on lp.library_id = l.id
+                where lp.user_id = $1
+                  and lp.can_view = true
+                  and l.is_hidden = false
+            ),
+            parent_library as (
+                select al.id as library_id
+                from allowed_libraries al
+                join requested_parent rp on rp.public_id = al.public_id
+            ),
+            parent_item as (
+                select mi.id as item_id,
+                       mi.library_id
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                join requested_parent rp on rp.public_id = mi.public_id
+                where mi.is_deleted = false
+            ),
+            parent_descendants as (
+                select pi.item_id
+                from parent_item pi
+                union all
+                select child.id
+                from media_items child
+                join parent_descendants parent on parent.item_id = child.parent_id
+                where child.is_deleted = false
+            ),
+            tag_candidates as (
+                select distinct
+                    t.id::text as id,
+                    t.name
+                from media_item_tags mit
+                join tags t on t.id = mit.tag_id
+                join media_items mi on mi.id = mit.media_item_id
+                join allowed_libraries al on al.id = mi.library_id
+                left join parent_library pl on pl.library_id = mi.library_id
+                left join parent_item pi on pi.library_id = mi.library_id
+                where mi.is_deleted = false
+                  and (
+                        $2::text is null
+                     or pl.library_id is not null
+                     or (
+                            pi.item_id is not null
+                        and (
+                                mi.id = pi.item_id
+                             or ($5::boolean = false and mi.parent_id = pi.item_id)
+                             or ($5::boolean = true and mi.id in (
+                                    select item_id from parent_descendants
+                                ))
+                        )
+                     )
+                  )
+                  and (
+                        $6::text is null
+                     or lower(t.name) like '%' || lower($6::text) || '%'
+                  )
+                  and (
+                        $7::text is null
+                     or lower(t.name) like lower($7::text) || '%'
+                  )
+                  and (
+                        $8::text is null
+                     or lower(t.name) >= lower($8::text)
+                  )
+            )
+            select
+                id,
+                name,
+                count(*) over() as total_record_count
+            from tag_candidates
+            order by
+                case when $9 = 'asc' then lower(name) end asc nulls last,
+                case when $9 = 'desc' then lower(name) end desc nulls last,
+                id asc
+            limit $3
+            offset $4
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.parent_id)
+        .bind(input.limit)
+        .bind(input.start_index)
+        .bind(input.recursive)
+        .bind(input.search_term)
+        .bind(input.name_starts_with)
+        .bind(input.name_starts_with_or_greater)
+        .bind(input.sort_direction.as_sql_key())
+        .fetch_all(&self.pool)
+        .await?;
+
+        tag_result_from_rows(rows)
+    }
+
+    pub async fn list_user_official_ratings(
+        &self,
+        input: OfficialRatingListInput,
+    ) -> Result<OfficialRatingListResult, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            with recursive requested_parent as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            allowed_libraries as (
+                select l.id,
+                       l.public_id
+                from libraries l
+                join library_permissions lp on lp.library_id = l.id
+                where lp.user_id = $1
+                  and lp.can_view = true
+                  and l.is_hidden = false
+            ),
+            parent_library as (
+                select al.id as library_id
+                from allowed_libraries al
+                join requested_parent rp on rp.public_id = al.public_id
+            ),
+            parent_item as (
+                select mi.id as item_id,
+                       mi.library_id
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                join requested_parent rp on rp.public_id = mi.public_id
+                where mi.is_deleted = false
+            ),
+            parent_descendants as (
+                select pi.item_id
+                from parent_item pi
+                union all
+                select child.id
+                from media_items child
+                join parent_descendants parent on parent.item_id = child.parent_id
+                where child.is_deleted = false
+            ),
+            rating_candidates as (
+                select distinct
+                    btrim(mi.official_rating) as name
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                left join parent_library pl on pl.library_id = mi.library_id
+                left join parent_item pi on pi.library_id = mi.library_id
+                where mi.is_deleted = false
+                  and mi.official_rating is not null
+                  and length(btrim(mi.official_rating)) > 0
+                  and (
+                        $2::text is null
+                     or pl.library_id is not null
+                     or (
+                            pi.item_id is not null
+                        and (
+                                mi.id = pi.item_id
+                             or ($5::boolean = false and mi.parent_id = pi.item_id)
+                             or ($5::boolean = true and mi.id in (
+                                    select item_id from parent_descendants
+                                ))
+                        )
+                     )
+                  )
+                  and (
+                        $6::text is null
+                     or lower(mi.official_rating) like '%' || lower($6::text) || '%'
+                  )
+                  and (
+                        $7::text is null
+                     or lower(mi.official_rating) like lower($7::text) || '%'
+                  )
+                  and (
+                        $8::text is null
+                     or lower(mi.official_rating) >= lower($8::text)
+                  )
+            )
+            select
+                name,
+                count(*) over() as total_record_count
+            from rating_candidates
+            order by
+                case when $9 = 'asc' then lower(name) end asc nulls last,
+                case when $9 = 'desc' then lower(name) end desc nulls last,
+                name asc
+            limit $3
+            offset $4
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.parent_id)
+        .bind(input.limit)
+        .bind(input.start_index)
+        .bind(input.recursive)
+        .bind(input.search_term)
+        .bind(input.name_starts_with)
+        .bind(input.name_starts_with_or_greater)
+        .bind(input.sort_direction.as_sql_key())
+        .fetch_all(&self.pool)
+        .await?;
+
+        official_rating_result_from_rows(rows)
+    }
+
+    pub async fn list_user_years(
+        &self,
+        input: YearListInput,
+    ) -> Result<YearListResult, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            with recursive requested_parent as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            allowed_libraries as (
+                select l.id,
+                       l.public_id
+                from libraries l
+                join library_permissions lp on lp.library_id = l.id
+                where lp.user_id = $1
+                  and lp.can_view = true
+                  and l.is_hidden = false
+            ),
+            parent_library as (
+                select al.id as library_id
+                from allowed_libraries al
+                join requested_parent rp on rp.public_id = al.public_id
+            ),
+            parent_item as (
+                select mi.id as item_id,
+                       mi.library_id
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                join requested_parent rp on rp.public_id = mi.public_id
+                where mi.is_deleted = false
+            ),
+            parent_descendants as (
+                select pi.item_id
+                from parent_item pi
+                union all
+                select child.id
+                from media_items child
+                join parent_descendants parent on parent.item_id = child.parent_id
+                where child.is_deleted = false
+            ),
+            year_candidates as (
+                select distinct
+                    mi.production_year as year
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                left join parent_library pl on pl.library_id = mi.library_id
+                left join parent_item pi on pi.library_id = mi.library_id
+                where mi.is_deleted = false
+                  and mi.production_year is not null
+                  and (
+                        $2::text is null
+                     or pl.library_id is not null
+                     or (
+                            pi.item_id is not null
+                        and (
+                                mi.id = pi.item_id
+                             or ($5::boolean = false and mi.parent_id = pi.item_id)
+                             or ($5::boolean = true and mi.id in (
+                                    select item_id from parent_descendants
+                                ))
+                        )
+                     )
+                  )
+                  and (
+                        $6::text is null
+                     or mi.production_year::text like '%' || $6::text || '%'
+                  )
+                  and (
+                        $7::text is null
+                     or mi.production_year::text like $7::text || '%'
+                  )
+                  and (
+                        $8::text is null
+                     or mi.production_year::text >= $8::text
+                  )
+            )
+            select
+                year,
+                count(*) over() as total_record_count
+            from year_candidates
+            order by
+                case when $9 = 'asc' then year end asc nulls last,
+                case when $9 = 'desc' then year end desc nulls last,
+                year asc
+            limit $3
+            offset $4
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.parent_id)
+        .bind(input.limit)
+        .bind(input.start_index)
+        .bind(input.recursive)
+        .bind(input.search_term)
+        .bind(input.name_starts_with)
+        .bind(input.name_starts_with_or_greater)
+        .bind(input.sort_direction.as_sql_key())
+        .fetch_all(&self.pool)
+        .await?;
+
+        year_result_from_rows(rows)
+    }
+
+    pub async fn list_user_technical_facets(
+        &self,
+        input: TechnicalFacetListInput,
+    ) -> Result<TechnicalFacetListResult, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            with recursive requested_parent as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            allowed_libraries as (
+                select l.id,
+                       l.public_id
+                from libraries l
+                join library_permissions lp on lp.library_id = l.id
+                where lp.user_id = $1
+                  and lp.can_view = true
+                  and l.is_hidden = false
+            ),
+            parent_library as (
+                select al.id as library_id
+                from allowed_libraries al
+                join requested_parent rp on rp.public_id = al.public_id
+            ),
+            parent_item as (
+                select mi.id as item_id,
+                       mi.library_id
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                join requested_parent rp on rp.public_id = mi.public_id
+                where mi.is_deleted = false
+            ),
+            parent_descendants as (
+                select pi.item_id
+                from parent_item pi
+                union all
+                select child.id
+                from media_items child
+                join parent_descendants parent on parent.item_id = child.parent_id
+                where child.is_deleted = false
+            ),
+            item_scope as (
+                select mi.id
+                from media_items mi
+                join allowed_libraries al on al.id = mi.library_id
+                left join parent_library pl on pl.library_id = mi.library_id
+                left join parent_item pi on pi.library_id = mi.library_id
+                where mi.is_deleted = false
+                  and (
+                        $2::text is null
+                     or pl.library_id is not null
+                     or (
+                            pi.item_id is not null
+                        and (
+                                mi.id = pi.item_id
+                             or ($5::boolean = false and mi.parent_id = pi.item_id)
+                             or ($5::boolean = true and mi.id in (
+                                    select item_id from parent_descendants
+                                ))
+                        )
+                     )
+                  )
+            ),
+            facet_candidates as (
+                select distinct
+                    btrim(mf.container) as name
+                from item_scope mi
+                join media_files mf on mf.media_item_id = mi.id
+                where $9 = 'container'
+                  and mf.container is not null
+                  and length(btrim(mf.container)) > 0
+
+                union all
+
+                select distinct
+                    btrim(ms.codec) as name
+                from item_scope mi
+                join media_files mf on mf.media_item_id = mi.id
+                join media_streams ms on ms.media_file_id = mf.id
+                where $9 = 'audio_codec'
+                  and ms.stream_type = 'audio'
+                  and ms.codec is not null
+                  and length(btrim(ms.codec)) > 0
+
+                union all
+
+                select distinct
+                    btrim(ms.codec) as name
+                from item_scope mi
+                join media_files mf on mf.media_item_id = mi.id
+                join media_streams ms on ms.media_file_id = mf.id
+                where $9 = 'video_codec'
+                  and ms.stream_type = 'video'
+                  and ms.codec is not null
+                  and length(btrim(ms.codec)) > 0
+
+                union all
+
+                select distinct
+                    btrim(ms.codec) as name
+                from item_scope mi
+                join media_files mf on mf.media_item_id = mi.id
+                join media_streams ms on ms.media_file_id = mf.id
+                where $9 = 'subtitle_codec'
+                  and ms.stream_type = 'subtitle'
+                  and ms.codec is not null
+                  and length(btrim(ms.codec)) > 0
+
+                union all
+
+                select distinct
+                    btrim(ms.language) as name
+                from item_scope mi
+                join media_files mf on mf.media_item_id = mi.id
+                join media_streams ms on ms.media_file_id = mf.id
+                where $9 = 'stream_language'
+                  and ms.language is not null
+                  and length(btrim(ms.language)) > 0
+            ),
+            filtered_facets as (
+                select name
+                from facet_candidates
+                where (
+                        $6::text is null
+                     or lower(name) like '%' || lower($6::text) || '%'
+                  )
+                  and (
+                        $7::text is null
+                     or lower(name) like lower($7::text) || '%'
+                  )
+                  and (
+                        $8::text is null
+                     or lower(name) >= lower($8::text)
+                  )
+            )
+            select
+                name as id,
+                name,
+                count(*) over() as total_record_count
+            from filtered_facets
+            order by
+                case when $10 = 'asc' then lower(name) end asc nulls last,
+                case when $10 = 'desc' then lower(name) end desc nulls last,
+                name asc
+            limit $3
+            offset $4
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.parent_id)
+        .bind(input.limit)
+        .bind(input.start_index)
+        .bind(input.recursive)
+        .bind(input.search_term)
+        .bind(input.name_starts_with)
+        .bind(input.name_starts_with_or_greater)
+        .bind(input.kind.as_sql_key())
+        .bind(input.sort_direction.as_sql_key())
+        .fetch_all(&self.pool)
+        .await?;
+
+        technical_facet_result_from_rows(rows)
     }
 
     pub async fn list_user_artists(
@@ -3600,6 +4576,15 @@ fn browse_result_lower_bound_from_rows(
     })
 }
 
+fn items_filters_result_from_row(row: PgRow) -> Result<ItemsFiltersResult, sqlx::Error> {
+    Ok(ItemsFiltersResult {
+        genres: row.try_get::<Vec<String>, _>("genres")?,
+        tags: row.try_get::<Vec<String>, _>("tags")?,
+        official_ratings: row.try_get::<Vec<String>, _>("official_ratings")?,
+        years: row.try_get::<Vec<i32>, _>("years")?,
+    })
+}
+
 fn genre_result_from_rows(rows: Vec<PgRow>) -> Result<GenreListResult, sqlx::Error> {
     let total_record_count = rows
         .first()
@@ -3657,6 +4642,105 @@ fn person_result_from_rows(rows: Vec<PgRow>) -> Result<PersonListResult, sqlx::E
     })
 }
 
+fn studio_result_from_rows(rows: Vec<PgRow>) -> Result<StudioListResult, sqlx::Error> {
+    let total_record_count = rows
+        .first()
+        .map(|row| row.try_get::<i64, _>("total_record_count"))
+        .transpose()?
+        .unwrap_or(0)
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let items = rows
+        .into_iter()
+        .map(StudioRecord::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(StudioListResult {
+        items,
+        total_record_count,
+    })
+}
+
+fn tag_result_from_rows(rows: Vec<PgRow>) -> Result<TagListResult, sqlx::Error> {
+    let total_record_count = rows
+        .first()
+        .map(|row| row.try_get::<i64, _>("total_record_count"))
+        .transpose()?
+        .unwrap_or(0)
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let items = rows
+        .into_iter()
+        .map(TagRecord::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(TagListResult {
+        items,
+        total_record_count,
+    })
+}
+
+fn official_rating_result_from_rows(
+    rows: Vec<PgRow>,
+) -> Result<OfficialRatingListResult, sqlx::Error> {
+    let total_record_count = rows
+        .first()
+        .map(|row| row.try_get::<i64, _>("total_record_count"))
+        .transpose()?
+        .unwrap_or(0)
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let items = rows
+        .into_iter()
+        .map(OfficialRatingRecord::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(OfficialRatingListResult {
+        items,
+        total_record_count,
+    })
+}
+
+fn year_result_from_rows(rows: Vec<PgRow>) -> Result<YearListResult, sqlx::Error> {
+    let total_record_count = rows
+        .first()
+        .map(|row| row.try_get::<i64, _>("total_record_count"))
+        .transpose()?
+        .unwrap_or(0)
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let items = rows
+        .into_iter()
+        .map(YearRecord::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(YearListResult {
+        items,
+        total_record_count,
+    })
+}
+
+fn technical_facet_result_from_rows(
+    rows: Vec<PgRow>,
+) -> Result<TechnicalFacetListResult, sqlx::Error> {
+    let total_record_count = rows
+        .first()
+        .map(|row| row.try_get::<i64, _>("total_record_count"))
+        .transpose()?
+        .unwrap_or(0)
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let items = rows
+        .into_iter()
+        .map(TechnicalFacetRecord::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(TechnicalFacetListResult {
+        items,
+        total_record_count,
+    })
+}
+
 fn playlist_result_from_rows(rows: Vec<PgRow>) -> Result<PlaylistListResult, sqlx::Error> {
     let total_record_count = rows
         .first()
@@ -3674,6 +4758,18 @@ fn playlist_result_from_rows(rows: Vec<PgRow>) -> Result<PlaylistListResult, sql
         items,
         total_record_count,
     })
+}
+
+fn admin_physical_paths_query() -> &'static str {
+    r#"
+            select
+                nullif(trim(lp.path), '') as path
+            from library_paths lp
+            join libraries l on l.id = lp.library_id
+            where lp.is_enabled = true
+              and nullif(trim(lp.path), '') is not null
+            order by l.name, lp.path, lp.id
+            "#
 }
 
 fn media_folders_from_rows(rows: Vec<PgRow>) -> Result<Vec<UserMediaFolderRecord>, sqlx::Error> {
@@ -3755,6 +4851,54 @@ impl ArtistRecord {
 }
 
 impl PersonRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            total_record_count: row.try_get("total_record_count")?,
+        })
+    }
+}
+
+impl StudioRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            total_record_count: row.try_get("total_record_count")?,
+        })
+    }
+}
+
+impl TagRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            total_record_count: row.try_get("total_record_count")?,
+        })
+    }
+}
+
+impl OfficialRatingRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            name: row.try_get("name")?,
+            total_record_count: row.try_get("total_record_count")?,
+        })
+    }
+}
+
+impl YearRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            year: row.try_get("year")?,
+            total_record_count: row.try_get("total_record_count")?,
+        })
+    }
+}
+
+impl TechnicalFacetRecord {
     fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
             id: row.try_get("id")?,
@@ -4199,6 +5343,139 @@ mod tests {
     }
 
     #[test]
+    fn studio_queries_keep_permission_and_uuid_parent_boundaries() {
+        let repository = include_str!("repository.rs");
+        let list_query = repository
+            .split("pub async fn list_user_studios")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn find_user_studio_by_name")
+            .next()
+            .unwrap();
+        let by_name_query = repository
+            .split("pub async fn find_user_studio_by_name")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_user_artists")
+            .next()
+            .unwrap();
+
+        assert!(list_query.contains("with recursive requested_parent as"));
+        assert!(list_query.contains("then $2::uuid"));
+        assert!(list_query.contains("join library_permissions lp"));
+        assert!(list_query.contains("lp.user_id = $1"));
+        assert!(list_query.contains("lp.can_view = true"));
+        assert!(list_query.contains("l.is_hidden = false"));
+        assert!(list_query.contains("from media_item_studios mis"));
+        assert!(list_query.contains("join studios s on s.id = mis.studio_id"));
+        assert!(!list_query.contains("mi.public_id::text = $2"));
+
+        assert!(by_name_query.contains("s.name_normalized = lower($2)"));
+        assert!(by_name_query.contains("exists ("));
+        assert!(by_name_query.contains("lp.user_id = $1"));
+        assert!(by_name_query.contains("lp.can_view = true"));
+        assert!(by_name_query.contains("l.is_hidden = false"));
+    }
+
+    #[test]
+    fn classification_queries_keep_permission_and_uuid_parent_boundaries() {
+        let repository = include_str!("repository.rs");
+        let item_filters_query = repository
+            .split("pub async fn list_user_item_filters")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_user_genres")
+            .next()
+            .unwrap();
+        let tags_query = repository
+            .split("pub async fn list_user_tags")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_user_official_ratings")
+            .next()
+            .unwrap();
+        let ratings_query = repository
+            .split("pub async fn list_user_official_ratings")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_user_years")
+            .next()
+            .unwrap();
+        let years_query = repository
+            .split("pub async fn list_user_years")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_user_technical_facets")
+            .next()
+            .unwrap();
+        let technical_query = repository
+            .split("pub async fn list_user_technical_facets")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_user_artists")
+            .next()
+            .unwrap();
+
+        assert!(item_filters_query.contains("with recursive requested_parent as"));
+        assert!(item_filters_query.contains("then $2::uuid"));
+        assert!(item_filters_query.contains("join library_permissions lp"));
+        assert!(item_filters_query.contains("lp.user_id = $1"));
+        assert!(item_filters_query.contains("lp.can_view = true"));
+        assert!(item_filters_query.contains("l.is_hidden = false"));
+        assert!(item_filters_query.contains("mi.is_deleted = false"));
+        assert!(item_filters_query.contains("from media_item_genres mig"));
+        assert!(item_filters_query.contains("from media_item_tags mit"));
+        assert!(item_filters_query.contains("mi.item_type = any($4::text[])"));
+        assert!(item_filters_query.contains(
+            "when mi.item_type in ('movie', 'series', 'season', 'episode') then 'video'"
+        ));
+        assert!(item_filters_query.contains("= any($6::text[])"));
+        assert!(!item_filters_query.contains("mi.public_id::text = $2"));
+
+        assert!(tags_query.contains("with recursive requested_parent as"));
+        assert!(tags_query.contains("then $2::uuid"));
+        assert!(tags_query.contains("join library_permissions lp"));
+        assert!(tags_query.contains("lp.user_id = $1"));
+        assert!(tags_query.contains("lp.can_view = true"));
+        assert!(tags_query.contains("l.is_hidden = false"));
+        assert!(tags_query.contains("from media_item_tags mit"));
+        assert!(tags_query.contains("join tags t on t.id = mit.tag_id"));
+        assert!(!tags_query.contains("mi.public_id::text = $2"));
+
+        assert!(ratings_query.contains("with recursive requested_parent as"));
+        assert!(ratings_query.contains("then $2::uuid"));
+        assert!(ratings_query.contains("join library_permissions lp"));
+        assert!(ratings_query.contains("lp.user_id = $1"));
+        assert!(ratings_query.contains("lp.can_view = true"));
+        assert!(ratings_query.contains("l.is_hidden = false"));
+        assert!(ratings_query.contains("mi.official_rating is not null"));
+        assert!(!ratings_query.contains("mi.public_id::text = $2"));
+
+        assert!(years_query.contains("with recursive requested_parent as"));
+        assert!(years_query.contains("then $2::uuid"));
+        assert!(years_query.contains("join library_permissions lp"));
+        assert!(years_query.contains("lp.user_id = $1"));
+        assert!(years_query.contains("lp.can_view = true"));
+        assert!(years_query.contains("l.is_hidden = false"));
+        assert!(years_query.contains("mi.production_year is not null"));
+        assert!(!years_query.contains("mi.public_id::text = $2"));
+
+        assert!(technical_query.contains("with recursive requested_parent as"));
+        assert!(technical_query.contains("then $2::uuid"));
+        assert!(technical_query.contains("join library_permissions lp"));
+        assert!(technical_query.contains("lp.user_id = $1"));
+        assert!(technical_query.contains("lp.can_view = true"));
+        assert!(technical_query.contains("l.is_hidden = false"));
+        assert!(technical_query.contains("mi.is_deleted = false"));
+        assert!(technical_query.contains("join media_files mf"));
+        assert!(technical_query.contains("join media_streams ms"));
+        assert!(technical_query.contains("ms.stream_type = 'audio'"));
+        assert!(technical_query.contains("ms.stream_type = 'video'"));
+        assert!(technical_query.contains("ms.stream_type = 'subtitle'"));
+        assert!(!technical_query.contains("mi.public_id::text = $2"));
+    }
+
+    #[test]
     fn resume_and_latest_parent_scope_queries_use_uuid_public_id_comparisons() {
         let repository = include_str!("repository.rs");
         let query_ranges = [
@@ -4423,6 +5700,19 @@ mod tests {
         assert!(next_up_query.contains("then $5::uuid"));
         assert!(!next_up_query.contains(&bad_series_filter));
         assert!(!next_up_query.contains(&bad_library_filter));
+    }
+
+    #[test]
+    fn admin_physical_paths_query_returns_enabled_paths_without_dynamic_filters() {
+        let query = admin_physical_paths_query();
+
+        assert!(query.contains("from library_paths lp"));
+        assert!(query.contains("join libraries l on l.id = lp.library_id"));
+        assert!(query.contains("lp.is_enabled = true"));
+        assert!(query.contains("nullif(trim(lp.path), '')"));
+        assert!(query.contains("order by l.name, lp.path, lp.id"));
+        assert!(!query.contains("format!("));
+        assert!(!query.contains("public_id::text"));
     }
 
     #[test]

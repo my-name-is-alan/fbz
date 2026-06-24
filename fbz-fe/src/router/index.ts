@@ -52,6 +52,7 @@ export const routes = [
       // 控制面板
       { path: "", name: "admin-dashboard", component: adminPage },
       // 个人偏好
+      { path: "profile", name: "admin-profile", component: adminPage },
       { path: "theme", name: "admin-theme", component: adminPage },
       { path: "lib-sort", name: "admin-lib-sort", component: adminPage },
       // 媒体设置
@@ -60,6 +61,8 @@ export const routes = [
       { path: "transcode", name: "admin-transcode", component: adminPage },
       // 系统设置
       { path: "users", name: "admin-users", component: adminPage },
+      { path: "users/create", name: "admin-users-create", component: adminPage },
+      { path: "users/:id", name: "admin-users-edit", component: adminPage },
       { path: "plugins", name: "admin-plugins", component: adminPage },
       { path: "metadata-mgr", name: "admin-metadata-mgr", component: adminPage },
       { path: "logs", name: "admin-logs", component: adminPage },

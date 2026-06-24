@@ -12,6 +12,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Row;
+use tracing::warn;
 
 use crate::{
     config::{NotificationWorkerConfig, SecretConfig},
@@ -726,6 +727,18 @@ impl NotificationDeliveryService {
         .await
         .map_err(NotificationDeliveryError::from)?;
 
+        if outbox_status == "failed" {
+            warn!(
+                event_id = event.id,
+                outbox_event_id = %event.public_id,
+                attempt = event.attempt,
+                max_attempts = event.max_attempts,
+                retry_delay_seconds,
+                error = %message,
+                "notification delivery failed; scheduled retry"
+            );
+        }
+
         Ok(outbox_status.to_owned())
     }
 }
@@ -1298,6 +1311,20 @@ mod tests {
         assert_eq!(retry_delay_seconds(2), 10);
         assert_eq!(retry_delay_seconds(6), 160);
         assert_eq!(retry_delay_seconds(12), 160);
+    }
+
+    #[test]
+    fn notification_delivery_retry_logs_structured_event_context() {
+        let production_source = include_str!("delivery.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("delivery source should include production section");
+
+        assert!(production_source.contains("outbox_event_id = %event.public_id"));
+        assert!(production_source.contains("attempt = event.attempt"));
+        assert!(production_source.contains("max_attempts = event.max_attempts"));
+        assert!(production_source.contains("retry_delay_seconds"));
+        assert!(production_source.contains("notification delivery failed; scheduled retry"));
     }
 
     #[test]

@@ -6,6 +6,10 @@ param(
     [string]$RedisUrl = "redis://127.0.0.1:6379",
     [string]$PackageDir = "var/plugin-packages",
     [string]$RunId = "",
+    [switch]$SignedPackage,
+    [switch]$IncludeSchedule,
+    [string]$SigningKeyId = "dev-smoke-key",
+    [string]$SigningPrivateKeyHex = ("01" * 32),
     [switch]$StartServer
 )
 
@@ -71,10 +75,24 @@ function New-SmokePlugin {
         [string]$PluginId,
 
         [Parameter(Mandatory = $true)]
-        [string]$PluginDir
+        [string]$PluginDir,
+
+        [bool]$IncludeSchedule = $false
     )
 
     New-Item -ItemType Directory -Force -Path $PluginDir | Out-Null
+    $permissions = @(
+        [ordered]@{
+            key = "admin.menu"
+            reason = "Expose a smoke-only admin menu item."
+        }
+    )
+    if ($IncludeSchedule) {
+        $permissions += [ordered]@{
+            key = "scheduler.register"
+            reason = "Register a smoke-only plugin schedule."
+        }
+    }
 
     $manifest = [ordered]@{
         id = $PluginId
@@ -84,12 +102,7 @@ function New-SmokePlugin {
         runtime = "http"
         entrypoint = "http://127.0.0.1:19093/fbz-plugin"
         description = "Generated smoke plugin for validating package approval, enablement, config, and menu boundaries."
-        permissions = @(
-            [ordered]@{
-                key = "admin.menu"
-                reason = "Expose a smoke-only admin menu item."
-            }
-        )
+        permissions = $permissions
         hooks = @(
             [ordered]@{
                 event = "user.login"
@@ -120,6 +133,20 @@ function New-SmokePlugin {
                 required = $false
                 helpText = "Smoke notification channel."
             }
+        )
+    }
+    if ($IncludeSchedule) {
+        $manifest.Add(
+            "schedules",
+            @(
+                [ordered]@{
+                    key = "$PluginId.schedule"
+                    scheduleKind = "interval"
+                    scheduleValue = "3600"
+                    handler = "schedules.observe"
+                    enabledByDefault = $true
+                }
+            )
         )
     }
 
@@ -171,6 +198,39 @@ function Test-JsonTrue {
     )
 }
 
+function Invoke-PluginPackageSigner {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackageArchivePath
+    )
+
+    $previousPrivateKey = $env:PLUGIN_SIGNING_PRIVATE_KEY_HEX
+    $pushed = $false
+    try {
+        $env:PLUGIN_SIGNING_PRIVATE_KEY_HEX = $SigningPrivateKeyHex
+        Push-Location $projectRoot
+        $pushed = $true
+        $output = & cargo run --quiet --bin sign-plugin-package -- `
+            --package $PackageArchivePath `
+            --key-id $SigningKeyId
+        if ($LASTEXITCODE -ne 0) {
+            throw "sign-plugin-package failed with exit code $LASTEXITCODE"
+        }
+        return ($output | ConvertFrom-Json)
+    }
+    finally {
+        if ($pushed) {
+            Pop-Location
+        }
+        if ($null -eq $previousPrivateKey) {
+            Remove-Item Env:\PLUGIN_SIGNING_PRIVATE_KEY_HEX -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:PLUGIN_SIGNING_PRIVATE_KEY_HEX = $previousPrivateKey
+        }
+    }
+}
+
 if (-not $RunId) {
     $RunId = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
 }
@@ -184,21 +244,32 @@ $pluginId = "dev.fbz.smoke.lifecycle.$RunId"
 if ($pluginId.Length -gt 128) {
     throw "Generated plugin id is longer than 128 characters: $pluginId"
 }
+$expectedScheduleKey = "$pluginId.schedule"
 
 $packageDirPath = Resolve-FullPath -Path $PackageDir -BasePath $projectRoot
 $pluginDir = Join-Path $projectRoot "var/plugin-smoke-src/$RunId"
 $serverProcess = $null
 
 try {
-    New-SmokePlugin -PluginId $pluginId -PluginDir $pluginDir | Out-Null
+    New-SmokePlugin -PluginId $pluginId -PluginDir $pluginDir -IncludeSchedule ([bool]$IncludeSchedule) | Out-Null
     $packageInfo = & $packageScript -PluginDir $pluginDir -OutputDir $packageDirPath -Force | ConvertFrom-Json
+    $signatureInfo = $null
+    if ($SignedPackage) {
+        $signatureInfo = Invoke-PluginPackageSigner -PackageArchivePath $packageInfo.archivePath
+    }
 
     if ($StartServer) {
         $env:FBZ_API_PORT = [string]$port
         $env:DATABASE_URL = $DatabaseUrl
         $env:REDIS_URL = $RedisUrl
         $env:PLUGIN_PACKAGE_DIR = $packageDirPath
-        $env:PLUGIN_ALLOW_UNSIGNED = "true"
+        $env:PLUGIN_ALLOW_UNSIGNED = if ($SignedPackage) { "false" } else { "true" }
+        if ($SignedPackage) {
+            $env:PLUGIN_TRUSTED_SIGNATURE_KEYS = "$($signatureInfo.keyId):$($signatureInfo.publicKeyHex)"
+        }
+        else {
+            Remove-Item Env:\PLUGIN_TRUSTED_SIGNATURE_KEYS -ErrorAction SilentlyContinue
+        }
         $env:FBZ_BOOTSTRAP_ADMIN_USERNAME = $Username
         $env:FBZ_BOOTSTRAP_ADMIN_PASSWORD = $Password
         $env:REDIS_EVENT_STREAMS_ENABLED = "false"
@@ -256,15 +327,20 @@ try {
         throw "AuthenticateByName did not return AccessToken."
     }
 
+    $installBody = [ordered]@{
+        packagePath = $packageInfo.packagePath
+        checksumSha256 = $packageInfo.checksumSha256
+        manifest = $packageInfo.manifest
+    }
+    if ($SignedPackage) {
+        $installBody["signature"] = $signatureInfo.signature
+    }
+
     $install = Invoke-FbzJson `
         -Method "POST" `
         -Path "/api/admin/plugins/packages" `
         -AccessToken $accessToken `
-        -Body ([ordered]@{
-            packagePath = $packageInfo.packagePath
-            checksumSha256 = $packageInfo.checksumSha256
-            manifest = $packageInfo.manifest
-        })
+        -Body $installBody
     $installedPluginId = [string]$install.pluginId
 
     $approve = Invoke-FbzJson `
@@ -295,12 +371,15 @@ try {
 
     $plugins = @()
     $menuItems = @()
+    $scheduledTasks = @()
+    $matchingSchedule = @()
     $listedVisible = $false
     $menuVisible = $false
+    $scheduleVisible = $false
     $expectedMenuPath = "/admin/plugins/$installedPluginId"
     for ($i = 0; $i -lt 10; $i++) {
-        $plugins = @(Invoke-FbzJson -Method "GET" -Path "/api/admin/plugins?limit=500" -AccessToken $accessToken)
-        $menuItems = @(Invoke-FbzJson -Method "GET" -Path "/api/admin/plugins/menu-items" -AccessToken $accessToken)
+        $plugins = @(Invoke-FbzJson -Method "GET" -Path "/api/admin/plugins?limit=500" -AccessToken $accessToken | ForEach-Object { $_ })
+        $menuItems = @(Invoke-FbzJson -Method "GET" -Path "/api/admin/plugins/menu-items" -AccessToken $accessToken | ForEach-Object { $_ })
         $seenPluginIds = @($plugins | ForEach-Object { ([string]$_.pluginId).Trim() })
         $seenMenuIds = @($menuItems | ForEach-Object { ([string]$_.pluginId).Trim() })
         $listedVisible = ($seenPluginIds -join "`n").Contains($installedPluginId.Trim())
@@ -311,6 +390,40 @@ try {
         }
 
         Start-Sleep -Milliseconds 500
+    }
+    if ($IncludeSchedule) {
+        $detailSchedules = @($packageDetail.schedules | ForEach-Object { $_ })
+        $detailScheduleKeys = @($detailSchedules | ForEach-Object { ([string]$_.taskKey).Trim() })
+        if (-not ($detailScheduleKeys -contains $expectedScheduleKey)) {
+            $seenDetailScheduleKeys = $detailScheduleKeys -join ", "
+            throw "package detail did not expose expected schedule key. Seen schedule keys: $seenDetailScheduleKeys"
+        }
+
+        for ($i = 0; $i -lt 10; $i++) {
+            $scheduledTasks = @(Invoke-FbzJson `
+                    -Method "GET" `
+                    -Path "/api/admin/scheduled-tasks?ownerType=plugin&limit=500" `
+                    -AccessToken $accessToken |
+                    ForEach-Object { $_ })
+            $matchingSchedule = @(
+                $scheduledTasks |
+                    Where-Object {
+                        [string]::Equals(
+                            ([string]$_.taskKey).Trim(),
+                            $expectedScheduleKey,
+                            [System.StringComparison]::Ordinal
+                        )
+                    } |
+                    Select-Object -First 1
+            )
+            $scheduleVisible = $matchingSchedule.Count -ge 1
+
+            if ($scheduleVisible) {
+                break
+            }
+
+            Start-Sleep -Milliseconds 500
+        }
     }
 
     if ($installedPluginId -ne $pluginId) {
@@ -341,18 +454,41 @@ try {
     if ($packageDetail.hooks.Count -lt 1 -or $packageDetail.permissions.Count -lt 1) {
         throw "package detail did not expose normalized hooks and permissions."
     }
+    if ($IncludeSchedule) {
+        if (-not $scheduleVisible) {
+            $seenScheduleKeys = ($scheduledTasks | ForEach-Object {
+                    $taskKey = ([string]$_.taskKey).Trim()
+                    "$taskKey(len=$($taskKey.Length))"
+                }) -join ", "
+            throw "plugin schedule was not visible in scheduled task list. Expected schedule key: $expectedScheduleKey(len=$($expectedScheduleKey.Length)). Seen schedule keys: $seenScheduleKeys"
+        }
+        if ($matchingSchedule.Count -lt 1 -or $matchingSchedule[0].ownerType -ne "plugin") {
+            throw "plugin schedule did not retain plugin owner type."
+        }
+        if (-not (Test-JsonTrue $matchingSchedule[0].enabled)) {
+            throw "plugin schedule was not enabled by default."
+        }
+    }
+    if ($SignedPackage -and -not (Test-JsonTrue $packageDetail.signaturePresent)) {
+        throw "signed package detail did not expose signaturePresent."
+    }
 
     [ordered]@{
         status = "ok"
         pluginId = $pluginId
         packageId = $install.packageId
         packagePath = $packageInfo.packagePath
+        signedPackage = [bool]$SignedPackage
+        signaturePresent = if ($SignedPackage) { $packageDetail.signaturePresent } else { $false }
         approvalStatus = $approve.approvalStatus
         enabled = $enable.enabled
         menuPath = $expectedMenuPath
         configChannel = $config.values.channel
         hookCount = $packageDetail.hooks.Count
         permissionCount = $packageDetail.permissions.Count
+        scheduleKey = if ($IncludeSchedule) { $expectedScheduleKey } else { $null }
+        scheduleVisible = if ($IncludeSchedule) { $scheduleVisible } else { $false }
+        scheduleCount = @($packageDetail.schedules | ForEach-Object { $_ }).Count
     } | ConvertTo-Json -Depth 8
 }
 finally {

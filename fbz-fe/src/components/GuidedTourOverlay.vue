@@ -45,24 +45,36 @@ function finishTour() {
   uiStore.guidedTourActive = false;
   currentStep.value = 1;
 }
+
+useEventListener(window, "keydown", (e) => {
+  if (e.key === "Escape" && guidedTourActive.value) {
+    finishTour();
+  }
+});
 </script>
 
 <template>
   <Transition name="fade">
     <div v-if="guidedTourActive" class="tour-overlay" @click="finishTour">
-      <div class="tour-card" @click.stop>
+      <div
+        class="tour-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tour-title"
+        @click.stop
+      >
         <!-- Badge -->
         <span class="step-badge">新手引导: 步骤 {{ currentStep }} / {{ steps.length }}</span>
 
         <!-- Step content -->
         <div class="tour-content">
-          <h3>{{ steps[currentStep - 1].title }}</h3>
+          <h3 id="tour-title">{{ steps[currentStep - 1].title }}</h3>
           <p>{{ steps[currentStep - 1].text }}</p>
         </div>
 
         <!-- Spotlight Indicator Arrow -->
-        <div class="tour-hint-box">
-          <span class="spot-bullet" />
+        <div class="tour-hint-box" role="status">
+          <span class="spot-bullet" aria-hidden="true" />
           <span class="spot-text"
             >提示：关注界面中的高亮区域 ({{ steps[currentStep - 1].positionHint }})</span
           >
@@ -71,7 +83,7 @@ function finishTour() {
         <!-- Footer Actions -->
         <footer class="tour-footer">
           <button class="tour-btn text-btn" type="button" @click="finishTour">跳过</button>
-          <div class="spacer" />
+          <div class="spacer" aria-hidden="true" />
           <button v-if="currentStep > 1" class="tour-btn secondary" type="button" @click="prevStep">
             上一步
           </button>

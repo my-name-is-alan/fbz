@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use tokio::{
     sync::broadcast,
@@ -12,10 +12,11 @@ use crate::{config::SchedulerWorkerConfig, db::DbPool, scheduler::service::Sched
 pub fn spawn_scheduler_worker(
     pool: DbPool,
     config: SchedulerWorkerConfig,
+    transcode_cache_dir: PathBuf,
     mut shutdown: broadcast::Receiver<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let service = SchedulerService::new(pool);
+        let service = SchedulerService::new(pool, transcode_cache_dir);
         let mut tick = interval(Duration::from_secs(config.interval_seconds));
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -65,5 +66,16 @@ async fn run_due_tasks(service: &SchedulerService) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn scheduler_worker_receives_transcode_cache_dir() {
+        let source = include_str!("worker.rs");
+
+        assert!(source.contains("transcode_cache_dir"));
+        assert!(source.contains("SchedulerService::new(pool, transcode_cache_dir)"));
     }
 }

@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     settings_repository
         .insert_bootstrap_defaults(&bootstrap_settings)
         .await?;
-    SchedulerService::new(database.clone())
+    SchedulerService::new(database.clone(), config.storage.transcode_cache_dir.clone())
         .bootstrap_core_tasks(&config.scheduler, &config.schedules)
         .await?;
     let settings_count = settings_repository.list().await?.len();
@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(spawn_scheduler_worker(
             database.clone(),
             config.scheduler.clone(),
+            config.storage.transcode_cache_dir.clone(),
             shutdown_tx.subscribe(),
         ))
     } else {
@@ -123,6 +124,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             database.clone(),
             config.transcode.clone(),
             config.transcode_worker.clone(),
+            config.storage.transcode_cache_dir.clone(),
             media_tools.clone(),
             shutdown_tx.subscribe(),
         ))

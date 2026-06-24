@@ -3,12 +3,13 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, Uri},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     auth::service::AuthenticatedUser,
     compat::emby::dto::{
-        BaseItemDto, BaseItemSource, ItemCountsDto, MediaSourceDto, QueryResultDto, UserItemDataDto,
+        BaseItemDto, BaseItemSource, DeleteInfoDto, ItemCountsDto, MediaSourceDto, QueryResultDto,
+        RecommendationDto, UserItemDataDto,
     },
     db::DbPool,
     error::AppError,
@@ -30,6 +31,8 @@ use super::{
 
 const DEFAULT_ITEMS_LIMIT: u32 = 100;
 const MAX_ITEMS_LIMIT: u32 = 200;
+const DEFAULT_SEARCH_HINTS_LIMIT: u32 = 20;
+const MAX_SEARCH_HINTS_LIMIT: u32 = 50;
 const DEFAULT_IMAGE_TYPE_LIMIT: usize = 1;
 const MAX_IMAGE_TYPE_LIMIT: usize = 10;
 const PRIMARY_IMAGE_TYPES: &[&str] = &["primary", "poster"];
@@ -93,6 +96,44 @@ pub struct ItemsQuery {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
+pub struct SearchHintsQuery {
+    pub user_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub search_term: Option<String>,
+    pub include_item_types: Option<String>,
+    pub media_types: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SearchHintsResultDto {
+    pub search_hints: Vec<SearchHintDto>,
+    pub total_record_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SearchHintDto {
+    pub item_id: String,
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "Type")]
+    pub item_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub is_folder: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_time_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production_year: Option<i32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub struct MusicItemsQuery {
     pub user_id: Option<String>,
     pub parent_id: Option<String>,
@@ -122,8 +163,42 @@ pub struct ItemByIdQuery {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
+pub struct CriticReviewsQuery {
+    pub user_id: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub struct AdditionalPartsQuery {
     pub user_id: Option<String>,
+    pub fields: Option<String>,
+    pub enable_images: Option<bool>,
+    pub image_type_limit: Option<u32>,
+    pub enable_image_types: Option<String>,
+    pub enable_user_data: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SpecialFeaturesQuery {
+    pub user_id: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
+    pub fields: Option<String>,
+    pub enable_images: Option<bool>,
+    pub image_type_limit: Option<u32>,
+    pub enable_image_types: Option<String>,
+    pub enable_user_data: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackExtrasQuery {
+    pub user_id: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
     pub fields: Option<String>,
     pub enable_images: Option<bool>,
     pub image_type_limit: Option<u32>,
@@ -147,6 +222,52 @@ pub(super) struct MediaListQuery {
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,
     pub fields: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SuggestionsQuery {
+    pub parent_id: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
+    pub item_limit: Option<u32>,
+    pub include_item_types: Option<String>,
+    pub media_types: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    pub fields: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MovieRecommendationsQuery {
+    pub category_limit: Option<u32>,
+    pub item_limit: Option<u32>,
+    pub user_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub enable_images: Option<bool>,
+    pub enable_user_data: Option<bool>,
+    pub image_type_limit: Option<u32>,
+    pub enable_image_types: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct TrailersQuery {
+    pub user_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
+    pub recursive: Option<bool>,
+    pub search_term: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    pub fields: Option<String>,
+    pub include_item_types: Option<String>,
+    pub media_types: Option<String>,
+    pub enable_images: Option<bool>,
+    pub image_type_limit: Option<u32>,
+    pub enable_image_types: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -217,7 +338,46 @@ pub async fn songs(
     Ok(Json(result))
 }
 
-async fn list_items_for_authenticated_user(
+pub async fn search_hints(
+    State(state): State<AppState>,
+    Query(query): Query<SearchHintsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<SearchHintsResultDto>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let result = list_items_for_authenticated_user(
+        database.clone(),
+        authenticated_user,
+        search_hints_items_query(query),
+    )
+    .await?;
+
+    Ok(Json(SearchHintsResultDto {
+        search_hints: result
+            .items
+            .into_iter()
+            .map(search_hint_from_item)
+            .collect(),
+        total_record_count: result.total_record_count,
+    }))
+}
+
+pub async fn trailers(
+    State(state): State<AppState>,
+    Query(query): Query<TrailersQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let _user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    Ok(Json(empty_trailers_result(&query)))
+}
+
+pub(super) async fn list_items_for_authenticated_user(
     database: DbPool,
     authenticated_user: AuthenticatedUser,
     query: ItemsQuery,
@@ -343,6 +503,109 @@ fn music_items_query(
     }
 }
 
+fn search_hints_items_query(query: SearchHintsQuery) -> ItemsQuery {
+    let window = SearchHintsWindow::from_query(&query);
+    ItemsQuery {
+        parent_id: query.parent_id,
+        start_index: Some(window.start_index as u32),
+        limit: Some(window.limit as u32),
+        recursive: Some(true),
+        include_item_types: query.include_item_types,
+        search_term: query.search_term,
+        media_types: query.media_types,
+        sort_by: Some("SortName".to_owned()),
+        sort_order: Some("Ascending".to_owned()),
+        ..ItemsQuery::default()
+    }
+}
+
+fn suggestions_items_query(query: SuggestionsQuery) -> ItemsQuery {
+    ItemsQuery {
+        parent_id: query.parent_id,
+        start_index: query.start_index,
+        limit: query.limit.or(query.item_limit),
+        recursive: Some(true),
+        include_item_types: query.include_item_types,
+        sort_by: Some(query.sort_by.unwrap_or_else(|| "DateCreated".to_owned())),
+        sort_order: Some(query.sort_order.unwrap_or_else(|| "Descending".to_owned())),
+        fields: query.fields,
+        media_types: query.media_types,
+        ..ItemsQuery::default()
+    }
+}
+
+fn movie_recommendations_items_query(query: MovieRecommendationsQuery) -> ItemsQuery {
+    ItemsQuery {
+        parent_id: query.parent_id,
+        limit: query.item_limit,
+        recursive: Some(true),
+        include_item_types: Some("Movie".to_owned()),
+        media_types: Some("Video".to_owned()),
+        sort_by: Some("DateCreated".to_owned()),
+        sort_order: Some("Descending".to_owned()),
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types,
+        ..ItemsQuery::default()
+    }
+}
+
+fn empty_trailers_result(query: &TrailersQuery) -> QueryResultDto<BaseItemDto> {
+    let window = TrailersWindow::from_query(query);
+    let _input = trailers_query_input(query, window);
+
+    QueryResultDto::new(Vec::new(), 0, window.start_index as u32)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrailersWindow {
+    start_index: usize,
+    limit: usize,
+}
+
+impl TrailersWindow {
+    fn from_query(query: &TrailersQuery) -> Self {
+        Self {
+            start_index: query.start_index.unwrap_or(0) as usize,
+            limit: query
+                .limit
+                .unwrap_or(DEFAULT_ITEMS_LIMIT)
+                .min(MAX_ITEMS_LIMIT) as usize,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrailersQueryInput {
+    start_index: usize,
+    limit: usize,
+    parent_id: Option<String>,
+    recursive: bool,
+    search_term: Option<String>,
+    include_item_types: ItemTypeFilter,
+    media_types: StringListFilter,
+}
+
+fn trailers_query_input(query: &TrailersQuery, window: TrailersWindow) -> TrailersQueryInput {
+    let _requested_fields = requested_item_fields(query.fields.as_deref());
+    let _requested_images = requested_item_images(&ItemsQuery {
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types.clone(),
+        ..ItemsQuery::default()
+    });
+
+    TrailersQueryInput {
+        start_index: window.start_index,
+        limit: window.limit,
+        parent_id: normalized_parent_id(query.parent_id.clone()),
+        recursive: query.recursive.unwrap_or(true),
+        search_term: normalized_text_filter(query.search_term.as_deref()),
+        include_item_types: include_item_types_filter(query.include_item_types.as_deref()),
+        media_types: media_type_list_filter(query.media_types.as_deref()),
+    }
+}
+
 pub async fn resume_items(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -411,6 +674,62 @@ pub async fn latest_items(
         .map_err(|err| AppError::internal(format!("failed to list latest items: {err}")))?;
 
     Ok(Json(media_items_to_dtos(result.items)))
+}
+
+pub async fn suggested_items(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(query): Query<SuggestionsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let authenticated_user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let result = list_items_for_authenticated_user(
+        database.clone(),
+        authenticated_user,
+        suggestions_items_query(query),
+    )
+    .await?;
+
+    Ok(Json(result))
+}
+
+pub async fn movie_recommendations(
+    State(state): State<AppState>,
+    Query(query): Query<MovieRecommendationsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<RecommendationDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let category_limit = query.category_limit.unwrap_or(1).clamp(0, MAX_ITEMS_LIMIT);
+    if category_limit == 0 {
+        return Ok(Json(Vec::new()));
+    }
+    let _include_user_data = query.enable_user_data.unwrap_or(true);
+
+    let result = list_items_for_authenticated_user(
+        database.clone(),
+        authenticated_user,
+        movie_recommendations_items_query(query),
+    )
+    .await?;
+
+    if result.items.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    Ok(Json(vec![RecommendationDto::recently_added_movies(
+        result.items,
+    )]))
 }
 
 pub async fn user_item_counts(
@@ -527,6 +846,162 @@ pub async fn additional_video_parts(
     Ok(Json(empty_additional_parts_result()))
 }
 
+pub async fn item_delete_info(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    Query(query): Query<ItemByIdQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<DeleteInfoDto>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    let _ = item_by_id_for_user(&state, user, item_id).await?;
+
+    Ok(Json(DeleteInfoDto::empty()))
+}
+
+pub async fn item_critic_reviews(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    Query(query): Query<CriticReviewsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    let _ = item_by_id_for_user(&state, user, item_id).await?;
+
+    Ok(Json(empty_critic_reviews_result(&query)))
+}
+
+pub async fn item_special_features(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    Query(query): Query<SpecialFeaturesQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    special_features_for_user(&state, user, item_id, query).await
+}
+
+pub async fn user_item_special_features(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<SpecialFeaturesQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    special_features_for_user(&state, user, item_id, query).await
+}
+
+pub async fn item_intros(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    Query(query): Query<PlaybackExtrasQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    intros_for_user(&state, user, item_id, query).await
+}
+
+pub async fn user_item_intros(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<PlaybackExtrasQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    intros_for_user(&state, user, item_id, query).await
+}
+
+pub async fn item_local_trailers(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    Query(query): Query<PlaybackExtrasQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    local_trailers_for_user(&state, user, item_id, query).await
+}
+
+pub async fn user_item_local_trailers(
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<PlaybackExtrasQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    local_trailers_for_user(&state, user, item_id, query).await
+}
+
 pub async fn item_ancestors(
     State(state): State<AppState>,
     Path(item_id): Path<String>,
@@ -610,6 +1085,84 @@ pub async fn similar_items(
     Ok(Json(media_query_result(result, window)))
 }
 
+async fn special_features_for_user(
+    state: &AppState,
+    user: AuthenticatedUser,
+    item_id: String,
+    query: SpecialFeaturesQuery,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let _requested_fields = requested_item_fields(query.fields.as_deref());
+    let _requested_images = requested_item_images(&ItemsQuery {
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types,
+        ..ItemsQuery::default()
+    });
+    let _include_user_data = query.enable_user_data.unwrap_or(true);
+
+    let _ = item_by_id_for_user(state, user, item_id).await?;
+
+    Ok(Json(QueryResultDto::new(
+        Vec::new(),
+        0,
+        query.start_index.unwrap_or(0),
+    )))
+}
+
+async fn intros_for_user(
+    state: &AppState,
+    user: AuthenticatedUser,
+    item_id: String,
+    query: PlaybackExtrasQuery,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    validate_playback_extras_request(state, user, item_id, &query).await?;
+
+    Ok(Json(QueryResultDto::new(
+        Vec::new(),
+        0,
+        query.start_index.unwrap_or(0),
+    )))
+}
+
+async fn local_trailers_for_user(
+    state: &AppState,
+    user: AuthenticatedUser,
+    item_id: String,
+    query: PlaybackExtrasQuery,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    validate_playback_extras_request(state, user, item_id, &query).await?;
+
+    Ok(Json(Vec::new()))
+}
+
+fn empty_critic_reviews_result(query: &CriticReviewsQuery) -> QueryResultDto<BaseItemDto> {
+    let window = CriticReviewsWindow::from_query(query);
+    let _limit = window.limit;
+
+    QueryResultDto::new(Vec::new(), 0, window.start_index as u32)
+}
+
+async fn validate_playback_extras_request(
+    state: &AppState,
+    user: AuthenticatedUser,
+    item_id: String,
+    query: &PlaybackExtrasQuery,
+) -> Result<(), AppError> {
+    let _requested_fields = requested_item_fields(query.fields.as_deref());
+    let _requested_images = requested_item_images(&ItemsQuery {
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types.clone(),
+        ..ItemsQuery::default()
+    });
+    let _include_user_data = query.enable_user_data.unwrap_or(true);
+    let _limit = query.limit.map(|limit| limit.min(MAX_ITEMS_LIMIT));
+
+    let _ = item_by_id_for_user(state, user, item_id).await?;
+
+    Ok(())
+}
+
 async fn item_by_id_for_user(
     state: &AppState,
     user: AuthenticatedUser,
@@ -678,6 +1231,46 @@ impl ItemWindow {
                     .limit
                     .unwrap_or(DEFAULT_ITEMS_LIMIT)
                     .clamp(1, MAX_ITEMS_LIMIT),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CriticReviewsWindow {
+    start_index: i64,
+    limit: i64,
+}
+
+impl CriticReviewsWindow {
+    fn from_query(query: &CriticReviewsQuery) -> Self {
+        Self {
+            start_index: i64::from(query.start_index.unwrap_or(0)),
+            limit: i64::from(
+                query
+                    .limit
+                    .unwrap_or(DEFAULT_ITEMS_LIMIT)
+                    .clamp(1, MAX_ITEMS_LIMIT),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchHintsWindow {
+    start_index: i64,
+    limit: i64,
+}
+
+impl SearchHintsWindow {
+    fn from_query(query: &SearchHintsQuery) -> Self {
+        Self {
+            start_index: i64::from(query.start_index.unwrap_or(0)),
+            limit: i64::from(
+                query
+                    .limit
+                    .unwrap_or(DEFAULT_SEARCH_HINTS_LIMIT)
+                    .clamp(1, MAX_SEARCH_HINTS_LIMIT),
             ),
         }
     }
@@ -963,7 +1556,7 @@ fn provider_id_list_filter(value: Option<&str>) -> StringListFilter {
     StringListFilter::enabled(values)
 }
 
-fn media_type_list_filter(value: Option<&str>) -> StringListFilter {
+pub(super) fn media_type_list_filter(value: Option<&str>) -> StringListFilter {
     let Some(value) = value else {
         return StringListFilter::default();
     };
@@ -1304,6 +1897,7 @@ fn sort_direction_from_query(
 pub(super) struct RequestedItemFields {
     pub media_sources: bool,
     pub media_streams: bool,
+    pub chapters: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1342,6 +1936,9 @@ pub(super) fn requested_item_fields(fields: Option<&str>) -> RequestedItemFields
         }
         if field.eq_ignore_ascii_case("MediaStreams") {
             requested.media_streams = true;
+        }
+        if field.eq_ignore_ascii_case("Chapters") {
+            requested.chapters = true;
         }
     }
     requested
@@ -1499,6 +2096,20 @@ pub(super) fn media_item_to_base_item(record: MediaItemBrowseRecord) -> BaseItem
     media_item_to_base_item_with_images(record, &requested_images)
 }
 
+fn search_hint_from_item(item: BaseItemDto) -> SearchHintDto {
+    SearchHintDto {
+        item_id: item.id.clone(),
+        id: item.id,
+        name: item.name,
+        item_type: item.item_type,
+        media_type: item.media_type,
+        parent_id: item.parent_id,
+        is_folder: item.is_folder,
+        run_time_ticks: item.run_time_ticks,
+        production_year: item.production_year,
+    }
+}
+
 fn media_item_to_base_item_with_images(
     record: MediaItemBrowseRecord,
     requested_images: &RequestedItemImages,
@@ -1583,13 +2194,23 @@ fn media_item_source_summary(record: &MediaItemBrowseRecord) -> Option<MediaSour
     let media_file_id = record.media_file_id?;
     Some(MediaSourceDto {
         id: media_file_id.to_string(),
+        source_type: "Default".to_owned(),
+        name: media_file_id.to_string(),
+        item_id: Some(record.id.clone()),
         path: None,
         protocol: media_source_summary_protocol(record).to_owned(),
+        is_remote: record.media_file_is_strm == Some(true),
+        requires_opening: false,
+        requires_closing: false,
+        supports_probing: false,
+        read_at_native_framerate: false,
         container: record.media_file_container.clone(),
         run_time_ticks: record.run_time_ticks,
         size: record.media_file_size,
         bitrate: record.media_file_bitrate,
         media_streams: Vec::new(),
+        default_audio_stream_index: None,
+        default_subtitle_stream_index: None,
         supports_direct_play: true,
         supports_direct_stream: true,
         supports_transcoding: record.supports_transcoding,
@@ -1598,6 +2219,7 @@ fn media_item_source_summary(record: &MediaItemBrowseRecord) -> Option<MediaSour
         transcoding_url: None,
         transcoding_sub_protocol: None,
         transcoding_container: None,
+        chapters: Vec::new(),
     })
 }
 
@@ -1640,6 +2262,8 @@ fn is_folder(item_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -1800,6 +2424,266 @@ mod tests {
         assert_eq!(songs.include_item_types.as_deref(), Some("Audio"));
         assert_eq!(songs.media_types.as_deref(), Some("Audio"));
         assert_eq!(songs.recursive, Some(true));
+    }
+
+    #[test]
+    fn search_hints_query_maps_to_recursive_items_query() {
+        let query = SearchHintsQuery {
+            user_id: Some("user-1".to_owned()),
+            parent_id: Some("library-1".to_owned()),
+            search_term: Some(" alien ".to_owned()),
+            include_item_types: Some("Movie,Series".to_owned()),
+            media_types: Some("Video".to_owned()),
+            start_index: Some(5),
+            limit: Some(500),
+        };
+
+        let items_query = search_hints_items_query(query.clone());
+        let window = SearchHintsWindow::from_query(&query);
+
+        assert_eq!(items_query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(items_query.search_term.as_deref(), Some(" alien "));
+        assert_eq!(
+            items_query.include_item_types.as_deref(),
+            Some("Movie,Series")
+        );
+        assert_eq!(items_query.media_types.as_deref(), Some("Video"));
+        assert_eq!(items_query.recursive, Some(true));
+        assert_eq!(window.start_index, 5);
+        assert_eq!(window.limit, i64::from(MAX_SEARCH_HINTS_LIMIT));
+    }
+
+    #[test]
+    fn trailers_query_is_bounded_and_normalized() {
+        let query = TrailersQuery {
+            user_id: Some("user-1".to_owned()),
+            parent_id: Some(" library-1 ".to_owned()),
+            start_index: Some(7),
+            limit: Some(10_000),
+            recursive: Some(false),
+            search_term: Some(" trailer ".to_owned()),
+            sort_by: Some("DateCreated".to_owned()),
+            sort_order: Some("Descending".to_owned()),
+            fields: Some("MediaSources,PrimaryImageAspectRatio".to_owned()),
+            include_item_types: Some("Movie,Trailer".to_owned()),
+            media_types: Some("Video".to_owned()),
+            enable_images: Some(true),
+            image_type_limit: Some(2),
+            enable_image_types: Some("Primary,Backdrop".to_owned()),
+        };
+
+        let window = TrailersWindow::from_query(&query);
+        let input = trailers_query_input(&query, window);
+
+        assert_eq!(input.start_index, 7);
+        assert_eq!(input.limit, MAX_ITEMS_LIMIT as usize);
+        assert_eq!(input.parent_id.as_deref(), Some("library-1"));
+        assert!(!input.recursive);
+        assert_eq!(input.search_term.as_deref(), Some("trailer"));
+        assert!(input.include_item_types.enabled);
+        assert_eq!(input.include_item_types.item_types, ["movie"]);
+        assert_eq!(input.media_types.values, ["video"]);
+    }
+
+    #[test]
+    fn trailers_response_is_empty_query_result_until_provider_exists() {
+        let result = empty_trailers_result(&TrailersQuery {
+            start_index: Some(12),
+            limit: Some(5),
+            ..TrailersQuery::default()
+        });
+
+        assert!(result.items.is_empty());
+        assert_eq!(result.total_record_count, 0);
+        assert_eq!(result.start_index, 12);
+    }
+
+    #[test]
+    fn search_hint_response_uses_emby_legacy_shape() {
+        let item = BaseItemDto::from(BaseItemSource {
+            id: "item-1".to_owned(),
+            name: "Alien".to_owned(),
+            item_type: "Movie".to_owned(),
+            media_type: Some("Video".to_owned()),
+            parent_id: Some("library-1".to_owned()),
+            is_folder: false,
+            run_time_ticks: Some(7_000_000),
+            production_year: Some(1979),
+        });
+
+        let hint = search_hint_from_item(item);
+        let result = SearchHintsResultDto {
+            search_hints: vec![hint],
+            total_record_count: 1,
+        };
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "SearchHints": [{
+                    "ItemId": "item-1",
+                    "Id": "item-1",
+                    "Name": "Alien",
+                    "Type": "Movie",
+                    "MediaType": "Video",
+                    "ParentId": "library-1",
+                    "IsFolder": false,
+                    "RunTimeTicks": 7000000,
+                    "ProductionYear": 1979
+                }],
+                "TotalRecordCount": 1
+            })
+        );
+    }
+
+    #[test]
+    fn suggestions_query_maps_to_recent_recursive_item_browse() {
+        let query = suggestions_items_query(SuggestionsQuery {
+            parent_id: Some("music-lib".to_owned()),
+            start_index: Some(4),
+            item_limit: Some(8),
+            include_item_types: Some("Movie,Episode".to_owned()),
+            media_types: Some("Video".to_owned()),
+            fields: Some("PrimaryImageAspectRatio".to_owned()),
+            ..SuggestionsQuery::default()
+        });
+
+        assert_eq!(query.parent_id.as_deref(), Some("music-lib"));
+        assert_eq!(query.start_index, Some(4));
+        assert_eq!(query.limit, Some(8));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(query.include_item_types.as_deref(), Some("Movie,Episode"));
+        assert_eq!(query.media_types.as_deref(), Some("Video"));
+        assert_eq!(query.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(query.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+    }
+
+    #[test]
+    fn movie_recommendations_query_maps_to_recent_movie_window() {
+        let query = movie_recommendations_items_query(MovieRecommendationsQuery {
+            user_id: Some("user-1".to_owned()),
+            parent_id: Some("movies-lib".to_owned()),
+            category_limit: Some(3),
+            item_limit: Some(9),
+            enable_images: Some(true),
+            enable_user_data: Some(true),
+            image_type_limit: Some(2),
+            enable_image_types: Some("Primary,Backdrop".to_owned()),
+        });
+
+        assert_eq!(query.parent_id.as_deref(), Some("movies-lib"));
+        assert_eq!(query.limit, Some(9));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(query.include_item_types.as_deref(), Some("Movie"));
+        assert_eq!(query.media_types.as_deref(), Some("Video"));
+        assert_eq!(query.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(query.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(query.image_type_limit, Some(2));
+        assert_eq!(
+            query.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+    }
+
+    #[test]
+    fn requested_item_fields_accepts_chapters_field() {
+        let fields = requested_item_fields(Some("MediaSources,Chapters,MediaStreams"));
+
+        assert!(fields.media_sources);
+        assert!(fields.chapters);
+        assert!(fields.media_streams);
+    }
+
+    #[test]
+    fn special_features_query_accepts_common_emby_parameters() {
+        let query = serde_json::from_value::<SpecialFeaturesQuery>(json!({
+            "UserId": "user-1",
+            "StartIndex": 3,
+            "Limit": 12,
+            "Fields": "MediaSources,PrimaryImageAspectRatio",
+            "EnableImages": true,
+            "ImageTypeLimit": 2,
+            "EnableImageTypes": "Primary,Backdrop",
+            "EnableUserData": true
+        }))
+        .unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.start_index, Some(3));
+        assert_eq!(query.limit, Some(12));
+        assert_eq!(
+            query.fields.as_deref(),
+            Some("MediaSources,PrimaryImageAspectRatio")
+        );
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(query.image_type_limit, Some(2));
+        assert_eq!(
+            query.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+        assert_eq!(query.enable_user_data, Some(true));
+    }
+
+    #[test]
+    fn critic_reviews_query_accepts_official_paging_and_user_id() {
+        let query = serde_json::from_value::<CriticReviewsQuery>(json!({
+            "UserId": "user-1",
+            "StartIndex": 4,
+            "Limit": 8
+        }))
+        .unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.start_index, Some(4));
+        assert_eq!(query.limit, Some(8));
+    }
+
+    #[test]
+    fn empty_critic_reviews_result_preserves_window_start_index() {
+        let query = CriticReviewsQuery {
+            user_id: Some("user-1".to_owned()),
+            start_index: Some(4),
+            limit: Some(MAX_ITEMS_LIMIT + 20),
+        };
+        let window = CriticReviewsWindow::from_query(&query);
+        let result = empty_critic_reviews_result(&query);
+
+        assert_eq!(window.limit, i64::from(MAX_ITEMS_LIMIT));
+        assert!(result.items.is_empty());
+        assert_eq!(result.total_record_count, 0);
+        assert_eq!(result.start_index, 4);
+    }
+
+    #[test]
+    fn playback_extra_query_accepts_common_emby_parameters() {
+        let query = serde_json::from_value::<PlaybackExtrasQuery>(json!({
+            "UserId": "user-1",
+            "StartIndex": 1,
+            "Limit": 4,
+            "Fields": "MediaSources,PrimaryImageAspectRatio",
+            "EnableImages": true,
+            "ImageTypeLimit": 2,
+            "EnableImageTypes": "Primary,Backdrop",
+            "EnableUserData": true
+        }))
+        .unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.start_index, Some(1));
+        assert_eq!(query.limit, Some(4));
+        assert_eq!(
+            query.fields.as_deref(),
+            Some("MediaSources,PrimaryImageAspectRatio")
+        );
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(query.image_type_limit, Some(2));
+        assert_eq!(
+            query.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+        assert_eq!(query.enable_user_data, Some(true));
     }
 
     #[test]
@@ -2359,8 +3243,18 @@ mod tests {
         assert_eq!(item.bitrate, Some(12_000_000));
         assert_eq!(item.media_sources.len(), 1);
         assert_eq!(item.media_sources[0].id, "7");
+        assert_eq!(item.media_sources[0].source_type, "Default");
+        assert_eq!(item.media_sources[0].name, "7");
+        assert_eq!(item.media_sources[0].item_id.as_deref(), Some("item-1"));
         assert_eq!(item.media_sources[0].protocol, "File");
+        assert!(!item.media_sources[0].is_remote);
+        assert!(!item.media_sources[0].requires_opening);
+        assert!(!item.media_sources[0].requires_closing);
+        assert!(!item.media_sources[0].supports_probing);
+        assert!(!item.media_sources[0].read_at_native_framerate);
         assert_eq!(item.media_sources[0].path, None);
+        assert_eq!(item.media_sources[0].default_audio_stream_index, None);
+        assert_eq!(item.media_sources[0].default_subtitle_stream_index, None);
         assert!(item.media_sources[0].supports_transcoding);
         assert_eq!(
             item.user_data.as_ref().unwrap().playback_position_ticks,

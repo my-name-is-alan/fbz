@@ -1,0 +1,60 @@
+{
+  "id": "dev.fbz.notify.webhook",
+  "name": "Webhook Notification Template",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19095/fbz-plugin",
+  "description": "First-party HTTP template that sends selected host events to the webhook logical channel through administrator-managed notification targets.",
+  "permissions": [
+    {
+      "key": "notification.send",
+      "reason": "Submit selected host events to administrator-managed webhook notification targets."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "library.scan.completed",
+      "handler": "hooks.notify"
+    },
+    {
+      "event": "library.scan.failed",
+      "handler": "hooks.notify"
+    },
+    {
+      "event": "metadata.refresh.failed",
+      "handler": "hooks.notify"
+    },
+    {
+      "event": "transcode.failed",
+      "handler": "hooks.notify"
+    },
+    {
+      "event": "user.login",
+      "handler": "hooks.notify"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "channel",
+      "label": "Notification channel",
+      "type": "string",
+      "required": false,
+      "helpText": "Logical channel matched by administrator-managed webhook notification targets. Defaults to webhook."
+    },
+    {
+      "key": "title_prefix",
+      "label": "Title prefix",
+      "type": "string",
+      "required": false,
+      "helpText": "Optional short prefix for webhook notification titles."
+    },
+    {
+      "key": "include_payload",
+      "label": "Include payload",
+      "type": "boolean",
+      "required": false,
+      "helpText": "When true, append a truncated JSON payload to the notification message."
+    }
+  ]
+}

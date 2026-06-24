@@ -70,6 +70,7 @@ mod tests {
             available_at: "2026-06-19 00:00:00+08".to_owned(),
             created_at: "2026-06-19 00:00:00+08".to_owned(),
             stream_mirror_attempts: 1,
+            stale_mirror_lease: false,
         };
 
         let fields = stream_fields_for_event(&event);

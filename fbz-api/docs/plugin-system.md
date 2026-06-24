@@ -84,6 +84,8 @@ fbz-plugin-package-v1
 
 The signature therefore binds both the archive bytes and the normalized manifest contract. Package details expose `signaturePresent` for admin review, but the signature text itself is not returned in normal detail responses.
 
+`cargo run --bin sign-plugin-package -- --package <zip> --key-id <keyId>` signs an already built plugin ZIP. The tool reads `manifest.json` from the ZIP root, validates it with the same manifest model used by package installation, computes the ZIP SHA-256, and prints the `signature` envelope plus the public key hex that should be configured in `PLUGIN_TRUSTED_SIGNATURE_KEYS`. Prefer passing the 32-byte Ed25519 private key seed through `PLUGIN_SIGNING_PRIVATE_KEY_HEX` instead of a command-line argument so it is not stored in shell history.
+
 ## Hook Dispatch
 
 Approved and enabled plugins can receive declared hook events through the core `event_outbox`. Current core hook coverage includes library scan lifecycle events (`library.scan.started`, `library.scan.completed`, `library.scan.failed`), metadata refresh outcomes (`metadata.refresh.completed`, `metadata.refresh.failed`), playback lifecycle events (`playback.started`, `playback.stopped`), successful download entrypoints (`media.download.started`), transcode lifecycle events (`transcode.started`, `transcode.completed`, `transcode.failed`), successful user logins (`user.login`), and plugin schedules (`scheduler.tick`).
@@ -184,11 +186,16 @@ Plugins can choose a logical channel, but they cannot choose target URLs, bot to
 Plugin author workflow, manifest examples, HTTP dispatch signing, idempotency, Host API usage, packaging, and local smoke guidance are documented in `docs/plugin-development.md`.
 
 - `examples/plugins/http-notification-bridge`: HTTP runtime plugin that subscribes to selected host events, verifies signed dispatches when `PLUGIN_SECRET_KEY` is configured, reads its `channel` config through `GET /api/plugin/config`, dedupes by dispatch idempotency key, and forwards notifications through `POST /api/plugin/notifications`.
+- `examples/plugins/telegram-notifier-template`, `examples/plugins/wecom-notifier-template`, and `examples/plugins/webhook-notifier-template`: first-party notification templates for administrator-managed Telegram, WeCom, and webhook targets. They only submit controlled Host API notification requests and keep target credentials out of plugin config.
 - `examples/plugins/http-marker-importer`: HTTP runtime plugin that subscribes to `metadata.refresh.completed`, reads public item details through `GET /api/plugin/items/{itemId}`, resolves marker candidates by external provider ID, and replaces only its own plugin-scoped intro/credits marker source through `PUT /api/plugin/items/{itemId}/markers`.
 
-Use `scripts/package-plugin.ps1 -PluginDir examples/plugins/http-notification-bridge -Force` or pass another example plugin directory such as `examples/plugins/http-marker-importer` to build a ZIP whose root contains `manifest.json`. The helper writes to `var/plugin-packages` by default, refuses output paths inside the plugin source directory, and prints the `packagePath`, `checksumSha256`, and manifest object expected by `POST /api/admin/plugins/packages`.
+Use `scripts/package-plugin.ps1 -PluginDir examples/plugins/http-notification-bridge -Force` or pass another example plugin directory such as `examples/plugins/http-marker-importer` or one of the notification template directories to build a ZIP whose root contains `manifest.json`. The helper writes to `var/plugin-packages` by default, refuses output paths inside the plugin source directory, and prints the `packagePath`, `checksumSha256`, and manifest object expected by `POST /api/admin/plugins/packages`.
 
-Use `scripts/smoke-plugin-lifecycle.ps1 -StartServer` for a local lifecycle smoke. It generates a one-off HTTP plugin, starts the API against local PostgreSQL and Redis, then verifies login, package install, approval, enablement, config persistence, active menu visibility, and package detail normalization through the real Admin API.
+Use `scripts/smoke-plugin-lifecycle.ps1 -StartServer` for a local lifecycle smoke. It generates a one-off HTTP plugin, starts the API against local PostgreSQL and Redis, then verifies login, package install, approval, enablement, config persistence, active menu visibility, and package detail normalization through the real Admin API. Add `-IncludeSchedule` to also declare an enabled-by-default interval schedule and verify package detail plus `/api/admin/scheduled-tasks?ownerType=plugin` expose the synchronized plugin task.
+
+Use `scripts/smoke-plugin-runtime.ps1 -StartServer -DeliverNotification` for a local notification delivery smoke. It creates an administrator-managed webhook target, lets a temporary HTTP plugin submit `POST /api/plugin/notifications`, runs the notification worker, then verifies the request reaches `delivered`, a succeeded delivery attempt is visible through Admin API, and the local webhook endpoint receives the POST.
+
+Use `scripts/smoke-plugin-runtime.ps1 -StartServer -DispatchSchedule` for a local plugin schedule dispatch smoke. It declares an enabled-by-default interval schedule, triggers the synchronized `plugin.schedule` task through the Admin manual-run endpoint, then verifies the queued `scheduler.tick` dispatch is executed successfully by the plugin worker.
 
 Notification targets are managed through Admin API routes:
 

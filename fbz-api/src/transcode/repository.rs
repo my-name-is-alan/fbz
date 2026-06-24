@@ -1,4 +1,5 @@
 use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
+use tracing::warn;
 
 use crate::db::DbPool;
 
@@ -83,6 +84,19 @@ pub enum TranscodeClaimOutcome {
     NoQueuedSession,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranscodeExpiredLeaseSummary {
+    pub expired_sessions: u64,
+    pub retryable_sessions: u64,
+    pub terminal_sessions: u64,
+}
+
+impl TranscodeExpiredLeaseSummary {
+    pub fn has_work(&self) -> bool {
+        self.expired_sessions > 0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateTranscodeSessionInput {
     pub user_id: i64,
@@ -90,6 +104,8 @@ pub struct CreateTranscodeSessionInput {
     pub media_file_id: Option<i64>,
     pub input_path: String,
     pub output_base_path: String,
+    pub play_session_id: Option<String>,
+    pub device_id: Option<String>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub container: Option<String>,
@@ -142,10 +158,42 @@ const TRANSCODE_SESSION_EXISTS_SQL: &str = r#"
             )
             "#;
 
+const TRANSCODE_CANCEL_ACTIVE_ENCODING_SQL: &str = r#"
+            update transcoding_sessions
+            set status = 'cancelled',
+                worker_id = null,
+                lease_expires_at = null,
+                finished_at = coalesce(finished_at, now()),
+                updated_at = now()
+            where user_id = $1
+              and play_session_id = $2
+              and ($3::text is null or device_id = $3)
+              and status in ('queued', 'running')
+            returning public_id::text as id,
+                      status,
+                      hardware_acceleration,
+                      input_path,
+                      output_path,
+                      manifest_path,
+                      video_codec,
+                      audio_codec,
+                      container,
+                      bitrate,
+                      worker_id,
+                      lease_expires_at::text as lease_expires_at,
+                      attempts,
+                      max_attempts,
+                      error_message,
+                      created_at::text as created_at,
+                      updated_at::text as updated_at,
+                      started_at::text as started_at,
+                      finished_at::text as finished_at
+            "#;
+
 const TRANSCODE_FIND_HLS_SESSION_SQL: &str = r#"
             with requested as (
                 select case
-                           when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                            then $2::uuid
                            else null::uuid
                        end as item_public_id,
@@ -176,6 +224,35 @@ const TRANSCODE_FIND_HLS_SESSION_SQL: &str = r#"
               and ($4::bigint is null or ts.media_file_id = $4)
             limit 1
             "#;
+
+const EXPIRE_STALE_TRANSCODE_LEASES_SQL: &str = r#"
+        with expired_sessions as (
+            update transcoding_sessions
+            set status = case
+                    when attempts >= max_attempts then 'failed'
+                    else 'queued'
+                end,
+                worker_id = null,
+                lease_expires_at = null,
+                error_message = case
+                    when attempts >= max_attempts then coalesce(error_message, 'transcode lease expired')
+                    else 'transcode lease expired; requeued'
+                end,
+                finished_at = case
+                    when attempts >= max_attempts then coalesce(finished_at, now())
+                    else finished_at
+                end,
+                updated_at = now()
+            where status = 'running'
+              and lease_expires_at <= now()
+            returning id,
+                      attempts < max_attempts as retryable
+        )
+        select count(*)::bigint as expired_sessions,
+               count(*) filter (where retryable)::bigint as retryable_sessions,
+               count(*) filter (where not retryable)::bigint as terminal_sessions
+        from expired_sessions
+        "#;
 
 const TRANSCODE_UPDATE_TERMINAL_STATUS_SQL: &str = r#"
         update transcoding_sessions
@@ -220,7 +297,9 @@ impl TranscodeRepository {
                     video_codec,
                     audio_codec,
                     container,
-                    bitrate
+                    bitrate,
+                    play_session_id,
+                    device_id
                 )
                 select
                     prepared.public_id,
@@ -234,7 +313,9 @@ impl TranscodeRepository {
                     $6,
                     $7,
                     $8,
-                    $9
+                    $9,
+                    $10,
+                    $11
                 from prepared
                 returning public_id::text as id,
                           status,
@@ -269,6 +350,8 @@ impl TranscodeRepository {
         .bind(input.audio_codec)
         .bind(input.container)
         .bind(input.bitrate)
+        .bind(normalize_optional_client_id(input.play_session_id))
+        .bind(normalize_optional_client_id(input.device_id))
         .fetch_one(&self.pool)
         .await?;
 
@@ -428,6 +511,22 @@ impl TranscodeRepository {
             .await
     }
 
+    pub async fn cancel_active_encoding(
+        &self,
+        user_id: i64,
+        play_session_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<Option<TranscodeSessionRecord>, sqlx::Error> {
+        let row = sqlx::query(TRANSCODE_CANCEL_ACTIVE_ENCODING_SQL)
+            .bind(user_id)
+            .bind(play_session_id.trim())
+            .bind(device_id.and_then(normalize_client_id))
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(TranscodeSessionRecord::from_row).transpose()
+    }
+
     pub async fn find_hls_session(
         &self,
         user_id: i64,
@@ -563,33 +662,30 @@ impl TranscodeRepository {
 
 async fn expire_stale_leases(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        update transcoding_sessions
-        set status = case
-                when attempts >= max_attempts then 'failed'
-                else 'queued'
-            end,
-            worker_id = null,
-            lease_expires_at = null,
-            error_message = case
-                when attempts >= max_attempts then coalesce(error_message, 'transcode lease expired')
-                else 'transcode lease expired; requeued'
-            end,
-            finished_at = case
-                when attempts >= max_attempts then coalesce(finished_at, now())
-                else finished_at
-            end,
-            updated_at = now()
-        where status = 'running'
-          and lease_expires_at <= now()
-        "#,
-    )
-    .execute(&mut **tx)
-    .await?;
+) -> Result<TranscodeExpiredLeaseSummary, sqlx::Error> {
+    let row = sqlx::query(EXPIRE_STALE_TRANSCODE_LEASES_SQL)
+        .fetch_one(&mut **tx)
+        .await?;
+    let summary = TranscodeExpiredLeaseSummary {
+        expired_sessions: row.try_get::<i64, _>("expired_sessions")?.max(0) as u64,
+        retryable_sessions: row.try_get::<i64, _>("retryable_sessions")?.max(0) as u64,
+        terminal_sessions: row.try_get::<i64, _>("terminal_sessions")?.max(0) as u64,
+    };
 
-    Ok(())
+    log_expired_transcode_lease_summary(summary);
+
+    Ok(summary)
+}
+
+fn log_expired_transcode_lease_summary(summary: TranscodeExpiredLeaseSummary) {
+    if summary.has_work() {
+        warn!(
+            expired_sessions = summary.expired_sessions,
+            retryable_sessions = summary.retryable_sessions,
+            terminal_sessions = summary.terminal_sessions,
+            "recovered stale transcode sessions"
+        );
+    }
 }
 
 async fn update_terminal_status(
@@ -771,6 +867,63 @@ mod tests {
                 .contains(&offset_token)
         );
     }
+
+    #[test]
+    fn active_encoding_cancel_uses_user_scoped_client_session_ids() {
+        let migration =
+            include_str!("../../migrations/0061_transcoding_sessions_active_encoding_ids.sql");
+
+        assert!(REPOSITORY_SOURCE.contains("pub play_session_id: Option<String>"));
+        assert!(REPOSITORY_SOURCE.contains("pub device_id: Option<String>"));
+        assert!(REPOSITORY_SOURCE.contains("play_session_id"));
+        assert!(REPOSITORY_SOURCE.contains("device_id"));
+        assert!(REPOSITORY_SOURCE.contains("TRANSCODE_CANCEL_ACTIVE_ENCODING_SQL"));
+        assert!(REPOSITORY_SOURCE.contains("where user_id = $1"));
+        assert!(REPOSITORY_SOURCE.contains("and play_session_id = $2"));
+        assert!(REPOSITORY_SOURCE.contains("and ($3::text is null or device_id = $3)"));
+        assert!(REPOSITORY_SOURCE.contains("and status in ('queued', 'running')"));
+        assert!(REPOSITORY_SOURCE.contains("cancel_active_encoding"));
+
+        assert!(migration.contains("add column if not exists play_session_id text"));
+        assert!(migration.contains("add column if not exists device_id text"));
+        assert!(migration.contains("idx_transcoding_sessions_active_encoding_cancel"));
+        assert!(migration.contains("where status in ('queued', 'running')"));
+    }
+
+    #[test]
+    fn stale_transcode_lease_recovery_counts_retryable_and_terminal_sessions() {
+        let summary = TranscodeExpiredLeaseSummary {
+            expired_sessions: 3,
+            retryable_sessions: 2,
+            terminal_sessions: 1,
+        };
+
+        assert!(summary.has_work());
+        assert_eq!(
+            summary.expired_sessions,
+            summary.retryable_sessions + summary.terminal_sessions
+        );
+        assert!(EXPIRE_STALE_TRANSCODE_LEASES_SQL.contains("retryable_sessions"));
+        assert!(EXPIRE_STALE_TRANSCODE_LEASES_SQL.contains("terminal_sessions"));
+        assert!(EXPIRE_STALE_TRANSCODE_LEASES_SQL.contains("status = 'running'"));
+        assert!(EXPIRE_STALE_TRANSCODE_LEASES_SQL.contains("lease_expires_at <= now()"));
+    }
+
+    #[test]
+    fn stale_transcode_lease_recovery_reports_structured_summary_fields() {
+        let production_source = REPOSITORY_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("repository source should include production section");
+
+        assert!(production_source.contains("TranscodeExpiredLeaseSummary"));
+        assert!(production_source.contains("retryable_sessions"));
+        assert!(production_source.contains("terminal_sessions"));
+        assert!(production_source.contains("expired_sessions = summary.expired_sessions"));
+        assert!(production_source.contains("retryable_sessions = summary.retryable_sessions"));
+        assert!(production_source.contains("terminal_sessions = summary.terminal_sessions"));
+        assert!(production_source.contains("recovered stale transcode sessions"));
+    }
 }
 
 fn normalize_output_base_path(path: &str) -> String {
@@ -781,4 +934,22 @@ fn normalize_output_base_path(path: &str) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+fn normalize_optional_client_id(value: Option<String>) -> Option<String> {
+    value.and_then(|value| normalize_client_id(&value))
+}
+
+fn normalize_client_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        return None;
+    }
+
+    Some(value.to_owned())
 }

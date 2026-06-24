@@ -4,5 +4,6 @@ pub mod host;
 pub mod manifest;
 pub mod repository;
 pub mod routes;
+pub mod signing;
 pub mod wasi;
 pub mod worker;

@@ -19,6 +19,18 @@ export interface FilePickerState {
   resolve: ((path: string) => void) | null;
 }
 
+export interface LibraryEditorState {
+  open: boolean;
+  libraryId: string | null; // null for new library, string for editing
+}
+
+export interface ToastMessage {
+  id: string;
+  message: string;
+  type: "success" | "info" | "warning" | "error";
+  duration: number;
+}
+
 export const useUiStore = defineStore("ui", () => {
   const isInitialized = ref(localStorage.getItem("fbz_initialized") === "true");
   const setupWizardOpen = ref(!isInitialized.value);
@@ -44,6 +56,15 @@ export const useUiStore = defineStore("ui", () => {
     currentPath: "/media/nas/电影",
     resolve: null,
   });
+
+  // Library Editor modal state
+  const libraryEditor = ref<LibraryEditorState>({
+    open: false,
+    libraryId: null,
+  });
+
+  // Global Toast Notifications
+  const toasts = ref<ToastMessage[]>([]);
 
   function completeInitialization() {
     isInitialized.value = true;
@@ -104,6 +125,42 @@ export const useUiStore = defineStore("ui", () => {
     filePicker.value.resolve = null;
   }
 
+  function openLibraryEditor(libraryId: string | null = null) {
+    libraryEditor.value = {
+      open: true,
+      libraryId,
+    };
+  }
+
+  function closeLibraryEditor() {
+    libraryEditor.value.open = false;
+    libraryEditor.value.libraryId = null;
+  }
+
+  function showToast(
+    message: string,
+    type: "success" | "info" | "warning" | "error" = "info",
+    duration = 3000,
+  ) {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    toasts.value.push({
+      id,
+      message,
+      type,
+      duration,
+    });
+    setTimeout(() => {
+      removeToast(id);
+    }, duration);
+  }
+
+  function removeToast(id: string) {
+    const idx = toasts.value.findIndex((t) => t.id === id);
+    if (idx > -1) {
+      toasts.value.splice(idx, 1);
+    }
+  }
+
   return {
     isInitialized,
     setupWizardOpen,
@@ -111,6 +168,8 @@ export const useUiStore = defineStore("ui", () => {
     contextMenu,
     metadataManager,
     filePicker,
+    libraryEditor,
+    toasts,
     completeInitialization,
     resetInitialization,
     openContextMenu,
@@ -119,5 +178,9 @@ export const useUiStore = defineStore("ui", () => {
     closeMetadataManager,
     openFilePicker,
     closeFilePicker,
+    openLibraryEditor,
+    closeLibraryEditor,
+    showToast,
+    removeToast,
   };
 });

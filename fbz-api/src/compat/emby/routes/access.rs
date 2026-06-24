@@ -68,6 +68,13 @@ pub(crate) fn access_token_from_request(
     }
 }
 
+pub(crate) fn client_device_id_from_request(
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    Ok(parse_auth_context(headers, query)?.client.device_id)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderMap;

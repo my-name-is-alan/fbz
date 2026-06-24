@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { useLibraryStore } from "@/stores/library.ts";
+import { useAuthStore } from "@/stores/auth.ts";
 
 const emit = defineEmits<{ openDrawer: [] }>();
 
 const libraryStore = useLibraryStore();
+const authStore = useAuthStore();
 const { libraries } = storeToRefs(libraryStore);
 const accountMenuOpen = ref(false);
 
 const accountLinks = [
   { label: "后台管理", to: "/admin" },
-  { label: "个人信息", to: "/profile" },
-  { label: "消息中心", to: "/messages" },
+  { label: "个人信息", to: "/admin/profile" },
+  { label: "消息中心", to: "/admin/logs" },
 ] as const;
 
 // 滚动 → header 镂空磨砂
@@ -50,6 +52,12 @@ function closeAccountMenu() {
 function logout() {
   accountMenuOpen.value = false;
 }
+
+useEventListener(window, "keydown", (e) => {
+  if (e.key === "Escape" && accountMenuOpen.value) {
+    closeAccountMenu();
+  }
+});
 </script>
 
 <template>
@@ -57,11 +65,11 @@ function logout() {
     class="site-header"
     :class="{ 'is-scrolled': scrolled, 'is-hero-transparent': hasHeroBackdrop && !scrolled }"
   >
-    <button class="hamburger" aria-label="菜单" @click="emit('openDrawer')">☰</button>
+    <button class="hamburger" aria-label="打开侧边导航" @click="emit('openDrawer')">☰</button>
 
     <RouterLink to="/" class="brand">F<b>B</b>Z</RouterLink>
 
-    <nav class="nav">
+    <nav class="nav" aria-label="主导航">
       <RouterLink to="/" class="nav-item" active-class="active" exact-active-class="active">
         首页
       </RouterLink>
@@ -101,20 +109,23 @@ function logout() {
         :aria-expanded="accountMenuOpen"
         @click.stop="accountMenuOpen = !accountMenuOpen"
       >
-        A
+        {{ authStore.nickname.charAt(0).toUpperCase() }}
       </button>
 
-      <div v-if="accountMenuOpen" class="account-dropdown">
+      <div v-if="accountMenuOpen" class="account-dropdown" role="menu" aria-label="用户账户菜单">
         <RouterLink
           v-for="link in accountLinks"
           :key="link.to"
           class="account-item"
+          role="menuitem"
           :to="link.to"
           @click="closeAccountMenu"
         >
           {{ link.label }}
         </RouterLink>
-        <button class="account-item danger" type="button" @click="logout">退出登录</button>
+        <button class="account-item danger" type="button" role="menuitem" @click="logout">
+          退出登录
+        </button>
       </div>
     </div>
   </header>
@@ -238,7 +249,8 @@ function logout() {
     transform var(--fbz-motion-base),
     visibility var(--fbz-motion-base);
 
-  .lib-wrap:hover & {
+  .lib-wrap:hover &,
+  .lib-wrap:focus-within & {
     opacity: 1;
     visibility: visible;
     transform: none;
