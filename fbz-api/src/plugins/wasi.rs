@@ -678,6 +678,76 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "run after: (cd examples/plugins/wasi-scan-logger-template && cargo build --release --target wasm32-wasip1); then `cargo test -- --ignored wasi_scan_logger`"]
+    async fn wasi_scan_logger_template_executes_end_to_end() {
+        let template_release = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/wasi-scan-logger-template/target/wasm32-wasip1/release");
+        let wasm = template_release.join("plugin.wasm");
+        assert!(
+            wasm.exists(),
+            "build the template first (cargo build --release --target wasm32-wasip1): {}",
+            wasm.display()
+        );
+
+        let now_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("fbz-wasi-smoke-{}-{}", process::id(), now_nanos));
+        let data = base.join("data");
+        let cache = base.join("cache");
+        let tmp = base.join("tmp");
+        for dir in [&data, &cache, &tmp] {
+            std_fs::create_dir_all(dir).unwrap();
+        }
+
+        // Stage the built wasm in the layout the runtime resolves:
+        // {package_dir}/extracted/{plugin_id}/{version}/plugin.wasm
+        let package_root = base
+            .join(PLUGIN_PACKAGE_EXTRACTED_DIR)
+            .join("dev.fbz.wasi.scan-logger")
+            .join("0.1.0");
+        std_fs::create_dir_all(&package_root).unwrap();
+        std_fs::copy(&wasm, package_root.join("plugin.wasm")).unwrap();
+
+        let output = PluginWasiRuntime::new()
+            .execute(PluginWasiExecution {
+                package_dir: base.clone(),
+                data_dir: data,
+                cache_dir: cache,
+                tmp_dir: tmp,
+                plugin_id: "dev.fbz.wasi.scan-logger".to_owned(),
+                package_version: "0.1.0".to_owned(),
+                entrypoint: "plugin.wasm".to_owned(),
+                handler: "hooks.onScanCompleted".to_owned(),
+                idempotency_key: "smoke-1".to_owned(),
+                host_base_url: "http://127.0.0.1:8080".to_owned(),
+                host_token: None,
+                payload: json!({
+                    "eventType": "library.scan.completed",
+                    "aggregateId": "lib-1"
+                }),
+                timeout: Duration::from_secs(5),
+                memory_limit_mb: 128,
+                fuel: 100_000_000,
+                stdio_max_bytes: 65536,
+                max_module_bytes: 67_108_864,
+                tmp_max_age: Duration::from_secs(86_400),
+            })
+            .await
+            .expect("wasi template execution should succeed");
+
+        let body = output.response_body.expect("response body on stdout");
+        // The template echoes its dispatch context and the received event payload.
+        assert!(body.contains("dev.fbz.wasi.scan-logger"), "body: {body}");
+        assert!(body.contains("hooks.onScanCompleted"), "body: {body}");
+        assert!(body.contains("library.scan.completed"), "body: {body}");
+
+        let _ = std_fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn wasi_entrypoint_path_stays_inside_package() {
         let root = PathBuf::from("/tmp/plugin");

@@ -120,6 +120,9 @@ node --check examples/plugins/webhook-notifier-template/server.mjs
 - Emby Live TV 探测已补 `LiveTv/Info` / `GuideInfo` 禁用信息，`LiveTv/Folder` 禁用顶层直播文件夹，`Channels` / `Programs` / `Programs/Recommended` / `RecommendedPrograms` / `UpcomingPrograms` / `EPG` / `ChannelTags` / `ChannelTags/Prefixes` / `ChannelMappingOptions` / `ChannelMappings` / `ListingProviders` / `ListingProviders/Available` / `ListingProviders/Default` / `ListingProviders/Lineups` / `Manage/Channels` / `TunerHosts` / `TunerHosts/Default/{Type}` / `TunerHosts/Types` / `Tuners/Discover` / `Tuners/Discvover` / `Recordings` / `Recordings/Folders` / `Recordings/Series` / `Timers` / `Timers/Defaults` / `SeriesTimers` 空列表或受控默认 DTO，`POST LiveTv/Programs` 兼容空 EPG 查询，以及 `LiveTv/Programs/{Id}` / `Channels/{Id}` / `Recordings/{Id}` / timer 详情受控 not found；直播源、频道映射、节目单 provider、频道管理、录制、timer、series timer、tuner host 和 tuner reset 写/删入口返回受控冲突，避免未接真实直播源模型前客户端能力和节目详情探测走缺省 404 或制造未落库成功状态。
 - Emby 首页内容服务已补 `Users/{Id}/HomeSections` 和 `Users/{Id}/Sections/{SectionId}/Items`；section 列表按认证用户返回 latest/resume/favorites/library 常见分区，分区 items 通过 section allowlist 映射回已有用户可见 Items 查询，继续由 repository 权限过滤兜住媒体库边界。
 - Emby 首页兼容入口已补 `Users/{Id}/Suggestions`，复用权限过滤列表查询返回最近加入推荐窗口。
+- Emby 首页两大高频栏目已补查询形入口,与既有路径形并存(很多客户端用 query 形)：最近加入 `Items/Latest?UserId=...`(对应 `Users/{Id}/Items/Latest`)和继续观看 `Items/Resume?UserId=...`(对应 `Users/{Id}/Items/Resume`)。各抽出 `latest_items_response` / `resume_items_response` 共享逻辑,query 形经 `authenticate_query_user` 鉴权,复用同一套权限过滤、排序和分页;`MediaListQuery` 补 `UserId` 字段;`emby_items_latest_query_user_alias_exists` 集成测试覆盖四条 URI;README 当前能力同步。
+- Emby 音乐即时混音已把 `MusicGenres/{Name}/InstantMix` 从兼容空结果升级为真实流派种子混音：路径流派名作为权威种子（覆盖客户端传入的流派过滤，空名返回空结果），复用 `Songs?Genres=...` 的 `list_items_for_authenticated_user` Audio 查询链路，权限过滤与 DTO 映射与既有歌曲列表一致。
+- Emby 音乐即时混音的 bare `Artists/InstantMix?Id=`（艺术家 `public_id` 种子）和 `MusicGenres/InstantMix?Id=`（流派 id 种子）也已从兼容空结果升级为真实混音，复用 `artist_ids` / `genre_ids` 权限过滤 Audio 查询（缺省/空种子返回空结果）；至此原 `instant_mix::empty_instant_mix` 空桩模块已全部被真实处理器取代并移除。
 - Emby MoviesService 推荐入口已补 `Movies/Recommendations`，按认证用户边界返回最近加入电影推荐分类并受控解析 `UserId`、`CategoryLimit`、`ItemLimit` 和图片字段；`Movies/{Id}/Similar` 复用现有相似内容查询，避免电影详情页推荐探测 404。
 - Emby 旧搜索提示入口已补 `Search/Hints`，复用权限过滤 Items 查询和 `SearchTerm` / `IncludeItemTypes` / `MediaTypes` 解析返回 legacy `SearchHints`。
 - Emby 媒体库物理路径探测已补 `Library/PhysicalPaths`，按管理员权限返回启用中的媒体库路径数组，并在路由层规范化空路径和重复路径，避免普通用户侧媒体库浏览接口扩大为全局路径泄露。
@@ -173,10 +176,13 @@ node --check examples/plugins/webhook-notifier-template/server.mjs
 - `/ready` 已返回 worker 配置/节点角色运行条件和队列 backlog 摘要，便于 Docker/NAS 多节点部署排障。
 - `/ready` 已补 `runtime.roles`，按 `FBZ_NODE_ROLE=all/api/worker/scheduler` 明确暴露当前进程承担的 api、worker、scheduler 职责，便于 API-only、worker-only 和 scheduler-only 节点排障。
 - `/ready` 已补 `runtime.queues.event_stream_mirror`，按 PostgreSQL `event_outbox` 未镜像事件统计 unmirrored、claimable、locked、backoff、failed 和 max_attempts，便于定位 Redis Streams 镜像 worker 停滞或回退。
+- `/ready` 队列摘要已补按节点职责的 `drained_by_node` 标记：jobs / event_outbox / transcodes / notifications / event_stream_mirror 各队列的 backlog 计数是全局的，新增布尔标记表明当前节点是否真的运行消费该队列的 worker（均需 worker 角色，且各自对应 worker 启用）。映射按真实消费者：generic `jobs` 由 scan/metadata/probe worker 消费；transcodes 由转码 worker；notifications（`plugin_notification_requests`）由通知投递 worker；`event_outbox` 由三类消费者共享——插件 hook 派发（plugins::execution）、通知投递（notifications::delivery）和 Redis Streams 镜像（events），任一在 worker 节点启用即视为本节点消费；`event_stream_mirror`（`stream_mirrored_at is null` backlog）专属 Redis 镜像 worker。api-only / scheduler-only 节点能看到全局 backlog 但 `drained_by_node=false`，便于多节点排障时区分「本节点负责的积压」与「可见但不归本节点处理的积压」。
 - HTTP 请求追踪已补 `HTTP_SLOW_LOG_THRESHOLD_MS` 慢请求阈值，超过阈值的请求会写入包含 status、latency_ms 和 threshold_ms 的 `slow http request` 结构化 warn 日志。
 - SQLx 慢 SQL 观测已补 `DATABASE_SLOW_LOG_THRESHOLD_MS`，数据库连接会按配置把超过阈值的 SQL 语句写入 warn 日志，同时保留 PostgreSQL `statement_timeout` 作为硬超时。
 - 通用 job lease 回收已补 `recovered stale running jobs` 结构化 warn 日志，按 job_type 记录 expired_jobs、retryable_jobs 和 terminal_jobs，便于区分可重试过期任务与达到 max attempts 的终止任务。
+- 通用 job handler 失败重试路径已补结构化 warn 日志：`library.scan`、`metadata.refresh`、`media.probe` 三个 worker 的失败收尾统一走 `jobs::mark_job_failed`，释放租约后按 `attempts < max_attempts` 输出 `job failed; scheduled retry`（retryable=true）或 `job failed; max attempts reached`（retryable=false），记录 job_type、job public_id、attempt/max_attempts 和 error；此前 handler 直接报错（如扫描期间 NAS 临时不可达）只把 job 标记 failed 而无日志，仅 lease 过期路径可观测。
 - 计划任务 run lease 回收已补 `recovered stale scheduled task runs` 结构化 warn 日志，记录 expired_runs、due_runs 和 manual_runs，便于区分周期调度和管理员手动触发的过期任务。
+- 计划任务 run 执行失败路径已补 `scheduled task run failed` 结构化 warn 日志：`run_next_due_task`（周期调度）和 `run_task_once`（管理员手动触发）在 `mark_task_failure` 落库后统一调用 `log_scheduled_task_failure`，记录 task_key、task_type、run_id 和 error；此前执行期失败只更新 `scheduled_task_runs`/`scheduled_tasks`，仅由 worker 循环输出不带任务身份的通用 `scheduler worker failed to dispatch task`，手动触发路径无日志。
 - 转码 lease 回收已补 `recovered stale transcode sessions` 结构化 warn 日志，记录 expired_sessions、retryable_sessions 和 terminal_sessions，便于区分可重新排队的过期转码与达到 max attempts 的终止转码。
 - 转码 worker 失败路径已补 `transcode session failed` 结构化 warn 日志上下文，记录 session、user、item、media_file_id、worker、attempts/max_attempts、硬件加速、编码容器和 bitrate，便于区分硬件/编码/特定媒体项导致的失败。
 - 插件 execution run lease 回收已补 `recovered stale plugin execution runs` 结构化 warn 日志，记录 expired_runs 和 revoked_tokens，便于定位插件 worker 崩溃后执行审计与 Host Token 回收。
@@ -185,6 +191,7 @@ node --check examples/plugins/webhook-notifier-template/server.mjs
 - 插件 hook dispatch 失败并重新入队时，已补 `plugin dispatch failed; scheduled retry` 结构化 warn 日志，记录 outbox public id、attempt/max_attempts 和 retry delay，便于定位插件执行失败重试。
 - 通知投递 outbox 失败并重新入队时，已补 `notification delivery failed; scheduled retry` 结构化 warn 日志，记录 outbox public id、attempt/max_attempts 和 retry delay，便于定位通知投递重试。
 - 数据库性能方向：多处列表和审计接口已改 keyset pagination；Host API 调用审计已补单条件和 `pluginId/statusCode`、`executionRunId/statusCode` 组合过滤索引。
+- job 队列 claim 热路径索引已对齐：`metadata.refresh`（0015）和 `media.probe`（0023）此前各有专用 `(status, run_at, priority desc, id)` 部分 claim 索引，而 `library.scan` 只有按 libraryId 的去重索引（0021），claim 查询回退到跨 job_type 的通用 `idx_jobs_status_run_at`；新增迁移 0063 `idx_jobs_library_scan_claim` 补齐同形态部分索引，让每轮 worker 轮询的扫描 claim 在大表上保持选择性。已在本地 dockerized PostgreSQL 上实跑校验：迁移链 0001–0063 全部 `success=t`，`idx_jobs_library_scan_claim` 以预期定义创建（`btree(status, run_at, priority desc, id) where job_type='library.scan' and status in ('queued','failed')`），`enable_seqscan=off` 下规划器对扫描 claim 查询使用该索引（小表默认 seq scan 属正常）。
 - 本地开发依赖恢复：`scripts/dev-deps.ps1` 可一键 start/status/restart/stop PostgreSQL 和 Redis，并等待 Docker health 到位。
 - 插件系统：manifest、权限、hook、计划任务、菜单、安装审批、HTTP/WASI runtime、Host API、通知 worker、运行审计和 Host API 调用审计。
 - 插件开发生态：`docs/plugin-development.md`、HTTP helper、notification bridge 示例、Telegram / 企业微信 / webhook 通知模板、marker importer 示例、打包脚本、`sign-plugin-package` 签名工具、signed package smoke wiring、Host API budget runtime smoke、plugin notification delivery smoke、plugin schedule lifecycle smoke、plugin schedule dispatch smoke 和 Node helper / 模板结构测试。
@@ -216,31 +223,40 @@ node --check examples/plugins/webhook-notifier-template/server.mjs
 - 继续检查所有 Admin API、高增长 outbox、execution run、notification attempt、job/event 表是否 keyset 化。
 - Host API 调用审计已覆盖 `pluginId/statusCode` 和 `executionRunId/statusCode` 组合过滤索引；后续继续按真实 Admin 查询组合补精确索引。
 - 针对 5PB / 百万级媒体量继续补复合索引、partial index、查询上限、批处理上限。
-- 必要时设计分区策略、归档策略、冷热数据边界和物化统计。
-- SQL 改动要验证查询形态，避免 `public_id::text = any(...)` 这类破坏索引的写法。
+- 分区/归档设计已固化:`docs/database-partitioning-design.md` 给出高增长表(`job_events`、`event_outbox`、`job_runs`、`jobs`、`scheduled_task_runs`、`plugin_host_api_calls`、`plugin_execution_runs`、`notification_delivery_attempts`、`plugin_notification_requests`、`playback_sessions`、`transcoding_sessions`)的按时间 RANGE 分区键、保留热窗口、归档(DETACH+归档+DROP)、冷热边界、物化统计(`queue_stats_rollup` 避免扫全分区)、唯一约束/外键改造和滚动维护方案,并明确分区为结构变更、落地前需确认。应用层 claim/readiness/admin keyset 查询谓词已是时间+状态,分区裁剪天然可用,基本无需改写。
+- 分区首张表已落地:经确认后实现迁移 `0064_partition_job_events.sql`,把 `job_events` 按 `created_at` 月度 RANGE 分区(PK 改 `(id, created_at)`、复用 `job_events_id_seq`、保留 jobs/job_runs 外键与四个原名 keyset/时间索引、回填现有行、建 `2026m06/07/08` + `default` 分区)。本地 dockerized PostgreSQL 实跑校验:`success=t`、relkind `p`、28 行全部保留并落 `2026m06`、`2026-07-15` 插入路由 `2026m07` 且 id 续 29、legacy 表已删;`record_job_event` 的 INSERT 未变,透明路由。`jobs.rs` 加迁移结构测试 `job_events_partition_migration_partitions_by_created_at`。
+- 分区第二张表已落地(category B 首张):迁移 `0065_partition_plugin_host_api_calls.sql` 把高增长审计表 `plugin_host_api_calls` 按 `finished_at` 月度 RANGE 分区,验证并实现 `public_id` UNIQUE → 普通索引降级(随机 uuid + 审计 INSERT 无 ON CONFLICT,降级安全),保留 11 个原审计索引(含预算上限索引)与三出站外键。本地实跑校验:`success=t`、relkind `p`、11 行保留、无 UNIQUE 约束且 public_id 索引非唯一、预算索引在、`2026-08-10` 插入路由 `2026m08`、legacy 已删。`jobs.rs` 加 `plugin_host_api_calls_partition_migration_relaxes_public_id_and_partitions_by_finished_at` 测试。- 分区第三张表已落地(category B):迁移 `0066_partition_scheduled_task_runs.sql` 把调度运行历史 `scheduled_task_runs` 按 `started_at` 月度 RANGE 分区,`public_id` UNIQUE → 普通索引,保留 active/task_recent/task_started/task_status 四索引与外键。虽有 running-lease/claim 语义,但 `started_at` 插入后不变(行不跨分区),已实测 active-query 兼容:插入 running run 路由 `2026m06`、按 id 更新状态成功、lease 回收查询正确。`success=t`、relkind `p`、2 行保留、active partial 索引在。`jobs.rs` 加 `scheduled_task_runs_partition_migration_partitions_by_started_at` 测试。
+- 分区第四张表已落地(category C 首张):迁移 `0067_partition_job_runs.sql` 先 drop 入站 FK `job_events_job_run_id_fkey`(安全分析:job_runs 仅经 jobs 级联删除,该级联同时删除引用方 job_events,SET NULL 路径永不触发;`job_run_id` 列保留),再把 `job_runs` 按 `started_at` 月度 RANGE 分区(无 public_id,无需唯一性降级)。本地实跑校验:`success=t`、relkind `p`、14 行保留、入站 FK 已删且列保留、`2026-08-20` 插入路由 `2026m08`、legacy 已删。`jobs.rs` 加 `job_runs_partition_migration_drops_inbound_fk_and_partitions_by_started_at` 测试。
+- 至此 A(`job_events`)+ B(`plugin_host_api_calls`、`scheduled_task_runs`)+ C 首张(`job_runs`)共四表已实现并实跑校验,三种模式(纯净 / public_id 降级 / 入站 FK 安全 drop)均已证。- 分区滚动维护机制已落地:迁移 `0068` 建 `ensure_partition_coverage(months_ahead int) returns int`,幂等为四张已分区表创建当前月 + N 个未来月分区(已存在跳过),并在迁移内调用 `(18)` 把覆盖延伸到 2027m12(各表 19 月分区 + default)。本地实跑校验:函数存在、四表各 20 分区、重复调用返回 0(幂等)。`jobs.rs` 加 `partition_coverage_function_covers_all_partitioned_tables_idempotently` 测试。滚动计划任务已落地:`core.partition.maintenance`(task_type `partition.maintenance`,`SCHEDULE_PARTITION_MAINTENANCE` 默认 `daily`)在 `bootstrap_core_tasks` 注册、`run_claimed_task` 调 `ensure_partition_coverage(6)` 保持向前 6 月覆盖,受 scheduler 角色+开关门控。本地实跑校验:启用 scheduler 后任务注册(enabled=t)、强制 due 后经真实调度器派发并 `succeeded`(queued_jobs=0)。`config.rs`/`scheduler` 加 `partition_maintenance_task_is_wired_end_to_end`、`partition_maintenance_schedule_defaults_to_daily` 测试。待办:冷分区归档/`DETACH`+`DROP` 与 `queue_stats_rollup` 物化统计仍为设计。
+- C 类逐张安全性分析后结论:`job_runs` 是唯一可简单安全 drop 的 C 表(已落地);`plugin_execution_runs` 入站 FK 虽可安全 drop,但另带业务唯一 `(outbox_event_public_id, attempt)`(派发幂等不变量,DB 强制),分区将被迫移除该不变量,需单独决策,暂不分区;`playback_sessions` 的入站 SET NULL 路径会被触发(经 users/media_items 级联独立删除),已用**触发器方案**落地(迁移 `0069`):先建 `BEFORE DELETE` 触发器复刻 SET NULL(置空 transcoding_sessions 引用)+ 支撑索引,再 drop 入站 FK,再按 `started_at` 分区(public_id 降级),并加入 `ensure_partition_coverage`。本地实跑校验含触发器行为实测(删除 playback_session 后 transcoding 引用被自动置空)。剩余:B 余 `notification_delivery_attempts`(0 行,达规模再做);C 余两表如上各有阻塞;D 类活跃队列(`jobs`/`event_outbox`/`transcoding_sessions`,最高风险,最后)。`database-partitioning-design.md` 已补「各表落地就绪分析」:基于实跑 schema 巡检把候选表分为 A(无 public_id 的纯 leaf,仅 job_events,已 done)、B(leaf 但有 `public_id uuid` 唯一约束,需先定唯一性降级:`plugin_host_api_calls`/`notification_delivery_attempts`/`scheduled_task_runs`)、C(有入站外键需先改造引用方:`job_runs`←job_events、`plugin_execution_runs`←host_tokens/host_api_calls、`playback_sessions`←transcoding_sessions)、D(活跃队列 `jobs`/`event_outbox`/`transcoding_sessions`,最后单独评估),给出 A→B→C→D 的实施顺序与每表具体阻塞点。
+- SQL 改动要验证查询形态，避免 `public_id::text = any(...)` 这类破坏索引的写法（现有代码已无此写法，且 `library/repository.rs` 有守卫测试断言主查询不含该模式）。
 
 ### 5. 插件生态生产闭环
 
 - 插件 smoke 已覆盖 signed package、Host API budget、通知投递、计划任务声明同步和计划任务派发执行；后续继续补真实插件模板和 WASI 模板时保持同样的端到端 smoke 标准。
-- WASI 插件后续可补模板，但联网插件继续优先 HTTP runtime。
+- WASI 插件模板已补：首个一方 WASI 示例 `examples/plugins/wasi-scan-logger-template/`（独立 workspace 的 wasm crate，`manifest.json` + `Cargo.toml` + `src/main.rs` + `README.md`），演示 WASIp1 沙箱纯计算契约(argv/env/stdin→stdout、`/plugin`/`/data`/`/cache`/`/tmp` 预挂载、fuel/内存/epoch/stdio/模块大小上限、无网络)。两层校验：`manifest.rs::first_party_wasi_scan_logger_manifest_is_valid` 用真实校验器验证 manifest(随 `cargo test`)；`wasi.rs::wasi_scan_logger_template_executes_end_to_end` 把编译出的 `plugin.wasm` 经真实 `PluginWasiRuntime::execute` 跑通 stdin→stdout(标 `#[ignore]` 避免默认 `cargo test` 依赖 `wasm32-wasip1` 目标,已本地实跑通过)。`docs/plugin-development.md` 补「WASI 运行时契约与模板」章节。
+- WASI 插件用于沙箱纯计算;联网 / Host API 插件继续优先 HTTP runtime(WASIp1 无 socket)。
 
 ### 6. 多用户和管理权限
 
-- 继续检查所有管理 API 是否强制服务器管理权限。
+- 管理 API 服务器管理权限已审计：`/api/admin/*` 无统一中间件，靠每个 handler 调用 `authenticate_admin`（内部校验 `can_manage_server`）；审计确认全部 handler 都强制该门控（`enable/disable_notification_target` 经 `set_notification_target_enabled` 间接校验）。已加回归守卫测试 `every_admin_route_handler_enforces_server_admin`，扫描 `routes.rs` 确保新增 admin handler 不会漏掉权限门控。
 - 继续补 Emby 用户策略字段和客户端真实行为映射。
 - 媒体库权限、下载、转码、新设备登录、会话撤销需要保持端到端一致。
 
 ### 7. 运行态可靠性和可观测
 
 - `/ready` 后续可继续按节点职责扩展 lease / worker 健康摘要；worker 开关、通用队列 backlog、事件镜像 backlog 已有基础输出。
-- 增加尚未覆盖的 worker 租约过期和其他队列重试的结构化日志；慢 HTTP、慢 SQL、通用 job lease、计划任务 run lease、转码 lease、插件 execution run lease、事件镜像 lease 回收、转码失败、事件镜像重试、插件 dispatch 重试和通知投递重试已有基础结构化日志。
-- 根据真实部署继续扩展 API 节点、worker 节点和 scheduler 节点的 readiness 摘要，例如只展示该节点职责相关的 backlog / lease / worker 健康状态。
+- 增加尚未覆盖的 worker 租约过期和其他队列重试的结构化日志；慢 HTTP、慢 SQL、通用 job lease、计划任务 run lease、转码 lease、插件 execution run lease、事件镜像 lease 回收、通用 job handler 失败重试（scan/metadata/probe）、转码失败、事件镜像重试、插件 dispatch 重试和通知投递重试已有基础结构化日志。
+- 已补按节点职责的队列归属：`/ready` 各队列 backlog 现带 `drained_by_node`，标记当前节点是否运行消费该队列的 worker；后续可继续按节点职责裁剪 lease / worker 健康摘要的展示粒度。
 
 ### 8. 部署和运维
 
-- 补 Docker 生产部署说明和 NAS 部署注意事项。
-- 明确环境变量模板、卷挂载、FFmpeg/ffprobe 覆盖、插件目录、缓存目录、转码目录。
-- 本地开发依赖启动脚本已补；后续继续补生产 Docker/NAS 部署说明和恢复检查清单。
+- 已补 `docs/deployment.md` 生产部署与运维指南：节点拓扑与 worker 双重门控、前置依赖（PG16/Redis7/FFmpeg）、
+  环境变量生产关键项、持久化目录与卷挂载、FFmpeg/ffprobe 覆盖优先级、多阶段 Dockerfile 示例、
+  单机 all 与多节点拆分的生产 docker-compose 示例、NAS 注意事项（媒体只读/路径一致/临时不可达重试/STRM 安全/资源约束）、
+  `/health`+`/ready` 探针与结构化日志、10 步运维恢复检查清单；README 已加「生产部署」入口。
+- 已补反向代理 / TLS 终止指引（nginx 关闭流式 buffering、放宽超时与 body size、`PUBLIC_BASE_URL` 对齐）、备份与恢复策略（PostgreSQL 为唯一权威状态、Redis 可重建、派生缓存可丢弃、恢复顺序）和大表迁移上线锁说明（启动期 `CREATE INDEX` 非并发会短暂持写锁，建议低峰单节点先迁移再扩容）。
+- 后续可继续补：真实镜像 CI 构建与发布、按真实硬件平台的硬件转码设备透传细则、备份恢复演练脚本。
 
 ## 当前建议的下一轮任务
 

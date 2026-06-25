@@ -480,6 +480,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emby_items_latest_query_user_alias_exists() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Items/Latest?UserId=user-1&Limit=20",
+            "/Items/Latest?UserId=user-1&Limit=20",
+            "/emby/Items/Resume?UserId=user-1&Limit=20",
+            "/Items/Resume?UserId=user-1&Limit=20",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("latest items request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
     async fn emby_plugin_service_aliases_exist() {
         let app = build_router(AppState::for_tests(Config::default()));
 

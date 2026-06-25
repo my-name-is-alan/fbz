@@ -13,6 +13,8 @@ pub const CORE_METADATA_REFRESH_TASK_KEY: &str = "core.metadata.refresh";
 pub const CORE_METADATA_REFRESH_TASK_TYPE: &str = "metadata.refresh_all";
 pub const CORE_TRANSCODE_CLEANUP_TASK_KEY: &str = "core.transcode.cleanup";
 pub const CORE_TRANSCODE_CLEANUP_TASK_TYPE: &str = "transcode.cleanup";
+pub const CORE_PARTITION_MAINTENANCE_TASK_KEY: &str = "core.partition.maintenance";
+pub const CORE_PARTITION_MAINTENANCE_TASK_TYPE: &str = "partition.maintenance";
 pub const PLUGIN_SCHEDULE_TASK_TYPE: &str = "plugin.schedule";
 const METADATA_REFRESH_QUEUE_BATCH_SIZE: i64 = 50_000;
 
@@ -460,6 +462,21 @@ impl SchedulerRepository {
 
         tx.commit().await.map_err(SchedulerError::Database)?;
         Ok(())
+    }
+
+    /// Ensure each time-partitioned table has the current month + `months_ahead`
+    /// upcoming monthly partitions, via the idempotent `ensure_partition_coverage`
+    /// SQL function (migration 0068). Returns the number of partitions created.
+    pub async fn ensure_partition_coverage(
+        &self,
+        months_ahead: i32,
+    ) -> Result<i64, SchedulerError> {
+        let created = sqlx::query_scalar::<_, i32>("select ensure_partition_coverage($1)")
+            .bind(months_ahead)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(SchedulerError::Database)?;
+        Ok(i64::from(created))
     }
 
     pub async fn queue_scan_all(&self, reason: &str) -> Result<i64, SchedulerError> {

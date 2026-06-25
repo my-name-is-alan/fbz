@@ -161,6 +161,22 @@ pub struct ItemByIdQuery {
     pub user_id: Option<String>,
 }
 
+/// Query for the bare `Artists/InstantMix` and `MusicGenres/InstantMix`
+/// endpoints, where the seed is supplied as `?Id=` (an artist `public_id` or a
+/// music genre id) rather than in the path.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct InstantMixByIdQuery {
+    pub id: Option<String>,
+    pub user_id: Option<String>,
+    pub start_index: Option<u32>,
+    pub limit: Option<u32>,
+    pub fields: Option<String>,
+    pub enable_images: Option<bool>,
+    pub image_type_limit: Option<u32>,
+    pub enable_image_types: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CriticReviewsQuery {
@@ -215,6 +231,7 @@ pub struct ItemCountsQuery {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub(super) struct MediaListQuery {
+    pub user_id: Option<String>,
     pub parent_id: Option<String>,
     pub start_index: Option<u32>,
     pub limit: Option<u32>,
@@ -331,6 +348,74 @@ pub async fn songs(
     let authenticated_user =
         authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
     let items_query = music_items_query(query, "Audio", Some("Audio"));
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
+            .await?;
+
+    Ok(Json(result))
+}
+
+pub async fn music_genre_instant_mix(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<MusicItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+
+    let start_index = query.start_index.unwrap_or(0);
+    let Some(items_query) = music_genre_instant_mix_query(&name, query) else {
+        return Ok(Json(QueryResultDto::new(Vec::new(), 0, start_index)));
+    };
+
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
+            .await?;
+
+    Ok(Json(result))
+}
+
+pub async fn artist_instant_mix(
+    State(state): State<AppState>,
+    Query(query): Query<InstantMixByIdQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    music_seed_instant_mix(state, MusicSeed::Artist, query, headers, uri).await
+}
+
+pub async fn music_genre_instant_mix_by_id(
+    State(state): State<AppState>,
+    Query(query): Query<InstantMixByIdQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    music_seed_instant_mix(state, MusicSeed::Genre, query, headers, uri).await
+}
+
+async fn music_seed_instant_mix(
+    state: AppState,
+    seed: MusicSeed,
+    query: InstantMixByIdQuery,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+
+    let start_index = query.start_index.unwrap_or(0);
+    let Some(items_query) = instant_mix_by_id_query(seed, query) else {
+        return Ok(Json(QueryResultDto::new(Vec::new(), 0, start_index)));
+    };
+
     let result =
         list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
             .await?;
@@ -503,6 +588,62 @@ fn music_items_query(
     }
 }
 
+/// Build the underlying Audio items query for a `MusicGenres/{Name}/InstantMix`
+/// seed. The path genre name is the authoritative seed, so any client-supplied
+/// genre filter is replaced; returns `None` when the seed name is blank so the
+/// caller can answer with an empty mix instead of an unfiltered Audio listing.
+/// Reuses the proven `music_items_query` path, so permission filtering and DTO
+/// mapping stay identical to `/Songs?Genres=...`.
+fn music_genre_instant_mix_query(name: &str, mut query: MusicItemsQuery) -> Option<ItemsQuery> {
+    let seed_genre = name.trim();
+    if seed_genre.is_empty() {
+        return None;
+    }
+    query.genres = Some(seed_genre.to_owned());
+    query.genre_ids = None;
+    Some(music_items_query(query, "Audio", Some("Audio")))
+}
+
+/// Which music dimension seeds a bare `?Id=` instant mix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MusicSeed {
+    Artist,
+    Genre,
+}
+
+/// Build the underlying Audio items query for a bare `Artists/InstantMix?Id=`
+/// (artist seed) or `MusicGenres/InstantMix?Id=` (genre seed). Returns `None`
+/// when no seed id is supplied so the caller answers with an empty mix instead
+/// of an unfiltered Audio listing. The artist id is an artist `public_id` and
+/// the genre id a numeric genre id; both flow through the proven `artist_ids` /
+/// `genre_ids` filters (invalid formats simply match nothing).
+fn instant_mix_by_id_query(seed: MusicSeed, query: InstantMixByIdQuery) -> Option<ItemsQuery> {
+    let seed_id = query
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+
+    let mut items_query = ItemsQuery {
+        start_index: query.start_index,
+        limit: query.limit,
+        recursive: Some(true),
+        include_item_types: Some("Audio".to_owned()),
+        media_types: Some("Audio".to_owned()),
+        fields: query.fields,
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types,
+        ..ItemsQuery::default()
+    };
+    match seed {
+        MusicSeed::Artist => items_query.artist_ids = Some(seed_id),
+        MusicSeed::Genre => items_query.genre_ids = Some(seed_id),
+    }
+    Some(items_query)
+}
+
 fn search_hints_items_query(query: SearchHintsQuery) -> ItemsQuery {
     let window = SearchHintsWindow::from_query(&query);
     ItemsQuery {
@@ -614,11 +755,32 @@ pub async fn resume_items(
     uri: Uri,
 ) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
     let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    resume_items_response(&state, user, &query).await
+}
+
+/// Query-parameter variant `/Items/Resume?UserId=...` of the continue-watching
+/// row, alongside the path form `/Users/{UserId}/Items/Resume`. Emby/Jellyfin
+/// clients commonly call this form for the home "Continue Watching" shelf.
+pub async fn resume_items_for_query_user(
+    State(state): State<AppState>,
+    Query(query): Query<MediaListQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    resume_items_response(&state, user, &query).await
+}
+
+async fn resume_items_response(
+    state: &AppState,
+    user: AuthenticatedUser,
+    query: &MediaListQuery,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
 
-    let window = ItemWindow::from_media_query(&query);
+    let window = ItemWindow::from_media_query(query);
     let options = item_query_options(
         query.include_item_types.as_deref(),
         query.sort_by.as_deref(),
@@ -630,7 +792,7 @@ pub async fn resume_items(
     let result = LibraryRepository::new(database.clone())
         .list_resume_items(MediaQueryInput {
             user_id: user.id,
-            parent_id: normalized_parent_id(query.parent_id),
+            parent_id: normalized_parent_id(query.parent_id.clone()),
             start_index: window.start_index,
             limit: window.limit,
             options,
@@ -649,11 +811,32 @@ pub async fn latest_items(
     uri: Uri,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
     let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    latest_items_response(&state, user, &query).await
+}
+
+/// Query-parameter variant `/Items/Latest?UserId=...` of the latest-added home
+/// endpoint, alongside the path form `/Users/{UserId}/Items/Latest`. Many Emby
+/// clients call this form; it reuses the same permission-filtered listing.
+pub async fn latest_items_for_query_user(
+    State(state): State<AppState>,
+    Query(query): Query<MediaListQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    latest_items_response(&state, user, &query).await
+}
+
+async fn latest_items_response(
+    state: &AppState,
+    user: AuthenticatedUser,
+    query: &MediaListQuery,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
 
-    let window = ItemWindow::from_media_query(&query);
+    let window = ItemWindow::from_media_query(query);
     let options = item_query_options(
         query.include_item_types.as_deref(),
         query.sort_by.as_deref(),
@@ -665,7 +848,7 @@ pub async fn latest_items(
     let result = LibraryRepository::new(database.clone())
         .list_latest_items(MediaQueryInput {
             user_id: user.id,
-            parent_id: normalized_parent_id(query.parent_id),
+            parent_id: normalized_parent_id(query.parent_id.clone()),
             start_index: window.start_index,
             limit: window.limit,
             options,
@@ -2424,6 +2607,85 @@ mod tests {
         assert_eq!(songs.include_item_types.as_deref(), Some("Audio"));
         assert_eq!(songs.media_types.as_deref(), Some("Audio"));
         assert_eq!(songs.recursive, Some(true));
+    }
+
+    #[test]
+    fn music_genre_instant_mix_seeds_audio_query_from_path_genre() {
+        let query = MusicItemsQuery {
+            user_id: Some("user-1".to_owned()),
+            limit: Some(50),
+            // A client-supplied genre filter must be overridden by the path seed.
+            genres: Some("Rock".to_owned()),
+            genre_ids: Some("genre-9".to_owned()),
+            ..MusicItemsQuery::default()
+        };
+
+        let items_query = music_genre_instant_mix_query("  Jazz  ", query)
+            .expect("non-empty genre seed yields a query");
+        assert_eq!(items_query.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.media_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.recursive, Some(true));
+        assert_eq!(items_query.genres.as_deref(), Some("Jazz"));
+        assert_eq!(items_query.genre_ids, None);
+        assert_eq!(items_query.limit, Some(50));
+    }
+
+    #[test]
+    fn music_genre_instant_mix_rejects_blank_genre_seed() {
+        assert!(music_genre_instant_mix_query("   ", MusicItemsQuery::default()).is_none());
+        assert!(music_genre_instant_mix_query("", MusicItemsQuery::default()).is_none());
+    }
+
+    #[test]
+    fn artist_seed_instant_mix_filters_audio_by_artist_id() {
+        let query = InstantMixByIdQuery {
+            id: Some("11111111-2222-3333-4444-555555555555".to_owned()),
+            limit: Some(30),
+            ..InstantMixByIdQuery::default()
+        };
+
+        let items_query =
+            instant_mix_by_id_query(MusicSeed::Artist, query).expect("artist seed yields a query");
+        assert_eq!(items_query.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.media_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.recursive, Some(true));
+        assert_eq!(
+            items_query.artist_ids.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(items_query.genre_ids, None);
+        assert_eq!(items_query.limit, Some(30));
+    }
+
+    #[test]
+    fn genre_id_seed_instant_mix_filters_audio_by_genre_id() {
+        let query = InstantMixByIdQuery {
+            id: Some("  42  ".to_owned()),
+            ..InstantMixByIdQuery::default()
+        };
+
+        let items_query =
+            instant_mix_by_id_query(MusicSeed::Genre, query).expect("genre seed yields a query");
+        assert_eq!(items_query.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.genre_ids.as_deref(), Some("42"));
+        assert_eq!(items_query.artist_ids, None);
+    }
+
+    #[test]
+    fn bare_instant_mix_rejects_missing_or_blank_seed_id() {
+        assert!(
+            instant_mix_by_id_query(MusicSeed::Artist, InstantMixByIdQuery::default()).is_none()
+        );
+        assert!(
+            instant_mix_by_id_query(
+                MusicSeed::Genre,
+                InstantMixByIdQuery {
+                    id: Some("   ".to_owned()),
+                    ..InstantMixByIdQuery::default()
+                }
+            )
+            .is_none()
+        );
     }
 
     #[test]

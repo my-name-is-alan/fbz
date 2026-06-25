@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::{
     db::DbPool,
-    jobs::{ExpiredJobMessages, expire_stale_running_jobs},
+    jobs::{ExpiredJobMessages, expire_stale_running_jobs, mark_job_failed},
     media::probe::MEDIA_PROBE_JOB_TYPE,
     metadata::service::METADATA_REFRESH_JOB_TYPE,
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
@@ -251,7 +251,8 @@ impl ScanService {
             }
             Err(err) => {
                 let message = err.to_string();
-                self.finish_job_failure(job.id, run_id, &message).await?;
+                self.finish_job_failure(&job.public_id, job.id, run_id, &message)
+                    .await?;
                 self.dispatch_scan_hook(scan_failed_event(
                     &job.public_id,
                     &request.library_id,
@@ -884,6 +885,7 @@ impl ScanService {
 
     async fn finish_job_failure(
         &self,
+        job_public_id: &str,
         job_id: i64,
         run_id: i64,
         message: &str,
@@ -903,20 +905,13 @@ impl ScanService {
         .execute(&mut *tx)
         .await
         .map_err(ScanError::Database)?;
-        sqlx::query(
-            r#"
-            update jobs
-            set status = 'failed',
-                locked_by = null,
-                locked_until = null,
-                last_error = $2,
-                updated_at = now()
-            where id = $1
-            "#,
+        mark_job_failed(
+            &mut tx,
+            LIBRARY_SCAN_JOB_TYPE,
+            job_public_id,
+            job_id,
+            message,
         )
-        .bind(job_id)
-        .bind(message)
-        .execute(&mut *tx)
         .await
         .map_err(ScanError::Database)?;
         tx.commit().await.map_err(ScanError::Database)

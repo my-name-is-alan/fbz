@@ -211,6 +211,74 @@ GET /api/plugin/libraries/{libraryId}/items?limit=200&cursor=<nextCursor>
 
 Host API 会限制 marker 类型、tick 范围、confidence、重复项和单次写入数量。插件只能替换自己 source 下的 marker，不会覆盖核心或其他插件的数据。
 
+## WASI 运行时契约与模板
+
+`wasi` runtime 适合**沙箱内纯计算**（标签归一化、marker/摘要计算、payload 转换）。WASIp1 没有 socket，
+**WASI 插件无法访问网络或调用 Host API**——需要联网 / Host API 的插件请用 `http` runtime（见上文）。
+这也是「联网插件继续优先 HTTP runtime」的原因。
+
+宿主以 wasmtime + WASIp1 把模块当作命令（`_start`）每次 dispatch 调用一次，契约如下：
+
+| 通道 | 含义 |
+| --- | --- |
+| `argv[0]` / `argv[1]` | entrypoint 路径 / 派发的 handler（如 `hooks.onScanCompleted`） |
+| env `FBZ_PLUGIN_ID` / `FBZ_PLUGIN_HANDLER` / `FBZ_PLUGIN_IDEMPOTENCY_KEY` | dispatch 上下文 |
+| env `FBZ_HOST_BASE_URL` / `FBZ_PLUGIN_TOKEN` | Host API 基址 + 短期 token（仅 HTTP runtime 可用） |
+| stdin | 派发的事件 payload（JSON） |
+| stdout | 执行响应（被捕获，受 `PLUGIN_WASI_STDIO_MAX_BYTES` 限制） |
+| 预挂载 `/plugin` | 只读插件包目录 |
+| 预挂载 `/data`、`/cache` | 读写持久目录 |
+| 预挂载 `/tmp` | 读写单次执行临时目录 |
+
+执行受 fuel（`PLUGIN_WASI_FUEL`）、内存（`PLUGIN_MEMORY_LIMIT_MB`）、epoch 超时（`PLUGIN_TIMEOUT_MS`）、
+模块大小（`PLUGIN_WASI_MAX_MODULE_BYTES`）和 stdio 上限约束。
+
+WASI manifest 示例（`entrypoint` 是包内 `.wasm` 的相对路径，不是 URL；纯计算插件可不声明权限）：
+
+```json
+{
+  "id": "dev.example.wasi.logger",
+  "name": "Example WASI Plugin",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "wasi",
+  "entrypoint": "plugin.wasm",
+  "permissions": [],
+  "hooks": [
+    { "event": "library.scan.completed", "handler": "hooks.onScanCompleted" }
+  ]
+}
+```
+
+最小 Rust 入口（stdin → stdout）：
+
+```rust
+use std::io::{self, Read, Write};
+
+fn main() {
+    let handler = std::env::args().nth(1).unwrap_or_default();
+    let plugin_id = std::env::var("FBZ_PLUGIN_ID").unwrap_or_default();
+    let mut payload = String::new();
+    let _ = io::stdin().read_to_string(&mut payload);
+    let event: serde_json::Value = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+    let result = serde_json::json!({ "plugin": plugin_id, "handler": handler, "receivedEvent": event });
+    let _ = writeln!(io::stdout(), "{result}");
+}
+```
+
+构建为 wasm（产物即 manifest 的 `entrypoint`）：
+
+```powershell
+rustup target add wasm32-wasip1
+cargo build --release --target wasm32-wasip1   # 产出 plugin.wasm
+```
+
+完整可构建模板见 `examples/plugins/wasi-scan-logger-template/`（含 `manifest.json`、`Cargo.toml`、
+`src/main.rs`、`README.md`）。该模板有两层校验：`manifest.rs` 的 `first_party_wasi_scan_logger_manifest_is_valid`
+用真实校验器验证 manifest（随 `cargo test` 运行）；`wasi.rs` 的 `wasi_scan_logger_template_executes_end_to_end`
+把编译出的 `plugin.wasm` 经真实 `PluginWasiRuntime::execute` 跑通(stdin→stdout),标了 `#[ignore]`
+以免默认 `cargo test` 依赖 `wasm32-wasip1` 目标。
+
 ## 打包和安装
 
 包根目录必须包含 `manifest.json`。建议结构：

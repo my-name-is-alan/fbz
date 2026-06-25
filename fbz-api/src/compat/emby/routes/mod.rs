@@ -22,7 +22,6 @@ mod environment;
 mod features;
 mod genres;
 mod images;
-mod instant_mix;
 mod item_lookup;
 mod item_refresh;
 mod items;
@@ -1417,21 +1416,21 @@ pub fn router() -> Router<AppState> {
         .route("/MusicGenres", get(genres::music_genres))
         .route(
             "/emby/MusicGenres/InstantMix",
-            get(instant_mix::empty_instant_mix),
+            get(items::music_genre_instant_mix_by_id),
         )
         .route(
             "/MusicGenres/InstantMix",
-            get(instant_mix::empty_instant_mix),
+            get(items::music_genre_instant_mix_by_id),
         )
         .route("/emby/MusicGenres/{name}", get(genres::music_genre_by_name))
         .route("/MusicGenres/{name}", get(genres::music_genre_by_name))
         .route(
             "/emby/MusicGenres/{name}/InstantMix",
-            get(instant_mix::empty_instant_mix),
+            get(items::music_genre_instant_mix),
         )
         .route(
             "/MusicGenres/{name}/InstantMix",
-            get(instant_mix::empty_instant_mix),
+            get(items::music_genre_instant_mix),
         )
         .route("/emby/Persons", get(persons::persons))
         .route("/Persons", get(persons::persons))
@@ -1449,9 +1448,9 @@ pub fn router() -> Router<AppState> {
         .route("/Artists/Prefixes", get(prefixes::artist_prefixes))
         .route(
             "/emby/Artists/InstantMix",
-            get(instant_mix::empty_instant_mix),
+            get(items::artist_instant_mix),
         )
-        .route("/Artists/InstantMix", get(instant_mix::empty_instant_mix))
+        .route("/Artists/InstantMix", get(items::artist_instant_mix))
         .route("/emby/Artists/{item_id}/Similar", get(items::similar_items))
         .route("/Artists/{item_id}/Similar", get(items::similar_items))
         .route("/emby/Artists/{name}", get(artists::artist_by_name))
@@ -1639,10 +1638,20 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Users/{user_id}/Items/Resume", get(items::resume_items))
         .route(
+            "/emby/Items/Resume",
+            get(items::resume_items_for_query_user),
+        )
+        .route("/Items/Resume", get(items::resume_items_for_query_user))
+        .route(
             "/emby/Users/{user_id}/Items/Latest",
             get(items::latest_items),
         )
         .route("/Users/{user_id}/Items/Latest", get(items::latest_items))
+        .route(
+            "/emby/Items/Latest",
+            get(items::latest_items_for_query_user),
+        )
+        .route("/Items/Latest", get(items::latest_items_for_query_user))
         .route(
             "/emby/Users/{user_id}/Suggestions",
             get(items::suggested_items),
@@ -2109,6 +2118,40 @@ mod tests {
         assert!(routes.contains("\"/Audio/{item_id}/universal\""));
         assert!(routes.contains("\"/emby/Audio/{item_id}/RemoteSearch/Lyrics\""));
         assert!(routes.contains("\"/Audio/{item_id}/RemoteSearch/Lyrics\""));
+    }
+
+    #[test]
+    fn music_genre_instant_mix_routes_resolve_real_genre_seeded_audio() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/MusicGenres/{name}/InstantMix\"",
+            "\"/MusicGenres/{name}/InstantMix\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        // Genre-seeded instant mix returns real Audio items, not the empty stub.
+        assert!(routes.contains("get(items::music_genre_instant_mix)"));
+    }
+
+    #[test]
+    fn bare_artist_and_genre_instant_mix_resolve_seeded_audio_by_id() {
+        let routes = include_str!("mod.rs");
+
+        // Assemble needles at runtime so this assertion's own source text does not
+        // satisfy (or contradict) the checks under `include_str!`.
+        let artist = format!("items::artist_instant_mix{}", ")");
+        let genre_by_id = format!("items::music_genre_instant_mix_by_id{}", ")");
+        let removed_stub = format!("instant_mix::empty{}instant_mix", "_");
+        let removed_mod = format!("mod instant_mix{}", ";");
+
+        // Bare Artists/MusicGenres InstantMix now resolve real Audio filtered by
+        // the `?Id=` seed instead of the removed empty stub.
+        assert!(routes.contains(&artist));
+        assert!(routes.contains(&genre_by_id));
+        // The empty instant-mix stub module has been retired.
+        assert!(!routes.contains(&removed_stub));
+        assert!(!routes.contains(&removed_mod));
     }
 
     #[test]

@@ -3060,6 +3060,50 @@ mod tests {
     use crate::config::Config;
 
     #[test]
+    fn every_admin_route_handler_enforces_server_admin() {
+        // Admin permission is enforced per-handler (no uniform middleware): each
+        // handler must call authenticate_admin directly, or delegate to a helper
+        // that does. This guard fails if a future admin handler skips the gate.
+        let full = include_str!("routes.rs");
+        // Exclude the test module so this assertion's own text is not scanned.
+        let source = full.split("\n#[cfg(test)]").next().unwrap_or(full);
+
+        let mut missing = Vec::new();
+        let mut delegating = Vec::new();
+        // Each split chunk spans one fn's body up to the next `async fn`.
+        for chunk in source.split("async fn ").skip(1) {
+            let name = chunk.split('(').next().unwrap_or("").trim().to_owned();
+            // Only request handlers / admin helpers take the axum State extractor
+            // or an owned AppState argument.
+            if !chunk.contains("State(state)") && !chunk.contains("state: AppState") {
+                continue;
+            }
+            if chunk.contains("authenticate_admin(") {
+                continue;
+            }
+            if chunk.contains("set_notification_target_enabled(") {
+                delegating.push(name);
+                continue;
+            }
+            missing.push(name);
+        }
+
+        assert!(
+            missing.is_empty(),
+            "admin handlers missing server-admin enforcement: {missing:?}"
+        );
+        // The only handlers without a direct call are the enable/disable wrappers,
+        // which delegate to the authenticated set_notification_target_enabled.
+        assert_eq!(
+            delegating.len(),
+            2,
+            "unexpected delegating set: {delegating:?}"
+        );
+        assert!(delegating.contains(&"enable_notification_target".to_owned()));
+        assert!(delegating.contains(&"disable_notification_target".to_owned()));
+    }
+
+    #[test]
     fn validates_supported_library_types() {
         assert!(validate_library_type("movies").is_ok());
         assert!(validate_library_type("tv").is_ok());

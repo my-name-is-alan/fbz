@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use crate::{
     config::ProbeWorkerConfig,
     db::DbPool,
-    jobs::{ExpiredJobMessages, expire_stale_running_jobs},
+    jobs::{ExpiredJobMessages, expire_stale_running_jobs, mark_job_failed},
     media::tools::MediaToolDiagnostics,
 };
 
@@ -270,7 +270,8 @@ impl ProbeService {
                 {
                     warn!(error = %event_err, "failed to record media probe failure event");
                 }
-                self.finish_job_failure(job.id, run_id, &message).await?;
+                self.finish_job_failure(&job.public_id, job.id, run_id, &message)
+                    .await?;
                 Err(err)
             }
         }
@@ -526,6 +527,7 @@ impl ProbeService {
 
     async fn finish_job_failure(
         &self,
+        job_public_id: &str,
         job_id: i64,
         run_id: i64,
         message: &str,
@@ -546,20 +548,13 @@ impl ProbeService {
         .await
         .map_err(ProbeError::Database)?;
 
-        sqlx::query(
-            r#"
-            update jobs
-            set status = 'failed',
-                locked_by = null,
-                locked_until = null,
-                last_error = $2,
-                updated_at = now()
-            where id = $1
-            "#,
+        mark_job_failed(
+            &mut tx,
+            MEDIA_PROBE_JOB_TYPE,
+            job_public_id,
+            job_id,
+            message,
         )
-        .bind(job_id)
-        .bind(message)
-        .execute(&mut *tx)
         .await
         .map_err(ProbeError::Database)?;
 

@@ -168,21 +168,25 @@ impl QueueReadinessSnapshot {
                 queued: row.try_get("jobs_queued")?,
                 running: row.try_get("jobs_running")?,
                 failed: row.try_get("jobs_failed")?,
+                drained_by_node: false,
             },
             event_outbox: QueueBacklogSnapshot {
                 queued: row.try_get("event_outbox_queued")?,
                 running: row.try_get("event_outbox_running")?,
                 failed: row.try_get("event_outbox_failed")?,
+                drained_by_node: false,
             },
             transcodes: QueueBacklogSnapshot {
                 queued: row.try_get("transcodes_queued")?,
                 running: row.try_get("transcodes_running")?,
                 failed: row.try_get("transcodes_failed")?,
+                drained_by_node: false,
             },
             notifications: QueueBacklogSnapshot {
                 queued: row.try_get("notifications_queued")?,
                 running: row.try_get("notifications_running")?,
                 failed: row.try_get("notifications_failed")?,
+                drained_by_node: false,
             },
             event_stream_mirror: EventStreamMirrorBacklogSnapshot {
                 unmirrored: row.try_get("event_stream_mirror_unmirrored")?,
@@ -191,6 +195,7 @@ impl QueueReadinessSnapshot {
                 backoff: row.try_get("event_stream_mirror_backoff")?,
                 failed: row.try_get("event_stream_mirror_failed")?,
                 max_attempts: row.try_get("event_stream_mirror_max_attempts")?,
+                drained_by_node: false,
             },
         })
     }
@@ -201,6 +206,12 @@ pub struct QueueBacklogSnapshot {
     pub queued: i64,
     pub running: i64,
     pub failed: i64,
+    /// Whether the current node runs a worker that drains this queue. The
+    /// backlog counts are global (the queue lives in PostgreSQL), so this flag
+    /// lets operators tell "backlog this node is responsible for" apart from
+    /// "global backlog this node can see but does not drain" (e.g. an api-only
+    /// node sees the job backlog but never processes it).
+    pub drained_by_node: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -211,6 +222,9 @@ pub struct EventStreamMirrorBacklogSnapshot {
     pub backoff: i64,
     pub failed: i64,
     pub max_attempts: i32,
+    /// Whether this node runs the Redis Streams mirror worker (worker role with
+    /// event streams enabled) and therefore drains this backlog.
+    pub drained_by_node: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,10 +335,12 @@ impl AppState {
 
     async fn summarize_queues(&self) -> QueueReadinessSnapshot {
         let Some(database) = &self.database else {
-            return QueueReadinessSnapshot::not_configured();
+            let mut snapshot = QueueReadinessSnapshot::not_configured();
+            annotate_queue_responsibilities(&mut snapshot, &self.config);
+            return snapshot;
         };
 
-        match tokio::time::timeout(
+        let mut snapshot = match tokio::time::timeout(
             self.readiness_timeout(),
             sqlx::query(READINESS_QUEUE_SUMMARY_SQL).fetch_one(database),
         )
@@ -333,8 +349,41 @@ impl AppState {
             Ok(Ok(row)) => QueueReadinessSnapshot::from_row(&row)
                 .unwrap_or_else(|_| QueueReadinessSnapshot::unhealthy()),
             _ => QueueReadinessSnapshot::unhealthy(),
-        }
+        };
+        annotate_queue_responsibilities(&mut snapshot, &self.config);
+        snapshot
     }
+}
+
+/// Mark which readiness queues the current node actually drains, so the
+/// per-node `/ready` summary surfaces role-relevant backlog. Every drainer
+/// requires the worker role (api-only and scheduler-only nodes enqueue or only
+/// serve, they do not consume these queues); each queue additionally requires
+/// its specific worker to be enabled. Generic `jobs` is drained by the
+/// scan/metadata/probe workers; `transcodes`, `notifications` and the event
+/// stream mirror by their dedicated workers.
+fn annotate_queue_responsibilities(snapshot: &mut QueueReadinessSnapshot, config: &Config) {
+    let worker_role = matches!(&config.node.role, NodeRole::All | NodeRole::Worker);
+
+    snapshot.jobs.drained_by_node = worker_role
+        && (config.scan_worker.enabled
+            || config.metadata_worker.enabled
+            || config.probe_worker.enabled);
+    snapshot.transcodes.drained_by_node = worker_role && config.transcode_worker.enabled;
+    snapshot.notifications.drained_by_node = worker_role && config.notification_worker.enabled;
+
+    // event_outbox is consumed by three workers: the plugin hook dispatcher
+    // (plugins::execution), the notification delivery worker
+    // (notifications::delivery), and the Redis Streams mirror (events). Any of
+    // them, on a worker node, drains it.
+    snapshot.event_outbox.drained_by_node = worker_role
+        && (config.plugin_worker.enabled
+            || config.notification_worker.enabled
+            || config.redis.event_streams_enabled);
+    // The mirror backlog (stream_mirrored_at is null) is specifically the Redis
+    // Streams mirror worker's responsibility.
+    snapshot.event_stream_mirror.drained_by_node =
+        worker_role && config.redis.event_streams_enabled;
 }
 
 fn role_summary(config: &Config) -> RoleReadinessSnapshot {
@@ -519,6 +568,72 @@ mod tests {
 
             assert_eq!(snapshot.runtime.roles, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn readiness_marks_queue_drain_responsibility_by_node_role() {
+        // Worker node with the relevant workers enabled drains those queues.
+        let mut worker = Config::default();
+        worker.node.role = NodeRole::Worker;
+        worker.scan_worker.enabled = true;
+        worker.transcode_worker.enabled = true;
+        worker.notification_worker.enabled = true;
+        worker.redis.event_streams_enabled = true;
+
+        let queues = AppState::for_tests(worker).readiness().await.runtime.queues;
+        assert!(queues.jobs.drained_by_node);
+        assert!(queues.transcodes.drained_by_node);
+        assert!(queues.notifications.drained_by_node);
+        assert!(queues.event_outbox.drained_by_node);
+        assert!(queues.event_stream_mirror.drained_by_node);
+
+        // Api-only node can see the global backlog but drains nothing locally,
+        // even with the worker flags enabled.
+        let mut api = Config::default();
+        api.node.role = NodeRole::Api;
+        api.scan_worker.enabled = true;
+        api.transcode_worker.enabled = true;
+        api.notification_worker.enabled = true;
+        api.redis.event_streams_enabled = true;
+
+        let queues = AppState::for_tests(api).readiness().await.runtime.queues;
+        assert!(!queues.jobs.drained_by_node);
+        assert!(!queues.transcodes.drained_by_node);
+        assert!(!queues.notifications.drained_by_node);
+        assert!(!queues.event_outbox.drained_by_node);
+        assert!(!queues.event_stream_mirror.drained_by_node);
+
+        // Worker role but the specific workers disabled => queue not drained here.
+        let mut idle_worker = Config::default();
+        idle_worker.node.role = NodeRole::Worker;
+        idle_worker.scan_worker.enabled = false;
+        idle_worker.metadata_worker.enabled = false;
+        idle_worker.probe_worker.enabled = false;
+        idle_worker.transcode_worker.enabled = false;
+
+        let queues = AppState::for_tests(idle_worker)
+            .readiness()
+            .await
+            .runtime
+            .queues;
+        assert!(!queues.jobs.drained_by_node);
+        assert!(!queues.transcodes.drained_by_node);
+
+        // event_outbox is drained by any of its three consumers; a plugin-only
+        // worker drains it (plugin hook dispatch) without draining the dedicated
+        // mirror backlog (which needs event streams enabled).
+        let mut plugin_only = Config::default();
+        plugin_only.node.role = NodeRole::Worker;
+        plugin_only.plugin_worker.enabled = true;
+
+        let queues = AppState::for_tests(plugin_only)
+            .readiness()
+            .await
+            .runtime
+            .queues;
+        assert!(queues.event_outbox.drained_by_node);
+        assert!(!queues.event_stream_mirror.drained_by_node);
+        assert!(!queues.jobs.drained_by_node);
     }
 
     #[test]

@@ -4,19 +4,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use tracing::warn;
+
 use crate::{
     config::{ScheduleConfig, SchedulerWorkerConfig},
     db::DbPool,
     scheduler::repository::{
         CORE_INCREMENTAL_SCAN_TASK_KEY, CORE_METADATA_REFRESH_TASK_KEY,
-        CORE_METADATA_REFRESH_TASK_TYPE, CORE_SCAN_ALL_TASK_TYPE, CORE_TRANSCODE_CLEANUP_TASK_KEY,
-        CORE_TRANSCODE_CLEANUP_TASK_TYPE, CoreScheduledTaskInput, PLUGIN_SCHEDULE_TASK_TYPE,
-        ScheduledTaskRecord, SchedulerRepository, TranscodeCleanupCandidate,
+        CORE_METADATA_REFRESH_TASK_TYPE, CORE_PARTITION_MAINTENANCE_TASK_KEY,
+        CORE_PARTITION_MAINTENANCE_TASK_TYPE, CORE_SCAN_ALL_TASK_TYPE,
+        CORE_TRANSCODE_CLEANUP_TASK_KEY, CORE_TRANSCODE_CLEANUP_TASK_TYPE, CoreScheduledTaskInput,
+        PLUGIN_SCHEDULE_TASK_TYPE, ScheduledTaskRecord, SchedulerRepository,
+        TranscodeCleanupCandidate,
     },
     transcode::cleanup::{TranscodeCleanupResult, cleanup_session_output_dir_best_effort},
 };
 
 const TRANSCODE_CLEANUP_BATCH_SIZE: i64 = 100;
+/// How many months of upcoming partitions the maintenance task keeps ahead.
+const PARTITION_MAINTENANCE_MONTHS_AHEAD: i32 = 6;
 
 #[derive(Clone)]
 pub struct SchedulerService {
@@ -102,6 +108,18 @@ impl SchedulerService {
             })
             .await?;
 
+        let partition_maintenance = parse_core_schedule(&schedules.partition_maintenance)?;
+        self.repository
+            .upsert_core_task(CoreScheduledTaskInput {
+                task_key: CORE_PARTITION_MAINTENANCE_TASK_KEY,
+                task_type: CORE_PARTITION_MAINTENANCE_TASK_TYPE,
+                enabled: worker_config.enabled,
+                schedule_kind: partition_maintenance.kind,
+                schedule_value: schedules.partition_maintenance.trim().to_owned(),
+                interval_seconds: partition_maintenance.interval_seconds,
+            })
+            .await?;
+
         Ok(())
     }
 
@@ -122,6 +140,7 @@ impl SchedulerService {
                 self.repository
                     .mark_task_failure(task.id, task.run_id, &message)
                     .await?;
+                log_scheduled_task_failure(&task, &message);
                 Err(err)
             }
         }
@@ -149,6 +168,7 @@ impl SchedulerService {
                 self.repository
                     .mark_task_failure(task.id, task.run_id, &message)
                     .await?;
+                log_scheduled_task_failure(&task, &message);
                 Err(err)
             }
         }
@@ -206,6 +226,17 @@ impl SchedulerService {
                     queued_jobs: cleaned_outputs,
                 })
             }
+            CORE_PARTITION_MAINTENANCE_TASK_TYPE => {
+                let created_partitions = self
+                    .repository
+                    .ensure_partition_coverage(PARTITION_MAINTENANCE_MONTHS_AHEAD)
+                    .await?;
+                Ok(SchedulerRunSummary {
+                    task_key: task.task_key.clone(),
+                    task_type: task.task_type.clone(),
+                    queued_jobs: created_partitions,
+                })
+            }
             other => Err(SchedulerError::UnsupportedTaskType(other.to_owned())),
         }
     }
@@ -252,6 +283,21 @@ impl SchedulerService {
             .mark_transcode_output_cleaned(&candidate.id)
             .await
     }
+}
+
+/// Emit a structured warn log when a scheduled task run fails during execution
+/// (as opposed to lease expiry, which `expire_stale_runs` already logs). The
+/// failure is recorded in `scheduled_task_runs`/`scheduled_tasks` by
+/// `mark_task_failure`; this adds the task identity context the worker-loop log
+/// cannot carry, and also covers admin manual triggers via `run_task_once`.
+fn log_scheduled_task_failure(task: &ScheduledTaskRecord, message: &str) {
+    warn!(
+        task_key = %task.task_key,
+        task_type = %task.task_type,
+        run_id = task.run_id,
+        error = %message,
+        "scheduled task run failed"
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,6 +486,41 @@ pub fn default_worker_id(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_maintenance_task_is_wired_end_to_end() {
+        let source = include_str!("service.rs");
+
+        // Bootstrapped from the configured schedule.
+        assert!(source.contains("schedules.partition_maintenance"));
+        assert!(source.contains("CORE_PARTITION_MAINTENANCE_TASK_KEY"));
+        // Dispatched to the idempotent coverage function.
+        assert!(source.contains("CORE_PARTITION_MAINTENANCE_TASK_TYPE =>"));
+        assert!(source.contains("ensure_partition_coverage(PARTITION_MAINTENANCE_MONTHS_AHEAD)"));
+    }
+
+    #[test]
+    fn partition_maintenance_schedule_defaults_to_daily() {
+        let config = crate::config::Config::default();
+        assert_eq!(config.schedules.partition_maintenance, "daily");
+    }
+
+    #[test]
+    fn scheduled_task_failure_logs_structured_task_context() {
+        let source = include_str!("service.rs");
+
+        assert!(source.contains("fn log_scheduled_task_failure"));
+        assert!(source.contains("\"scheduled task run failed\""));
+        assert!(source.contains("task_key = %task.task_key"));
+        assert!(source.contains("task_type = %task.task_type"));
+        assert!(source.contains("run_id = task.run_id"));
+        assert!(source.contains("error = %message"));
+        // Both the periodic dispatch path and the admin manual-trigger path log.
+        // Assemble the needle at runtime so this assertion's own source text does
+        // not count as a third match under `include_str!`.
+        let call_site = format!("log_scheduled_task_failure({}task, {}message)", "&", "&");
+        assert_eq!(source.matches(call_site.as_str()).count(), 2);
+    }
 
     #[test]
     fn interval_parser_supports_compact_units() {

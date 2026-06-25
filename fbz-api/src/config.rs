@@ -279,6 +279,7 @@ pub struct ScheduleConfig {
     pub metadata_refresh: String,
     pub transcode_cleanup: String,
     pub session_cleanup: String,
+    pub partition_maintenance: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -598,6 +599,7 @@ impl Config {
                 metadata_refresh: get_or("SCHEDULE_METADATA_REFRESH", "0 5 * * *", &source),
                 transcode_cleanup: get_or("SCHEDULE_TRANSCODE_CLEANUP", "hourly", &source),
                 session_cleanup: get_or("SCHEDULE_SESSION_CLEANUP", "10m", &source),
+                partition_maintenance: get_or("SCHEDULE_PARTITION_MAINTENANCE", "daily", &source),
             },
             scan_worker: ScanWorkerConfig {
                 enabled: bool_or("FBZ_SCAN_WORKER_ENABLED", false, &source)?,

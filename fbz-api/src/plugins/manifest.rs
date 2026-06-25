@@ -812,6 +812,30 @@ mod tests {
     }
 
     #[test]
+    fn first_party_wasi_scan_logger_manifest_is_valid() {
+        let manifest: PluginManifest = serde_json::from_str(include_str!(
+            "../../examples/plugins/wasi-scan-logger-template/manifest.json"
+        ))
+        .unwrap();
+
+        let validated = manifest.validate().unwrap();
+
+        assert_eq!(validated.manifest.id, "dev.fbz.wasi.scan-logger");
+        assert_eq!(validated.manifest.runtime, "wasi");
+        // Relative in-package entrypoint (the compiled wasm), not an http URL.
+        assert_eq!(validated.manifest.entrypoint, "plugin.wasm");
+        // A no-network compute plugin needs no Host API permissions.
+        assert!(validated.manifest.permissions.is_empty());
+        assert!(
+            validated
+                .manifest
+                .hooks
+                .iter()
+                .any(|hook| hook.event == "library.scan.completed")
+        );
+    }
+
+    #[test]
     fn menu_requires_admin_menu_permission() {
         let manifest: PluginManifest = serde_json::from_value(json!({
             "id": "dev.fbz.menu",

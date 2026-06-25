@@ -63,6 +63,7 @@ pub async fn seasons(
     };
 
     let window = ItemWindow::from_media_query(&MediaListQuery {
+        user_id: None,
         parent_id: None,
         start_index: query.start_index,
         limit: query.limit,
@@ -107,6 +108,7 @@ pub async fn episodes(
     };
 
     let window = ItemWindow::from_media_query(&MediaListQuery {
+        user_id: None,
         parent_id: None,
         start_index: query.start_index,
         limit: query.limit,
@@ -150,6 +152,7 @@ pub async fn next_up(
     };
 
     let window = ItemWindow::from_media_query(&MediaListQuery {
+        user_id: None,
         parent_id: None,
         start_index: query.start_index,
         limit: query.limit,

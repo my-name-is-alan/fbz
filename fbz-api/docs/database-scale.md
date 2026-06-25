@@ -67,6 +67,8 @@ Do not partition small tables early. The current schema keeps append-heavy table
 
 When a table is partitioned later, use time-range partitions and keep query predicates time-bounded for operational views.
 
+A concrete partition key / retention / archival / hot-cold / materialized-stats design for the high-growth tables lives in `docs/database-partitioning-design.md`. That design is not yet applied: table partitioning is a structural change and requires explicit confirmation before any partition migration is produced.
+
 ## Storage Rules
 
 - Store media bytes, artwork bytes, transcode segments, and HLS manifests outside PostgreSQL.

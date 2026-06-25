@@ -1,0 +1,16 @@
+{
+  "id": "dev.fbz.wasi.scan-logger",
+  "name": "WASI Scan Logger",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "wasi",
+  "entrypoint": "plugin.wasm",
+  "description": "First-party example WASI plugin. A sandboxed, no-network compute plugin: it receives the dispatched event payload on stdin and returns a JSON summary on stdout. Use the WASI runtime for deterministic in-process compute; use the HTTP runtime for plugins that must call the Host API or reach the network.",
+  "permissions": [],
+  "hooks": [
+    {
+      "event": "library.scan.completed",
+      "handler": "hooks.onScanCompleted"
+    }
+  ]
+}

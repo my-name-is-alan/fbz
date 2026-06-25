@@ -1,0 +1,22 @@
+# Standalone example crate — intentionally its own workspace root so it is NOT
+# pulled into the fbz-api package build/test (which targets the host triple).
+# Build with: cargo build --release --target wasm32-wasip1
+[workspace]
+
+[package]
+name = "wasi-scan-logger-template"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Emit `plugin.wasm` so it matches the manifest `entrypoint` after packaging.
+[[bin]]
+name = "plugin"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true
