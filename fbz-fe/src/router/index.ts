@@ -70,6 +70,11 @@ export const routes = [
     ],
   },
   {
+    path: "/user/login",
+    name: "login",
+    component: () => import("@/views/user/login/index.vue"),
+  },
+  {
     path: "/:pathMatch(.*)*",
     name: "not-found",
     component: () => import("@/views/not-found/index.vue"),

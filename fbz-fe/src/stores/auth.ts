@@ -32,6 +32,10 @@ export const useAuthStore = defineStore("auth", () => {
   const autoSubtitles = ref<boolean>(localStorage.getItem("fbz_pref_autosub") !== "false");
   const audioPreference = ref<string>(localStorage.getItem("fbz_pref_audiopref") ?? "zh");
 
+  // 登录态（设计阶段为本地 mock，接后端后替换为真实会话）
+  const serverAddress = ref<string>(localStorage.getItem("fbz_server_address") ?? "");
+  const isAuthenticated = ref<boolean>(localStorage.getItem("fbz_authenticated") === "true");
+
   // System Users List
   const savedUsers = localStorage.getItem("fbz_system_users");
   const defaultUsers: SystemUser[] = [
@@ -101,6 +105,52 @@ export const useAuthStore = defineStore("auth", () => {
 
     uiStore.showToast("个人信息与偏好设置已成功保存！", "success");
     return true;
+  }
+
+  function setLanguage(lang: string) {
+    if (!lang) return;
+    language.value = lang;
+    localStorage.setItem("fbz_pref_language", lang);
+  }
+
+  interface LoginPayload {
+    username: string;
+    password: string;
+    serverAddress?: string;
+    remember?: boolean;
+  }
+
+  function login(payload: LoginPayload) {
+    if (!payload.username.trim()) {
+      uiStore.showToast("请输入用户名！", "warning");
+      return false;
+    }
+    if (!payload.password) {
+      uiStore.showToast("请输入登录密码！", "warning");
+      return false;
+    }
+
+    username.value = payload.username.trim();
+    if (payload.serverAddress !== undefined) {
+      serverAddress.value = payload.serverAddress.trim();
+      localStorage.setItem("fbz_server_address", serverAddress.value);
+    }
+
+    isAuthenticated.value = true;
+    localStorage.setItem("fbz_auth_username", username.value);
+    if (payload.remember) {
+      localStorage.setItem("fbz_authenticated", "true");
+    } else {
+      localStorage.removeItem("fbz_authenticated");
+    }
+
+    uiStore.showToast(`欢迎回来，${nickname.value || username.value}！`, "success");
+    return true;
+  }
+
+  function logout() {
+    isAuthenticated.value = false;
+    localStorage.removeItem("fbz_authenticated");
   }
 
   function changePassword(currentPass: string, newPass: string) {
@@ -213,7 +263,12 @@ export const useAuthStore = defineStore("auth", () => {
     language,
     autoSubtitles,
     audioPreference,
+    serverAddress,
+    isAuthenticated,
     users,
+    login,
+    logout,
+    setLanguage,
     updateProfile,
     changePassword,
     toggleUserStatus,
