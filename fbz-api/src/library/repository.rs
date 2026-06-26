@@ -613,6 +613,14 @@ pub struct NextUpInput {
     pub options: ItemQueryOptions,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpcomingInput {
+    pub user_id: i64,
+    pub parent_id: Option<String>,
+    pub start_index: i64,
+    pub limit: i64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrowseItemsResult {
     pub items: Vec<MediaItemBrowseRecord>,
@@ -4296,6 +4304,89 @@ impl LibraryRepository {
         browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
+    /// Lists episodes whose premiere date is still in the future, scoped to the
+    /// user's viewable, non-hidden libraries. Backs Emby `Shows/Upcoming`; the
+    /// permission filter lives in the query so upper layers never widen access.
+    pub async fn list_upcoming_episodes(
+        &self,
+        input: UpcomingInput,
+    ) -> Result<BrowseItemsResult, sqlx::Error> {
+        let fetch_limit = input.limit.saturating_add(1);
+        let rows = sqlx::query(
+            r#"
+            select
+                episode.public_id::text as id,
+                episode.title as name,
+                episode.item_type,
+                parent.public_id::text as parent_id,
+                coalesce(episode.runtime_ticks, primary_file.duration_ticks) as runtime_ticks,
+                primary_file.media_file_id,
+                primary_file.file_size as media_file_size,
+                primary_file.container as media_file_container,
+                primary_file.bitrate as media_file_bitrate,
+                primary_file.is_strm as media_file_is_strm,
+                coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
+                episode.production_year,
+                coalesce(up.position_ticks, 0) as playback_position_ticks,
+                coalesce(up.play_count, 0) as play_count,
+                coalesce(up.is_favorite, false) as is_favorite,
+                up.rating::double precision as rating,
+                coalesce(up.played, false) as played,
+                array[]::text[] as image_tags,
+                0::bigint as total_record_count
+            from media_items episode
+            join libraries l on l.id = episode.library_id
+            join library_permissions lp on lp.library_id = episode.library_id
+            join users u on u.id = lp.user_id
+            left join media_items parent on parent.id = episode.parent_id
+            left join lateral (
+                select mf.id as media_file_id,
+                       mf.file_size,
+                       mf.container,
+                       mf.duration_ticks,
+                       mf.bitrate,
+                       mf.is_strm
+                from media_files mf
+                where mf.media_item_id = episode.id
+                order by mf.is_primary desc, mf.id
+                limit 1
+            ) primary_file on true
+            left join user_playstates up on up.user_id = $1
+                and up.media_item_id = episode.id
+            where episode.item_type = 'episode'
+              and episode.is_deleted = false
+              and episode.premiere_date is not null
+              and episode.premiere_date > current_date
+              and lp.user_id = $1
+              and lp.can_view = true
+              and l.is_hidden = false
+              and (
+                  $4::text is null
+                  or l.public_id = case
+                      when $4::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then $4::uuid
+                      else null::uuid
+                  end
+              )
+            order by episode.premiere_date asc,
+                     episode.parent_index_number nulls last,
+                     episode.index_number nulls last,
+                     episode.sort_title,
+                     episode.id
+            limit $2
+            offset $3
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(fetch_limit)
+        .bind(input.start_index)
+        .bind(input.parent_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
+    }
+
     pub async fn find_user_item_by_id(
         &self,
         user_id: i64,
@@ -5676,7 +5767,7 @@ mod tests {
             .split("pub async fn list_next_up_items")
             .nth(1)
             .unwrap()
-            .split("pub async fn find_user_item_by_id")
+            .split("pub async fn list_upcoming_episodes")
             .next()
             .unwrap();
         let bad_series_filter = format!("{}{}", "series.public_id::text = ", "$");
@@ -5916,7 +6007,7 @@ mod tests {
             .split("pub async fn list_next_up_items")
             .nth(1)
             .unwrap()
-            .split("pub async fn find_user_item_by_id")
+            .split("pub async fn list_upcoming_episodes")
             .next()
             .unwrap();
 
@@ -5929,5 +6020,85 @@ mod tests {
                 "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
             )
         );
+    }
+
+    #[test]
+    fn upcoming_query_filters_future_premiere_with_safe_uuid_and_keyset_shape() {
+        let repository = include_str!("repository.rs");
+        let upcoming_query = repository
+            .split("pub async fn list_upcoming_episodes")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn find_user_item_by_id")
+            .next()
+            .unwrap();
+        let bad_library_filter = format!("{}{}", "l.public_id::text = ", "$");
+
+        // Future-premiere episode filter with repository-side permission filtering.
+        assert!(upcoming_query.contains("episode.item_type = 'episode'"));
+        assert!(upcoming_query.contains("episode.premiere_date is not null"));
+        assert!(upcoming_query.contains("episode.premiere_date > current_date"));
+        assert!(upcoming_query.contains("lp.can_view = true"));
+        assert!(upcoming_query.contains("l.is_hidden = false"));
+        // Optional ParentId library scope uses index-friendly uuid comparison.
+        assert!(upcoming_query.contains("or l.public_id = case"));
+        assert!(upcoming_query.contains("then $4::uuid"));
+        assert!(!upcoming_query.contains(&bad_library_filter));
+        // Premiere-date ascending ordering for the upcoming window.
+        assert!(upcoming_query.contains("order by episode.premiere_date asc"));
+        // Lower-bound keyset counting (no full-table count(*) over()).
+        assert!(upcoming_query.contains("let fetch_limit = input.limit.saturating_add(1);"));
+        assert!(!upcoming_query.contains("count(*) over()"));
+        assert!(upcoming_query.contains("0::bigint as total_record_count"));
+        assert!(
+            upcoming_query.contains(
+                "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
+            )
+        );
+    }
+
+    // Live-DB smoke: validates the new SQL parses and executes against the real
+    // migrated schema. Requires dockerized PostgreSQL (`./scripts/dev-deps.ps1`)
+    // and `DATABASE_URL` (defaults to the dev URL). Run with:
+    //   cargo test -- --ignored upcoming_query_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn upcoming_query_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let repository = LibraryRepository::new(pool);
+        // A synthetic user with no permissions yields zero rows but still forces
+        // the planner to accept every predicate, join, and the premiere filter.
+        let result = repository
+            .list_upcoming_episodes(UpcomingInput {
+                user_id: -1,
+                parent_id: None,
+                start_index: 0,
+                limit: 20,
+            })
+            .await
+            .expect("upcoming query should execute against the live schema");
+        assert_eq!(result.total_record_count, 0);
+        assert!(result.items.is_empty());
+
+        // Re-run with a ParentId so the optional library-scope branch is exercised.
+        repository
+            .list_upcoming_episodes(UpcomingInput {
+                user_id: -1,
+                parent_id: Some("bbbbbbbb-0000-0000-0000-000000000001".to_owned()),
+                start_index: 0,
+                limit: 20,
+            })
+            .await
+            .expect("upcoming query with ParentId scope should execute");
     }
 }

@@ -1370,6 +1370,8 @@ pub fn router() -> Router<AppState> {
         .route("/Videos/{item_id}/{file_name}", get(transcoding::video_file))
         .route("/emby/Shows/NextUp", get(shows::next_up))
         .route("/Shows/NextUp", get(shows::next_up))
+        .route("/emby/Shows/Upcoming", get(shows::upcoming))
+        .route("/Shows/Upcoming", get(shows::upcoming))
         .route("/emby/Shows/{series_id}/Seasons", get(shows::seasons))
         .route("/Shows/{series_id}/Seasons", get(shows::seasons))
         .route("/emby/Shows/{series_id}/Episodes", get(shows::episodes))
@@ -2152,6 +2154,14 @@ mod tests {
         // The empty instant-mix stub module has been retired.
         assert!(!routes.contains(&removed_stub));
         assert!(!routes.contains(&removed_mod));
+    }
+
+    #[test]
+    fn shows_upcoming_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        assert!(routes.contains(".route(\"/emby/Shows/Upcoming\", get(shows::upcoming))"));
+        assert!(routes.contains(".route(\"/Shows/Upcoming\", get(shows::upcoming))"));
     }
 
     #[test]

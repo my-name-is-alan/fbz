@@ -54,6 +54,7 @@ pub struct UniversalAudioQuery {
     pub device_id: Option<String>,
     pub media_source_id: Option<String>,
     pub max_streaming_bitrate: Option<i64>,
+    pub audio_bit_rate: Option<i64>,
     pub container: Option<String>,
     pub max_sample_rate: Option<i32>,
     pub play_session_id: Option<String>,
@@ -501,11 +502,7 @@ fn universal_audio_input(query: &UniversalAudioQuery) -> Result<UniversalAudioIn
             "AudioCodec",
             &["aac", "flac", "mp3", "opus", "vorbis", "wma"],
         )?,
-        max_streaming_bitrate: bounded_positive_i64(
-            query.max_streaming_bitrate,
-            "MaxStreamingBitrate",
-            1_000_000_000,
-        )?,
+        max_streaming_bitrate: universal_audio_bitrate(query)?,
         max_sample_rate: bounded_positive_i32(query.max_sample_rate, "MaxSampleRate", 768_000)?,
         play_session_id: normalize_optional_id(query.play_session_id.as_deref(), "PlaySessionId")?,
         enable_redirection: query.enable_redirection,
@@ -516,6 +513,17 @@ fn universal_audio_input(query: &UniversalAudioQuery) -> Result<UniversalAudioIn
             3_153_600_000_000_000,
         )?,
     })
+}
+
+fn universal_audio_bitrate(query: &UniversalAudioQuery) -> Result<Option<i64>, AppError> {
+    let max_streaming_bitrate = bounded_positive_i64(
+        query.max_streaming_bitrate,
+        "MaxStreamingBitrate",
+        1_000_000_000,
+    )?;
+    let audio_bit_rate = bounded_positive_i64(query.audio_bit_rate, "AudioBitRate", 1_000_000_000)?;
+
+    Ok(max_streaming_bitrate.or(audio_bit_rate))
 }
 
 fn normalize_optional_id(
@@ -968,10 +976,40 @@ mod tests {
     }
 
     #[test]
+    fn universal_audio_query_uses_audio_bit_rate_as_bitrate_fallback() {
+        let audio_bit_rate_only = universal_audio_input(&UniversalAudioQuery {
+            audio_bit_rate: Some(320_000),
+            ..UniversalAudioQuery::default()
+        })
+        .expect("safe audio bit rate should normalize");
+
+        assert_eq!(audio_bit_rate_only.max_streaming_bitrate, Some(320_000));
+
+        let max_streaming_bitrate_wins = universal_audio_input(&UniversalAudioQuery {
+            max_streaming_bitrate: Some(192_000),
+            audio_bit_rate: Some(320_000),
+            ..UniversalAudioQuery::default()
+        })
+        .expect("explicit max streaming bitrate should normalize");
+
+        assert_eq!(
+            max_streaming_bitrate_wins.max_streaming_bitrate,
+            Some(192_000)
+        );
+    }
+
+    #[test]
     fn universal_audio_query_rejects_unsafe_or_unbounded_values() {
         assert!(
             universal_audio_input(&UniversalAudioQuery {
                 max_streaming_bitrate: Some(0),
+                ..UniversalAudioQuery::default()
+            })
+            .is_err()
+        );
+        assert!(
+            universal_audio_input(&UniversalAudioQuery {
+                audio_bit_rate: Some(0),
                 ..UniversalAudioQuery::default()
             })
             .is_err()

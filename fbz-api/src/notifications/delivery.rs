@@ -30,6 +30,44 @@ pub const NOTIFICATION_REQUESTED_EVENT: &str = "notification.send.requested";
 
 const NOTIFICATION_WORKER_ID: &str = "fbz-api-notification-worker";
 const MAX_TARGETS_PER_NOTIFICATION: i64 = 100;
+
+/// Atomic stale-lease-aware claim for a queued notification event. The `claimed`
+/// CTE captures the row's prior lease state in the same statement so a fresh
+/// `pending`/`failed` event is distinguishable from a takeover of a crashed
+/// worker's expired `delivering` lease. `$1` = event type, `$2` = worker id.
+/// Held as a const so a live-DB smoke test can `EXPLAIN` the exact query.
+const CLAIM_NEXT_EVENT_SQL: &str = r#"
+            with claimed as (
+                select id, status as prior_status, locked_by as prior_locked_by
+                from event_outbox
+                where event_type = $1
+                  and available_at <= now()
+                  and attempts < max_attempts
+                  and (
+                      status in ('pending', 'failed')
+                      or (status = 'delivering' and locked_until <= now())
+                  )
+                order by available_at asc, id asc
+                for update skip locked
+                limit 1
+            )
+            update event_outbox
+            set status = 'delivering',
+                attempts = attempts + 1,
+                locked_by = $2,
+                locked_until = now() + interval '5 minutes',
+                last_error = null
+            from claimed
+            where event_outbox.id = claimed.id
+            returning
+                event_outbox.id as id,
+                event_outbox.public_id::text as public_id,
+                event_outbox.payload as payload,
+                event_outbox.attempts as attempts,
+                event_outbox.max_attempts as max_attempts,
+                claimed.prior_status as prior_status,
+                claimed.prior_locked_by as prior_locked_by
+"#;
 const MAX_RESPONSE_BODY_BYTES: usize = 4096;
 const MAX_ERROR_BYTES: usize = 2048;
 
@@ -59,6 +97,11 @@ struct ClaimedNotificationEvent {
     payload: Value,
     attempt: i32,
     max_attempts: i32,
+    /// True when this claim took over a `delivering` row whose `locked_until`
+    /// had already expired (a crashed/stalled worker's abandoned lease), as
+    /// opposed to a fresh `pending`/`failed` event.
+    recovered_stale_lease: bool,
+    prior_locked_by: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -139,6 +182,16 @@ impl NotificationDeliveryService {
         let Some(event) = self.claim_next_event().await? else {
             return Ok(None);
         };
+
+        if event.recovered_stale_lease {
+            warn!(
+                outbox_public_id = %event.public_id,
+                prior_locked_by = event.prior_locked_by.as_deref().unwrap_or("unknown"),
+                attempt = event.attempt,
+                max_attempts = event.max_attempts,
+                "recovered stale notification delivery lease"
+            );
+        }
 
         let payload = match parse_notification_payload(&event.payload) {
             Ok(payload) => payload,
@@ -280,49 +333,25 @@ impl NotificationDeliveryService {
     async fn claim_next_event(
         &self,
     ) -> Result<Option<ClaimedNotificationEvent>, NotificationDeliveryError> {
-        let row = sqlx::query(
-            r#"
-            update event_outbox
-            set status = 'delivering',
-                attempts = attempts + 1,
-                locked_by = $2,
-                locked_until = now() + interval '5 minutes',
-                last_error = null
-            where id = (
-                select id
-                from event_outbox
-                where event_type = $1
-                  and available_at <= now()
-                  and attempts < max_attempts
-                  and (
-                      status in ('pending', 'failed')
-                      or (status = 'delivering' and locked_until <= now())
-                  )
-                order by available_at asc, id asc
-                for update skip locked
-                limit 1
-            )
-            returning
-                id,
-                public_id::text as public_id,
-                payload,
-                attempts,
-                max_attempts
-            "#,
-        )
-        .bind(NOTIFICATION_REQUESTED_EVENT)
-        .bind(NOTIFICATION_WORKER_ID)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(NotificationDeliveryError::from)?;
+        // See CLAIM_NEXT_EVENT_SQL: the claim captures prior lease state in the
+        // same atomic statement so a stale-lease takeover is observable.
+        let row = sqlx::query(CLAIM_NEXT_EVENT_SQL)
+            .bind(NOTIFICATION_REQUESTED_EVENT)
+            .bind(NOTIFICATION_WORKER_ID)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(NotificationDeliveryError::from)?;
 
         row.map(|row| -> Result<ClaimedNotificationEvent, sqlx::Error> {
+            let prior_status: String = row.try_get("prior_status")?;
             Ok(ClaimedNotificationEvent {
                 id: row.try_get("id")?,
                 public_id: row.try_get("public_id")?,
                 payload: row.try_get("payload")?,
                 attempt: row.try_get("attempts")?,
                 max_attempts: row.try_get("max_attempts")?,
+                recovered_stale_lease: prior_status == "delivering",
+                prior_locked_by: row.try_get("prior_locked_by")?,
             })
         })
         .transpose()
@@ -1161,6 +1190,57 @@ mod tests {
         assert!(delivery.contains("where public_id = case"));
         assert!(delivery.contains("then $1::uuid"));
         assert!(!delivery.contains(&bad_request_filter));
+    }
+
+    // Live-DB smoke: validates the exact production claim SQL parses, plans and
+    // type-checks against the real migrated schema via EXPLAIN — which fully
+    // resolves the UPDATE...FROM claimed CTE, every column/type and the prior-
+    // state RETURNING without executing the UPDATE, so it never mutates a real
+    // queued event. Requires dockerized PostgreSQL and `DATABASE_URL`.
+    //   cargo test -- --ignored claim_next_event_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn claim_next_event_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        // Plain EXPLAIN (not ANALYZE) plans the statement without executing it.
+        let plan_rows = sqlx::query(&format!("explain {CLAIM_NEXT_EVENT_SQL}"))
+            .bind(NOTIFICATION_REQUESTED_EVENT)
+            .bind(NOTIFICATION_WORKER_ID)
+            .fetch_all(&pool)
+            .await
+            .expect("claim SQL should parse and plan against the live schema");
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a query plan for the claim statement"
+        );
+    }
+
+    #[test]
+    fn stale_lease_reclaim_captures_prior_state_and_logs_structured_warn() {
+        let delivery = include_str!("delivery.rs");
+
+        // The claim query must capture the prior lease state in the same atomic
+        // statement so a stale `delivering` takeover is distinguishable from a
+        // fresh pending/failed event.
+        assert!(delivery.contains("with claimed as ("));
+        assert!(delivery.contains("status as prior_status"));
+        assert!(delivery.contains("claimed.prior_locked_by as prior_locked_by"));
+        // Reclaim is detected by the prior status, not by an extra round-trip.
+        assert!(delivery.contains("recovered_stale_lease: prior_status == \"delivering\""));
+        // The structured warn mirrors the other `recovered stale ...` lease logs.
+        assert!(delivery.contains("\"recovered stale notification delivery lease\""));
+        assert!(delivery.contains("outbox_public_id = %event.public_id"));
+        assert!(delivery.contains("prior_locked_by = event.prior_locked_by"));
     }
 
     #[test]
