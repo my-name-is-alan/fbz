@@ -485,8 +485,10 @@ mod tests {
 
         for uri in [
             "/emby/Items/Latest?UserId=user-1&Limit=20",
+            "/emby/Items/Latest?userId=user-1&parentId=library-1&startIndex=0&limit=20&includeItemTypes=Movie&sortBy=DateCreated&sortOrder=Descending&fields=MediaSources",
             "/Items/Latest?UserId=user-1&Limit=20",
             "/emby/Items/Resume?UserId=user-1&Limit=20",
+            "/emby/Items/Resume?userId=user-1&parentId=library-1&startIndex=0&limit=20&includeItemTypes=Movie&sortBy=DateCreated&sortOrder=Descending&fields=MediaSources",
             "/Items/Resume?UserId=user-1&Limit=20",
         ] {
             let response = app
@@ -503,6 +505,7 @@ mod tests {
                 .expect("latest items request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -550,17 +553,27 @@ mod tests {
                 Method::GET,
                 "/emby/Packages?PackageType=System&TargetSystems=Server&IsPremium=false&IsAdult=false",
             ),
+            (
+                Method::GET,
+                "/emby/Packages?packageType=System&targetSystems=Server&isPremium=false&isAdult=false",
+            ),
             (Method::GET, "/Packages"),
             (Method::GET, "/emby/Packages/fbz-core"),
+            (Method::GET, "/emby/Packages/fbz-core?assemblyGuid=fbz-core"),
             (Method::GET, "/Packages/fbz-core"),
             (
                 Method::GET,
                 "/emby/Packages/Updates?PackageType=UserInstalled",
             ),
+            (Method::GET, "/emby/Packages/Updates?packageType=System"),
             (Method::GET, "/Packages/Updates?PackageType=System"),
             (
                 Method::POST,
                 "/emby/Packages/Installed/fbz-core?Version=1.0.0&UpdateClass=Release",
+            ),
+            (
+                Method::POST,
+                "/emby/Packages/Installed/fbz-core?assemblyGuid=fbz-core&version=1.0.0&updateClass=Release",
             ),
             (
                 Method::POST,
@@ -585,6 +598,7 @@ mod tests {
                 .expect("package service request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -610,6 +624,13 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Dlna/Profiles",
+                Body::from(
+                    r#"{"Name":"Custom Profile","Id":"custom-profile","friendlyName":"Living Room","manufacturerUrl":"https://example.test","modelName":"FBZ Client","supportedMediaTypes":"Audio,Video","maxStreamingBitrate":1000000,"protocolInfoDetection":{"enabledForVideo":true,"enabledForAudio":true,"enabledForPhotos":false},"directPlayProfiles":[{"container":"mp4","audioCodec":"aac","videoCodec":"h264","Type":"Video"}]}"#,
+                ),
+            ),
+            (
+                Method::POST,
                 "/Dlna/Profiles",
                 Body::from(r#"{"Name":"Custom Profile","Id":"custom-profile"}"#),
             ),
@@ -617,6 +638,13 @@ mod tests {
                 Method::POST,
                 "/emby/Dlna/Profiles/custom-profile",
                 Body::from(r#"{"Name":"Custom Profile","Id":"custom-profile"}"#),
+            ),
+            (
+                Method::POST,
+                "/Dlna/Profiles/custom-profile",
+                Body::from(
+                    r#"{"Name":"Custom Profile","Id":"custom-profile","friendly_name":"Living Room","manufacturer_url":"https://example.test","model_name":"FBZ Client","supported_media_types":"Audio,Video","max_streaming_bitrate":1000000,"protocol_info_detection":{"enabled_for_video":true,"enabled_for_audio":true,"enabled_for_photos":false},"direct_play_profiles":[{"container":"mp4","audio_codec":"aac","video_codec":"h264","Type":"Video"}]}"#,
+                ),
             ),
             (
                 Method::POST,
@@ -650,6 +678,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -677,6 +706,11 @@ mod tests {
             ),
             (
                 Method::GET,
+                "/emby/Environment/DirectoryContents?path=.&includeFiles=false&includeDirectories=true",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
                 "/Environment/DirectoryContents?Path=.&IncludeFiles=false&IncludeDirectories=true",
                 Body::empty(),
             ),
@@ -687,12 +721,22 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Environment/DirectoryContents?path=.&includeFiles=true&includeDirectories=true",
+                Body::from(r#"{"username":"","password":""}"#),
+            ),
+            (
+                Method::POST,
                 "/Environment/DirectoryContents?Path=.&IncludeFiles=true&IncludeDirectories=true",
                 Body::from(r#"{"Username":"","Password":""}"#),
             ),
             (
                 Method::GET,
                 "/emby/Environment/ParentPath?Path=.",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
+                "/emby/Environment/ParentPath?path=.",
                 Body::empty(),
             ),
             (Method::GET, "/Environment/ParentPath?Path=.", Body::empty()),
@@ -709,6 +753,11 @@ mod tests {
             ),
             (
                 Method::GET,
+                "/emby/Environment/NetworkShares?path=server",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
                 "/Environment/NetworkShares?Path=server",
                 Body::empty(),
             ),
@@ -716,6 +765,11 @@ mod tests {
                 Method::POST,
                 "/emby/Environment/ValidatePath?Path=.",
                 Body::from(r#"{"ValidateWriteable":false,"IsFile":false}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Environment/ValidatePath?path=.",
+                Body::from(r#"{"validateWriteable":false,"isFile":false}"#),
             ),
             (
                 Method::POST,
@@ -739,6 +793,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -749,6 +804,7 @@ mod tests {
         for uri in [
             "/emby/System/ActivityLog/Entries?StartIndex=0&Limit=20&MinDate=2024-01-01T00:00:00Z",
             "/System/ActivityLog/Entries?StartIndex=0&Limit=20&MinDate=2024-01-01T00:00:00Z",
+            "/emby/System/ActivityLog/Entries?startIndex=0&limit=20&minDate=2024-01-01T00:00:00Z",
         ] {
             let response = app
                 .clone()
@@ -765,6 +821,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -779,6 +836,11 @@ mod tests {
                 Method::POST,
                 "/emby/Notifications/Admin?Name=Library&Description=Scan%20finished&Level=Info",
                 Body::from(r#"{"DisplayDateTime":true}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Notifications/Admin?name=Library&description=Scan%20finished&imageUrl=https%3A%2F%2Fexample.test%2Fimage.png&url=https%3A%2F%2Fexample.test%2Factivity&level=Info",
+                Body::from(r#"{"displayDateTime":true}"#),
             ),
             (
                 Method::POST,
@@ -802,6 +864,20 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Notifications/Services/Test",
+                Body::from(
+                    r#"{"notifierKey":"fbz-host","serviceName":"FBZ Host Notifications","pluginId":"fbz-core","friendlyName":"Host","id":"fbz-host","enabled":false,"userIds":["user-1"],"deviceIds":["device-1"],"libraryIds":["library-1"],"eventIds":["event-1"],"userId":"user-1","isSelfNotification":true,"groupItems":true,"options":{}}"#,
+                ),
+            ),
+            (
+                Method::POST,
+                "/Notifications/Services/Test",
+                Body::from(
+                    r#"{"notifier_key":"fbz-host","service_name":"FBZ Host Notifications","plugin_id":"fbz-core","friendly_name":"Host","id":"fbz-host","enabled":false,"user_ids":["user-1"],"device_ids":["device-1"],"library_ids":["library-1"],"event_ids":["event-1"],"user_id":"user-1","is_self_notification":true,"group_items":true,"options":{}}"#,
+                ),
+            ),
+            (
+                Method::POST,
                 "/Notifications/Services/Test",
                 Body::from(r#"{"NotifierKey":"fbz-host","Enabled":false}"#),
             ),
@@ -822,6 +898,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -891,12 +968,22 @@ mod tests {
             ),
             (
                 Method::GET,
+                "/emby/Encoding/CodecParameters?codecId=h264&parameterContext=Encoding",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
                 "/Encoding/CodecParameters?CodecId=h264&ParameterContext=Encoding",
                 Body::empty(),
             ),
             (
                 Method::POST,
                 "/emby/Encoding/CodecParameters?CodecId=h264&ParameterContext=Encoding",
+                Body::from(r#"{}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Encoding/CodecParameters?codecId=h264&parameterContext=Encoding",
                 Body::from(r#"{}"#),
             ),
             (
@@ -933,6 +1020,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -1276,6 +1364,7 @@ mod tests {
         for uri in [
             "/emby/LiveTv/Timers/Defaults?ProgramId=program-1",
             "/LiveTv/Timers/Defaults?ProgramId=program-1",
+            "/emby/LiveTv/Timers/Defaults?programId=program-1",
         ] {
             let response = app
                 .clone()
@@ -1438,6 +1527,8 @@ mod tests {
             "/Users/user-1/Sections/latestmedia/Items?Limit=12&Fields=PrimaryImageAspectRatio",
             "/emby/Users/user-1/Sections/resume/Items?StartIndex=0&Limit=12",
             "/Users/user-1/Sections/resume/Items?StartIndex=0&Limit=12",
+            "/emby/Users/user-1/Sections/music/Items?parentId=library-1&startIndex=0&limit=12&includeItemTypes=Audio&mediaTypes=Audio&sortBy=SortName&sortOrder=Ascending&fields=MediaSources&enableImages=true&imageTypeLimit=1&enableImageTypes=Primary",
+            "/Users/user-1/Sections/resume/Items?parent_id=library-1&start_index=0&limit=12&include_item_types=Movie&media_types=Video&sort_by=DateCreated&sort_order=Descending&enable_images=false&image_type_limit=1&enable_image_types=Primary&is_favorite=false&is_played=true",
         ] {
             let response = app
                 .clone()
@@ -1453,6 +1544,7 @@ mod tests {
                 .expect("content service request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -1464,6 +1556,11 @@ mod tests {
             (
                 Method::GET,
                 "/emby/DisplayPreferences/item-1?UserId=user-1&Client=Infuse",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
+                "/emby/DisplayPreferences/item-1?userId=user-1&client=Infuse",
                 Body::empty(),
             ),
             (
@@ -1480,6 +1577,13 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/DisplayPreferences/item-1?userId=user-1&client=QueryClient",
+                Body::from(
+                    r#"{"id":"item-1","sortBy":"DateCreated","sortOrder":"Descending","client":"Infuse","customPrefs":{"view":"poster"}}"#,
+                ),
+            ),
+            (
+                Method::POST,
                 "/DisplayPreferences/item-1?UserId=user-1",
                 Body::from(
                     r#"{"Id":"item-1","SortBy":"DateCreated","SortOrder":"Descending","Client":"Infuse","CustomPrefs":{"view":"poster"}}"#,
@@ -1491,6 +1595,11 @@ mod tests {
                 Method::POST,
                 "/emby/UserSettings/user-1",
                 Body::from(r#"[{"Name":"theme","Value":"dark"}]"#),
+            ),
+            (
+                Method::POST,
+                "/emby/UserSettings/user-1",
+                Body::from(r#"[{"name":"theme","value":"dark"},{"key":"layout","value":"grid"}]"#),
             ),
             (
                 Method::POST,
@@ -1523,6 +1632,7 @@ mod tests {
                 .expect("display preferences request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -1818,6 +1928,16 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Users/ForgotPassword",
+                Body::from(r#"{"enteredUsername":"alice"}"#),
+            ),
+            (
+                Method::POST,
+                "/Users/ForgotPassword",
+                Body::from(r#"{"entered_username":"alice"}"#),
+            ),
+            (
+                Method::POST,
                 "/Users/ForgotPassword",
                 Body::from(r#"{"EnteredUsername":"alice"}"#),
             ),
@@ -1825,6 +1945,11 @@ mod tests {
                 Method::POST,
                 "/emby/Users/ForgotPassword/Pin",
                 Body::from(r#"{"Pin":"123456"}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Users/ForgotPassword/Pin",
+                Body::from(r#"{"pin":"123456"}"#),
             ),
             (
                 Method::POST,
@@ -1839,6 +1964,16 @@ mod tests {
             (
                 Method::GET,
                 "/Users/Prefixes?IsDisabled=false&Limit=20&SortOrder=Ascending",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
+                "/emby/Users/Prefixes?isDisabled=false&startIndex=0&limit=20&sortOrder=Ascending",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
+                "/Users/Prefixes?is_disabled=false&start_index=0&limit=20&name_starts_with_or_greater=A&sort_order=Ascending",
                 Body::empty(),
             ),
         ] {
@@ -1858,6 +1993,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -1870,6 +2006,20 @@ mod tests {
                 Method::POST,
                 "/emby/Users/New",
                 Body::from(r#"{"Name":"alice"}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Users/New",
+                Body::from(
+                    r#"{"name":"alice","copyFromUserId":"template","userCopyOptions":["UserPolicy"]}"#,
+                ),
+            ),
+            (
+                Method::POST,
+                "/Users/New",
+                Body::from(
+                    r#"{"name":"alice","copy_from_user_id":"template","user_copy_options":["UserConfiguration"]}"#,
+                ),
             ),
             (
                 Method::POST,
@@ -1907,8 +2057,18 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Users/user-1/Configuration/Partial",
+                Body::from(r#"{"rememberAudioSelections":true,"resumeRewindSeconds":5}"#),
+            ),
+            (
+                Method::POST,
                 "/Users/user-1/Configuration/Partial",
                 Body::from(r#"{"RememberAudioSelections":true}"#),
+            ),
+            (
+                Method::POST,
+                "/Users/user-1/Configuration/Partial",
+                Body::from(r#"{"remember_audio_selections":true,"resume_rewind_seconds":5}"#),
             ),
             (
                 Method::POST,
@@ -1917,13 +2077,48 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Users/user-1/Policy",
+                Body::from(r#"{"enableContentDownloading":true,"maxParentalRating":100}"#),
+            ),
+            (
+                Method::POST,
                 "/Users/user-1/Policy",
                 Body::from(r#"{"IsAdministrator":false}"#),
             ),
             (
                 Method::POST,
+                "/Users/user-1/Policy",
+                Body::from(r#"{"enable_content_downloading":true,"max_parental_rating":100}"#),
+            ),
+            (
+                Method::POST,
                 "/emby/Users/user-1/Password",
                 Body::from(r#"{"Id":"user-1","NewPw":"secret","ResetPassword":false}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Users/user-1/EasyPassword",
+                Body::from(r#"{"Id":"user-1","NewPw":"1234","ResetPassword":false}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Users/user-1/EasyPassword",
+                Body::from(r#"{"id":"user-1","newPw":"1234","resetPassword":false}"#),
+            ),
+            (
+                Method::POST,
+                "/Users/user-1/EasyPassword",
+                Body::from(r#"{"id":"user-1","new_pw":"1234","reset_password":false}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Users/user-1/Password",
+                Body::from(r#"{"id":"user-1","newPw":"secret","resetPassword":false}"#),
+            ),
+            (
+                Method::POST,
+                "/Users/user-1/Password",
+                Body::from(r#"{"id":"user-1","new_pw":"secret","reset_password":false}"#),
             ),
             (
                 Method::POST,
@@ -1947,6 +2142,73 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_connect_service_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for (method, uri, body) in [
+            (
+                Method::GET,
+                "/emby/Connect/Exchange?ConnectUserName=alice&Pin=123456",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
+                "/Connect/Exchange?connectUserName=alice&pin=123456",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
+                "/emby/Connect/Pending?ConnectUserName=alice",
+                Body::empty(),
+            ),
+            (
+                Method::GET,
+                "/Connect/Pending?connect_user_name=alice",
+                Body::empty(),
+            ),
+            (
+                Method::POST,
+                "/emby/Users/user-1/Connect/Link",
+                Body::from(r#"{"ConnectUserName":"alice"}"#),
+            ),
+            (
+                Method::POST,
+                "/Users/user-1/Connect/Link",
+                Body::from(r#"{"connectUserName":"alice"}"#),
+            ),
+            (
+                Method::DELETE,
+                "/emby/Users/user-1/Connect/Link",
+                Body::empty(),
+            ),
+            (
+                Method::POST,
+                "/Users/user-1/Connect/Link/Delete",
+                Body::empty(),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("x-emby-token", "test-token")
+                        .body(body)
+                        .expect("request should build"),
+                )
+                .await
+                .expect("connect service request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{uri}");
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
         }
     }
 
@@ -1957,6 +2219,14 @@ mod tests {
         for (method, uri) in [
             (Method::GET, "/emby/Users/Query"),
             (Method::GET, "/Users/Query"),
+            (
+                Method::GET,
+                "/emby/Users/Query?isHidden=false&isDisabled=true&startIndex=0&limit=20&nameStartsWithOrGreater=A&sortOrder=Descending",
+            ),
+            (
+                Method::GET,
+                "/Users/Query?is_hidden=false&is_disabled=true&start_index=0&limit=20&name_starts_with_or_greater=A&sort_order=Descending",
+            ),
             (Method::GET, "/emby/Users/ItemAccess"),
             (Method::GET, "/Users/ItemAccess"),
             (Method::GET, "/emby/Auth/Providers"),
@@ -1988,6 +2258,7 @@ mod tests {
                 .expect("logout request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2044,10 +2315,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emby_session_capabilities_accept_lower_camel_fields() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for (uri, body) in [
+            (
+                "/emby/Sessions/Capabilities?id=00000000-0000-0000-0000-000000000001&playableMediaTypes=Audio,Video&supportedCommands=Play,Pause&supportsMediaControl=true&supportsSync=true",
+                Body::empty(),
+            ),
+            (
+                "/Sessions/Capabilities/Full?id=00000000-0000-0000-0000-000000000001",
+                Body::from(
+                    r#"{"playableMediaTypes":["Audio","Video"],"supportedCommands":["Play"],"supportsMediaControl":true,"supportsSync":true,"pushToken":"token","pushTokenType":"fcm","deviceProfile":{"Name":"Client"},"iconUrl":"https://example.test/icon.png","appId":"app.id"}"#,
+                ),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("x-emby-token", "test-token")
+                        .body(body)
+                        .expect("request should build"),
+                )
+                .await
+                .expect("session capability request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
     async fn emby_session_detail_aliases_exist() {
         let app = build_router(AppState::for_tests(Config::default()));
 
         for uri in [
+            "/emby/Sessions?UserId=user-1",
+            "/emby/Sessions?userId=user-1",
+            "/emby/Sessions?user_id=user-1",
+            "/Sessions?UserId=user-1",
             "/emby/Sessions/00000000-0000-0000-0000-000000000001",
             "/Sessions/00000000-0000-0000-0000-000000000001",
         ] {
@@ -2065,6 +2375,7 @@ mod tests {
                 .expect("session detail request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2125,11 +2436,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emby_session_remote_control_body_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for (uri, body) in [
+            (
+                "/emby/Sessions/00000000-0000-0000-0000-000000000001/Command",
+                r#"{"command":"DisplayMessage","arguments":{"Header":"Now playing"}}"#,
+            ),
+            (
+                "/emby/Sessions/Command/DisplayMessage",
+                r#"{"name":"DisplayMessage","arguments":{"Header":"Now playing"}}"#,
+            ),
+            (
+                "/emby/Sessions/00000000-0000-0000-0000-000000000001/Message",
+                r#"{"header":"Playback","text":"Paused","timeoutMs":1500}"#,
+            ),
+            (
+                "/emby/Sessions/00000000-0000-0000-0000-000000000001/Viewing",
+                r#"{"itemId":"item-1","itemName":"Movie","itemType":"Movie"}"#,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("x-emby-token", "test-token")
+                        .body(Body::from(body))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("session remote control body alias request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_session_remote_play_accepts_lower_camel_fields() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for (uri, body) in [
+            (
+                "/emby/Sessions/00000000-0000-0000-0000-000000000001/Playing",
+                Body::from(
+                    r#"{"itemIds":["item-1"],"playCommand":"PlayNow","startPositionTicks":42,"mediaSourceId":"source-1"}"#,
+                ),
+            ),
+            (
+                "/Sessions/00000000-0000-0000-0000-000000000001/Playing?itemIds=item-1,item-2&playCommand=PlayNext&startPositionTicks=42&mediaSourceId=source-1",
+                Body::empty(),
+            ),
+            (
+                "/Sessions/00000000-0000-0000-0000-000000000001/Playing/Seek?seekPositionTicks=42",
+                Body::empty(),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("x-emby-token", "test-token")
+                        .body(body)
+                        .expect("request should build"),
+                )
+                .await
+                .expect("session remote play request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
     async fn emby_session_play_queue_aliases_exist() {
         let app = build_router(AppState::for_tests(Config::default()));
 
         for uri in [
             "/emby/Sessions/PlayQueue?Id=00000000-0000-0000-0000-000000000001&DeviceId=device-1",
+            "/emby/Sessions/PlayQueue?id=00000000-0000-0000-0000-000000000001&deviceId=device-1",
+            "/emby/Sessions/PlayQueue?id=00000000-0000-0000-0000-000000000001&device_id=device-1",
             "/Sessions/PlayQueue?Id=00000000-0000-0000-0000-000000000001&DeviceId=device-1",
         ] {
             let response = app
@@ -2146,6 +2539,7 @@ mod tests {
                 .expect("session play queue request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2156,10 +2550,17 @@ mod tests {
         for (method, uri, body) in [
             (Method::GET, "/emby/Devices", Body::empty()),
             (Method::GET, "/Devices", Body::empty()),
+            (
+                Method::GET,
+                "/emby/Devices?sortOrder=Ascending",
+                Body::empty(),
+            ),
             (Method::DELETE, "/emby/Devices?Id=device-1", Body::empty()),
             (Method::DELETE, "/Devices?Id=device-1", Body::empty()),
+            (Method::DELETE, "/emby/Devices?id=device-1", Body::empty()),
             (Method::GET, "/emby/Devices/Info?Id=device-1", Body::empty()),
             (Method::GET, "/Devices/Info?Id=device-1", Body::empty()),
+            (Method::GET, "/emby/Devices/Info?id=device-1", Body::empty()),
             (Method::GET, "/emby/Devices/CameraUploads", Body::empty()),
             (Method::GET, "/Devices/CameraUploads", Body::empty()),
             (
@@ -2179,11 +2580,21 @@ mod tests {
             ),
             (Method::POST, "/Devices/Delete?Id=device-1", Body::empty()),
             (
+                Method::POST,
+                "/emby/Devices/Delete?id=device-1",
+                Body::empty(),
+            ),
+            (
                 Method::GET,
                 "/emby/Devices/Options?Id=device-1",
                 Body::empty(),
             ),
             (Method::GET, "/Devices/Options?Id=device-1", Body::empty()),
+            (
+                Method::GET,
+                "/emby/Devices/Options?id=device-1",
+                Body::empty(),
+            ),
             (
                 Method::POST,
                 "/emby/Devices/Options?Id=device-1",
@@ -2192,6 +2603,11 @@ mod tests {
             (
                 Method::POST,
                 "/Devices/Options?Id=device-1",
+                Body::from(r#"{"CustomName":"Living Room"}"#),
+            ),
+            (
+                Method::POST,
+                "/emby/Devices/Options?id=device-1",
                 Body::from(r#"{"CustomName":"Living Room"}"#),
             ),
         ] {
@@ -2210,6 +2626,7 @@ mod tests {
                 .expect("device request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2228,6 +2645,14 @@ mod tests {
             (
                 Method::GET,
                 "/emby/ScheduledTasks?IsEnabled=true&IsHidden=false",
+            ),
+            (
+                Method::GET,
+                "/emby/ScheduledTasks?isEnabled=true&isHidden=false",
+            ),
+            (
+                Method::GET,
+                "/ScheduledTasks?is_enabled=false&is_hidden=false",
             ),
             (Method::GET, "/ScheduledTasks?IsEnabled=false"),
             (
@@ -2269,6 +2694,7 @@ mod tests {
                 .expect("scheduled task request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2279,23 +2705,25 @@ mod tests {
         for uri in [
             "/emby/Users/user-1/Views",
             "/Users/user-1/Views",
+            "/emby/Users/user-1/GroupingOptions",
+            "/Users/user-1/GroupingOptions",
             "/emby/UserViews?UserId=user-1",
             "/UserViews?UserId=user-1",
+            "/emby/UserViews?userId=user-1",
         ] {
+            let mut builder = Request::builder().method(Method::GET).uri(uri);
+            if !uri.contains("GroupingOptions") {
+                builder = builder.header("x-emby-token", "test-token");
+            }
+
             let response = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(uri)
-                        .header("x-emby-token", "test-token")
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
+                .oneshot(builder.body(Body::empty()).expect("request should build"))
                 .await
                 .expect("views request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2306,12 +2734,14 @@ mod tests {
         for uri in [
             "/emby/Library/MediaFolders",
             "/Library/MediaFolders",
+            "/emby/Library/MediaFolders?isHidden=false",
             "/emby/Library/SelectableMediaFolders",
             "/Library/SelectableMediaFolders",
             "/emby/Library/VirtualFolders",
             "/Library/VirtualFolders",
             "/emby/Library/VirtualFolders/Query?StartIndex=0&Limit=20",
             "/Library/VirtualFolders/Query?StartIndex=0&Limit=20",
+            "/emby/Library/VirtualFolders/Query?startIndex=0&limit=20",
             "/emby/Library/PhysicalPaths",
             "/Library/PhysicalPaths",
             "/emby/Libraries/AvailableOptions",
@@ -2331,6 +2761,7 @@ mod tests {
                 .expect("library media folder request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2382,9 +2813,11 @@ mod tests {
             "/Users/user-1/Items?AnyProviderIdEquals=tmdb.123,imdb.tt7654321,tvdb.456",
             "/emby/Users/user-1/Items?ImageTypes=Primary,Backdrop&EnableImages=true&ImageTypeLimit=2&EnableImageTypes=Primary,Backdrop,Logo",
             "/Users/user-1/Items?ImageTypes=Primary,Backdrop&EnableImages=true&ImageTypeLimit=2&EnableImageTypes=Primary,Backdrop,Logo",
+            "/emby/Users/user-1/Items?parentId=library-1&startIndex=0&limit=20&recursive=true&includeItemTypes=Movie,Episode&imageTypes=Primary,Backdrop&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary,Backdrop&anyProviderIdEquals=tmdb.123&sortBy=DateCreated&sortOrder=Descending&fields=MediaSources&filters=IsPlayed&isPlayed=true&isFavorite=false&isFolder=false&isMovie=true&isSeries=false&ids=item-1,item-2&excludeItemIds=item-3&searchTerm=movie&nameStartsWith=A&nameStartsWithOrGreater=B&nameLessThan=Z&genreIds=1,2&officialRatings=PG-13&excludeTags=Blocked&studioIds=studio-1&personIds=person-1&personTypes=Actor&artistIds=artist-1&albumIds=album-1&mediaTypes=Video&audioCodecs=aac&videoCodecs=h264&subtitleCodecs=srt",
             "/emby/Users/user-1/Items?IncludeItemTypes=Playlist&SearchTerm=mix&SortOrder=Descending",
             "/Users/user-1/Items?IncludeItemTypes=Playlist&SearchTerm=mix&SortOrder=Descending",
             "/emby/Search/Hints?UserId=user-1&SearchTerm=alien&IncludeItemTypes=Movie,Series&Limit=10",
+            "/emby/Search/Hints?userId=user-1&parentId=library-1&searchTerm=alien&includeItemTypes=Movie,Series&mediaTypes=Video&startIndex=0&limit=10",
             "/Search/Hints?UserId=user-1&SearchTerm=alien&IncludeItemTypes=Movie,Series&Limit=10",
         ] {
             let response = app
@@ -2401,6 +2834,7 @@ mod tests {
                 .expect("items request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2414,12 +2848,14 @@ mod tests {
             "/emby/Users/user-1/Items/Latest",
             "/Users/user-1/Items/Latest",
             "/emby/Users/user-1/Suggestions?ItemLimit=12&MediaTypes=Video",
+            "/emby/Users/user-1/Suggestions?parentId=library-1&startIndex=1&limit=20&itemLimit=12&includeItemTypes=Movie,Episode&mediaTypes=Video&sortBy=DateCreated&sortOrder=Descending&fields=MediaSources",
             "/Users/user-1/Suggestions?Limit=12&IncludeItemTypes=Movie,Episode",
             "/emby/Users/user-1/Items/Counts",
             "/Users/user-1/Items/Counts",
             "/emby/Users/user-1/Items/Root",
             "/Users/user-1/Items/Root",
             "/emby/Items/Counts?UserId=user-1",
+            "/emby/Items/Counts?userId=user-1",
             "/Items/Counts?UserId=user-1",
         ] {
             let response = app
@@ -2436,6 +2872,7 @@ mod tests {
                 .expect("media list request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2445,6 +2882,7 @@ mod tests {
 
         for uri in [
             "/emby/Trailers?UserId=user-1&Limit=12&Fields=MediaSources,PrimaryImageAspectRatio",
+            "/emby/Trailers?userId=user-1&parentId=library-1&startIndex=1&limit=12&recursive=false&searchTerm=signal&sortBy=DateCreated&sortOrder=Descending&fields=MediaSources&includeItemTypes=Trailer&mediaTypes=Video&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
             "/Trailers?UserId=user-1&Limit=12&Fields=MediaSources,PrimaryImageAspectRatio",
         ] {
             let response = app
@@ -2597,10 +3035,14 @@ mod tests {
         for uri in [
             "/emby/Shows/NextUp",
             "/Shows/NextUp",
+            "/emby/Shows/NextUp?userId=user-1&seriesId=series-1&parentId=library-1&startIndex=1&limit=20&includeItemTypes=Episode&sortBy=IndexNumber&sortOrder=Descending&fields=Overview",
+            "/emby/Shows/Upcoming?userId=user-1&parentId=library-1&startIndex=1&limit=20&includeItemTypes=Episode&sortBy=PremiereDate&sortOrder=Ascending&fields=Overview",
             "/emby/Shows/series-1/Seasons",
             "/Shows/series-1/Seasons",
+            "/emby/Shows/series-1/Seasons?userId=user-1&startIndex=1&limit=20&includeItemTypes=Season&sortBy=SortName&sortOrder=Ascending&fields=Overview",
             "/emby/Shows/series-1/Episodes",
             "/Shows/series-1/Episodes",
+            "/emby/Shows/series-1/Episodes?userId=user-1&seasonId=season-1&startIndex=1&limit=20&includeItemTypes=Episode&sortBy=IndexNumber&sortOrder=Ascending&fields=Overview",
         ] {
             let response = app
                 .clone()
@@ -2616,6 +3058,7 @@ mod tests {
                 .expect("show request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2626,12 +3069,16 @@ mod tests {
         for uri in [
             "/emby/Genres?UserId=user-1&Limit=20",
             "/Genres?UserId=user-1&Limit=20",
+            "/emby/Genres?userId=user-1&parentId=library-1&startIndex=1&limit=20&searchTerm=act&sortOrder=Descending&nameStartsWith=A&nameStartsWithOrGreater=A&fields=PrimaryImageAspectRatio&enableImages=true",
             "/emby/Genres/Action?UserId=user-1",
             "/Genres/Action?UserId=user-1",
+            "/emby/Genres/Action?userId=user-1",
             "/emby/MusicGenres?UserId=user-1&SearchTerm=rock",
             "/MusicGenres?UserId=user-1&SearchTerm=rock",
+            "/emby/MusicGenres?userId=user-1&searchTerm=rock",
             "/emby/MusicGenres/Rock?UserId=user-1",
             "/MusicGenres/Rock?UserId=user-1",
+            "/emby/MusicGenres/Rock?userId=user-1",
         ] {
             let response = app
                 .clone()
@@ -2647,6 +3094,7 @@ mod tests {
                 .expect("genre request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2657,12 +3105,16 @@ mod tests {
         for uri in [
             "/emby/Artists?UserId=user-1&Limit=20",
             "/Artists?UserId=user-1&Limit=20",
+            "/emby/Artists?userId=user-1&parentId=library-1&startIndex=1&limit=20&searchTerm=bow&sortOrder=Descending&artistType=AlbumArtist&nameStartsWith=B&artistStartsWithOrGreater=A&albumArtistStartsWithOrGreater=C&albums=Low%7CHeroes&albumIds=album-1&fields=PrimaryImageAspectRatio&enableImages=true",
             "/emby/Artists/AlbumArtists?UserId=user-1&SearchTerm=bow",
             "/Artists/AlbumArtists?UserId=user-1&SearchTerm=bow",
+            "/emby/Artists/AlbumArtists?userId=user-1&searchTerm=bow",
             "/emby/Artists/Prefixes?UserId=user-1&Limit=20",
             "/Artists/Prefixes?UserId=user-1&Limit=20",
+            "/emby/Artists/Prefixes?userId=user-1&parentId=library-1&startIndex=1&limit=20&searchTerm=bow&nameStartsWith=B&nameStartsWithOrGreater=A&nameLessThan=Z&artistType=AlbumArtist",
             "/emby/Artists/David%20Bowie?UserId=user-1",
             "/Artists/David%20Bowie?UserId=user-1",
+            "/emby/Artists/David%20Bowie?userId=user-1",
         ] {
             let response = app
                 .clone()
@@ -2678,6 +3130,7 @@ mod tests {
                 .expect("artist request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2688,6 +3141,7 @@ mod tests {
         for uri in [
             "/emby/Items/Prefixes?UserId=user-1&IncludeItemTypes=Movie,MusicAlbum&Limit=50",
             "/Items/Prefixes?UserId=user-1&IncludeItemTypes=Movie,MusicAlbum&Limit=50",
+            "/emby/Items/Prefixes?userId=user-1&parentId=library-1&recursive=true&startIndex=1&limit=50&includeItemTypes=Movie,MusicAlbum&searchTerm=mov&nameStartsWith=M&nameStartsWithOrGreater=L&nameLessThan=Z",
         ] {
             let response = app
                 .clone()
@@ -2703,6 +3157,7 @@ mod tests {
                 .expect("item prefixes request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2713,8 +3168,10 @@ mod tests {
         for uri in [
             "/emby/Persons?UserId=user-1&PersonTypes=Actor,Director&Limit=20",
             "/Persons?UserId=user-1&PersonTypes=Actor,Director&Limit=20",
+            "/emby/Persons?userId=user-1&parentId=library-1&personTypes=Actor,Director&startIndex=1&limit=20&searchTerm=tom&sortOrder=Descending&nameStartsWith=T&nameStartsWithOrGreater=M&fields=PrimaryImageAspectRatio&enableImages=true",
             "/emby/Persons/Tom%20Hanks?UserId=user-1",
             "/Persons/Tom%20Hanks?UserId=user-1",
+            "/emby/Persons/Tom%20Hanks?userId=user-1",
         ] {
             let response = app
                 .clone()
@@ -2730,6 +3187,7 @@ mod tests {
                 .expect("person request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2740,8 +3198,10 @@ mod tests {
         for uri in [
             "/emby/Studios?UserId=user-1&Limit=20",
             "/Studios?UserId=user-1&Limit=20",
+            "/emby/Studios?userId=user-1&parentId=library-1&startIndex=1&limit=20&searchTerm=studio&sortOrder=Descending&nameStartsWith=S&nameStartsWithOrGreater=M&fields=PrimaryImageAspectRatio&enableImages=true",
             "/emby/Studios/Studio%20A?UserId=user-1",
             "/Studios/Studio%20A?UserId=user-1",
+            "/emby/Studios/Studio%20A?userId=user-1",
         ] {
             let response = app
                 .clone()
@@ -2757,6 +3217,7 @@ mod tests {
                 .expect("studio request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2767,22 +3228,34 @@ mod tests {
         for uri in [
             "/emby/Tags?UserId=user-1&Limit=20",
             "/Tags?UserId=user-1&Limit=20",
+            "/emby/Tags?userId=user-1&parentId=library-1&startIndex=1&limit=20&searchTerm=hdr&sortOrder=Descending&nameStartsWith=H&nameStartsWithOrGreater=G&fields=PrimaryImageAspectRatio&enableImages=true",
             "/emby/OfficialRatings?UserId=user-1&Limit=20",
             "/OfficialRatings?UserId=user-1&Limit=20",
+            "/emby/OfficialRatings?userId=user-1&limit=20",
             "/emby/Years?UserId=user-1&ParentId=library-1&Limit=20",
             "/Years?UserId=user-1&ParentId=library-1&Limit=20",
+            "/emby/Years?userId=user-1&parentId=library-1&limit=20",
             "/emby/Containers?UserId=user-1&Limit=20",
             "/Containers?UserId=user-1&Limit=20",
+            "/emby/Containers?userId=user-1&limit=20",
             "/emby/AudioCodecs?UserId=user-1&Limit=20",
             "/AudioCodecs?UserId=user-1&Limit=20",
+            "/emby/AudioCodecs?userId=user-1&limit=20",
             "/emby/VideoCodecs?UserId=user-1&Limit=20",
             "/VideoCodecs?UserId=user-1&Limit=20",
+            "/emby/VideoCodecs?userId=user-1&limit=20",
             "/emby/SubtitleCodecs?UserId=user-1&Limit=20",
             "/SubtitleCodecs?UserId=user-1&Limit=20",
+            "/emby/SubtitleCodecs?userId=user-1&limit=20",
             "/emby/StreamLanguages?UserId=user-1&Limit=20",
             "/StreamLanguages?UserId=user-1&Limit=20",
+            "/emby/StreamLanguages?userId=user-1&limit=20",
             "/emby/Items/Filters?UserId=user-1&ParentId=library-1&IncludeItemTypes=Movie,Series&MediaTypes=Video",
             "/Items/Filters?UserId=user-1&ParentId=library-1&IncludeItemTypes=Movie,Series&MediaTypes=Video",
+            "/emby/Items/Filters?userId=user-1&parentId=library-1&includeItemTypes=Movie,Series&mediaTypes=Video",
+            "/emby/Items/Filters2?UserId=user-1&ParentId=library-1&IncludeItemTypes=Movie,Series&MediaTypes=Video",
+            "/Items/Filters2?UserId=user-1&ParentId=library-1&IncludeItemTypes=Movie,Series&MediaTypes=Video",
+            "/emby/Items/Filters2?userId=user-1&parentId=library-1&includeItemTypes=Movie,Series&mediaTypes=Video",
         ] {
             let response = app
                 .clone()
@@ -2798,6 +3271,7 @@ mod tests {
                 .expect("classification request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2829,19 +3303,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emby_artist_music_collection_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Artists/artist-1/Songs?UserId=user-1&Limit=20",
+            "/emby/Artists/artist-1/Songs?userId=user-1&parentId=library-1&startIndex=0&limit=20&sortBy=SortName&sortOrder=Ascending&fields=MediaSources&searchTerm=blue&genreIds=1&artistIds=2&albumIds=3&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary,Backdrop",
+            "/Artists/artist-1/Songs?UserId=user-1&Limit=20",
+            "/emby/Artists/artist-1/Albums?UserId=user-1&Limit=20",
+            "/emby/Artists/artist-1/Albums?userId=user-1&limit=20&enableImages=true&imageTypeLimit=2",
+            "/Artists/artist-1/Albums?UserId=user-1&Limit=20",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("artist music collection request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
     async fn emby_instant_mix_aliases_exist() {
         let app = build_router(AppState::for_tests(Config::default()));
 
         for uri in [
             "/emby/Items/item-1/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Items/item-1/InstantMix?userId=user-1&startIndex=1&limit=20&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
             "/Items/item-1/InstantMix?UserId=user-1&Limit=20",
             "/emby/Songs/song-1/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Songs/song-1/InstantMix?userId=user-1&startIndex=1&limit=20&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
             "/Songs/song-1/InstantMix?UserId=user-1&Limit=20",
             "/emby/Albums/album-1/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Albums/album-1/InstantMix?userId=user-1&startIndex=1&limit=20&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
             "/Albums/album-1/InstantMix?UserId=user-1&Limit=20",
             "/emby/Artists/InstantMix?UserId=user-1&Limit=20",
+            "/emby/Artists/InstantMix?id=artist-1&userId=user-1&startIndex=1&limit=20&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
             "/Artists/InstantMix?UserId=user-1&Limit=20",
             "/emby/MusicGenres/InstantMix?UserId=user-1&Limit=20",
+            "/emby/MusicGenres/InstantMix?id=42&userId=user-1&startIndex=1&limit=20&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
             "/MusicGenres/InstantMix?UserId=user-1&Limit=20",
             "/emby/MusicGenres/Rock/InstantMix?UserId=user-1&Limit=20",
             "/MusicGenres/Rock/InstantMix?UserId=user-1&Limit=20",
@@ -2872,8 +3381,10 @@ mod tests {
         for uri in [
             "/emby/Playlists?UserId=user-1&Limit=20",
             "/Playlists?UserId=user-1&Limit=20",
+            "/emby/Playlists?userId=user-1&parentId=library-1&startIndex=1&limit=20&searchTerm=mix&sortOrder=Descending&fields=PrimaryImageAspectRatio&enableImages=true",
             "/emby/Playlists/playlist-1/Items?UserId=user-1&Limit=50",
             "/Playlists/playlist-1/Items?UserId=user-1&Limit=50",
+            "/emby/Playlists/playlist-1/Items?userId=user-1&startIndex=1&limit=50&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary,Backdrop",
         ] {
             let response = app
                 .clone()
@@ -2889,6 +3400,7 @@ mod tests {
                 .expect("playlist request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2903,11 +3415,19 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Playlists?name=RoadTrip&ids=item-1,item-2&mediaType=Audio",
+            ),
+            (
+                Method::POST,
                 "/Playlists?Name=RoadTrip&Ids=item-1,item-2&MediaType=Audio",
             ),
             (
                 Method::GET,
                 "/emby/Playlists/playlist-1/AddToPlaylistInfo?UserId=user-1&Ids=item-1,item-2",
+            ),
+            (
+                Method::GET,
+                "/emby/Playlists/playlist-1/AddToPlaylistInfo?userId=user-1&ids=item-1,item-2",
             ),
             (
                 Method::GET,
@@ -2919,6 +3439,10 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Playlists/playlist-1/Items?userId=user-1&ids=item-1,item-2",
+            ),
+            (
+                Method::POST,
                 "/Playlists/playlist-1/Items?UserId=user-1&Ids=item-1,item-2",
             ),
             (
@@ -2927,11 +3451,19 @@ mod tests {
             ),
             (
                 Method::DELETE,
+                "/emby/Playlists/playlist-1/Items?entryIds=entry-1,entry-2",
+            ),
+            (
+                Method::DELETE,
                 "/Playlists/playlist-1/Items?EntryIds=entry-1,entry-2",
             ),
             (
                 Method::POST,
                 "/emby/Playlists/playlist-1/Items/Delete?EntryIds=entry-1,entry-2",
+            ),
+            (
+                Method::POST,
+                "/emby/Playlists/playlist-1/Items/Delete?entryIds=entry-1,entry-2",
             ),
             (
                 Method::POST,
@@ -2958,6 +3490,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -2972,6 +3505,10 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Collections?name=Favorites&ids=item-1,item-2&isLocked=true&parentId=parent-1",
+            ),
+            (
+                Method::POST,
                 "/Collections?Name=Favorites&Ids=item-1,item-2&IsLocked=true",
             ),
             (
@@ -2980,6 +3517,10 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Collections/collection-1/Items?ids=item-1,item-2",
+            ),
+            (
+                Method::POST,
                 "/Collections/collection-1/Items?Ids=item-1,item-2",
             ),
             (
@@ -2988,11 +3529,19 @@ mod tests {
             ),
             (
                 Method::DELETE,
+                "/emby/Collections/collection-1/Items?ids=item-1,item-2",
+            ),
+            (
+                Method::DELETE,
                 "/Collections/collection-1/Items?Ids=item-1,item-2",
             ),
             (
                 Method::POST,
                 "/emby/Collections/collection-1/Items/Delete?Ids=item-1,item-2",
+            ),
+            (
+                Method::POST,
+                "/emby/Collections/collection-1/Items/Delete?ids=item-1,item-2",
             ),
             (
                 Method::POST,
@@ -3014,6 +3563,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3025,10 +3575,12 @@ mod tests {
             "/emby/Users/user-1/Items/item-1",
             "/Users/user-1/Items/item-1",
             "/emby/Items/item-1?UserId=user-1&Fields=Chapters",
+            "/emby/Items/item-1?userId=user-1&fields=Chapters",
             "/Items/item-1?UserId=user-1&Fields=Chapters",
             "/emby/Items/item-1/DeleteInfo?UserId=user-1",
             "/Items/item-1/DeleteInfo?UserId=user-1",
             "/emby/Items/item-1/CriticReviews?UserId=user-1&StartIndex=4&Limit=8",
+            "/emby/Items/item-1/CriticReviews?userId=user-1&startIndex=4&limit=8",
             "/Items/item-1/CriticReviews?UserId=user-1&StartIndex=4&Limit=8",
         ] {
             let response = app
@@ -3045,6 +3597,7 @@ mod tests {
                 .expect("item request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3241,6 +3794,8 @@ mod tests {
         for (method, uri, body) in [
             (Method::GET, "/emby/Items/item-1/ExternalIdInfos", None),
             (Method::GET, "/Items/item-1/ExternalIdInfos", None),
+            (Method::GET, "/emby/Items/item-1/MetadataEditor", None),
+            (Method::GET, "/Items/item-1/MetadataEditor", None),
             (
                 Method::GET,
                 "/emby/Items/RemoteSearch/Image?ImageUrl=https%3A%2F%2Fimage.example.test%2Fposter.jpg&ProviderName=TheMovieDb",
@@ -3268,6 +3823,13 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Items/RemoteSearch/Apply/item-1?replaceAllImages=true",
+                Some(
+                    r#"{"name":"Movie Result","providerIds":{"Tmdb":"42"},"searchProviderName":"TheMovieDb"}"#,
+                ),
+            ),
+            (
+                Method::POST,
                 "/Items/RemoteSearch/Apply/item-1?ReplaceAllImages=true",
                 Some(r#"{"Name":"Movie Result","ProviderIds":{"Tmdb":"42"}}"#),
             ),
@@ -3276,6 +3838,13 @@ mod tests {
                 "/emby/Items/RemoteSearch/Movie",
                 Some(
                     r#"{"SearchInfo":{"Name":"A Movie","Year":2024},"ItemId":42,"SearchProviderName":"TheMovieDb","Providers":["TheMovieDb"],"IncludeDisabledProviders":false}"#,
+                ),
+            ),
+            (
+                Method::POST,
+                "/emby/Items/RemoteSearch/Movie",
+                Some(
+                    r#"{"searchInfo":{"name":"A Movie","metadataLanguage":"en","metadataCountryCode":"US","providerIds":{"Tmdb":"42"},"year":2024,"indexNumber":1,"parentIndexNumber":2,"premiereDate":"2024-01-01","isAutomated":true,"enableAdultMetadata":false},"itemId":42,"searchProviderName":"TheMovieDb","providers":["TheMovieDb"],"includeDisabledProviders":false}"#,
                 ),
             ),
             (
@@ -3336,6 +3905,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3345,6 +3915,7 @@ mod tests {
 
         for uri in [
             "/emby/Items/item-1/RemoteSearch/Subtitles/eng?MediaSourceId=source-1&UserId=user-1",
+            "/emby/Items/item-1/RemoteSearch/Subtitles/eng?mediaSourceId=source-1&userId=user-1&isPerfectMatch=true&isForced=false&isHearingImpaired=true",
             "/Items/item-1/RemoteSearch/Subtitles/eng?MediaSourceId=source-1&UserId=user-1",
         ] {
             let response = app
@@ -3361,6 +3932,7 @@ mod tests {
                 .expect("remote subtitle search request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3383,11 +3955,19 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/emby/Items/item-1/RemoteSearch/Subtitles/sub-1?mediaSourceId=42",
+            ),
+            (
+                Method::POST,
                 "/Items/item-1/RemoteSearch/Subtitles/sub-1?MediaSourceId=42",
             ),
             (
                 Method::DELETE,
                 "/emby/Items/item-1/Subtitles/3?MediaSourceId=42",
+            ),
+            (
+                Method::DELETE,
+                "/emby/Items/item-1/Subtitles/3?mediaSourceId=42",
             ),
             (Method::DELETE, "/Items/item-1/Subtitles/3?MediaSourceId=42"),
             (
@@ -3409,6 +3989,10 @@ mod tests {
             (
                 Method::POST,
                 "/emby/Videos/item-1/Subtitles/3/Delete?MediaSourceId=42",
+            ),
+            (
+                Method::POST,
+                "/emby/Videos/item-1/Subtitles/3/Delete?mediaSourceId=42",
             ),
             (
                 Method::POST,
@@ -3437,6 +4021,7 @@ mod tests {
                 .expect("subtitle management request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3446,6 +4031,7 @@ mod tests {
 
         for uri in [
             "/emby/Items/item-1/42/Subtitles/3/Stream.srt?StartPositionTicks=0",
+            "/emby/Items/item-1/42/Subtitles/3/Stream.srt?startPositionTicks=0&endPositionTicks=100&copyTimestamps=true&userId=user-1",
             "/Items/item-1/42/Subtitles/3/Stream.srt?StartPositionTicks=0",
             "/emby/Items/item-1/42/Subtitles/3/0/Stream.srt",
             "/Items/item-1/42/Subtitles/3/0/Stream.srt",
@@ -3468,6 +4054,7 @@ mod tests {
                 .expect("subtitle stream request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3477,6 +4064,7 @@ mod tests {
 
         for uri in [
             "/emby/Videos/item-1/subtitles.m3u8?SubtitleSegmentLength=4&ManifestSubtitles=vtt",
+            "/emby/Videos/item-1/subtitles.m3u8?subtitleSegmentLength=4&manifestSubtitles=vtt&userId=user-1",
             "/Videos/item-1/subtitles.m3u8?SubtitleSegmentLength=4&ManifestSubtitles=vtt",
             "/emby/Videos/item-1/live_subtitles.m3u8?SubtitleSegmentLength=4&ManifestSubtitles=vtt",
             "/Videos/item-1/live_subtitles.m3u8?SubtitleSegmentLength=4&ManifestSubtitles=vtt",
@@ -3496,6 +4084,7 @@ mod tests {
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3530,6 +4119,7 @@ mod tests {
 
         for uri in [
             "/emby/Items/item-1/Similar?UserId=user-1&Limit=12",
+            "/emby/Items/item-1/Similar?userId=user-1&startIndex=1&limit=12&includeItemTypes=Movie&sortBy=SortName&sortOrder=Ascending&fields=MediaSources",
             "/Items/item-1/Similar?UserId=user-1&Limit=12",
         ] {
             let response = app
@@ -3555,8 +4145,10 @@ mod tests {
 
         for uri in [
             "/emby/Movies/Recommendations?UserId=user-1&CategoryLimit=1&ItemLimit=12&EnableImages=true",
+            "/emby/Movies/Recommendations?userId=user-1&parentId=movies&categoryLimit=1&itemLimit=12&enableImages=true&enableUserData=false&imageTypeLimit=2&enableImageTypes=Primary",
             "/Movies/Recommendations?UserId=user-1&CategoryLimit=1&ItemLimit=12&EnableImages=true",
             "/emby/Movies/movie-1/Similar?UserId=user-1&Limit=12",
+            "/emby/Movies/movie-1/Similar?userId=user-1&startIndex=1&limit=12&includeItemTypes=Movie&sortBy=SortName&sortOrder=Ascending&fields=MediaSources",
             "/Movies/movie-1/Similar?UserId=user-1&Limit=12",
         ] {
             let response = app
@@ -3583,10 +4175,13 @@ mod tests {
         for uri in [
             "/emby/Items/item-1/ThemeMedia?UserId=user-1",
             "/Items/item-1/ThemeMedia?UserId=user-1",
+            "/emby/Items/item-1/ThemeMedia?userId=user-1&inheritFromParent=true&startIndex=0&limit=10&fields=MediaSources",
             "/emby/Items/item-1/ThemeSongs?UserId=user-1",
             "/Items/item-1/ThemeSongs?UserId=user-1",
+            "/emby/Items/item-1/ThemeSongs?userId=user-1&inheritFromParent=true&startIndex=0&limit=10&fields=MediaSources",
             "/emby/Items/item-1/ThemeVideos?UserId=user-1",
             "/Items/item-1/ThemeVideos?UserId=user-1",
+            "/emby/Items/item-1/ThemeVideos?userId=user-1&inheritFromParent=true&startIndex=0&limit=10&fields=MediaSources",
         ] {
             let response = app
                 .clone()
@@ -3602,6 +4197,7 @@ mod tests {
                 .expect("theme media request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3611,8 +4207,10 @@ mod tests {
 
         for uri in [
             "/emby/Items/item-1/SpecialFeatures?UserId=user-1&StartIndex=0&Limit=10",
+            "/emby/Items/item-1/SpecialFeatures?userId=user-1&startIndex=0&limit=10&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=true",
             "/Items/item-1/SpecialFeatures?UserId=user-1&StartIndex=0&Limit=10",
             "/emby/Users/user-1/Items/item-1/SpecialFeatures?StartIndex=0&Limit=10",
+            "/emby/Users/user-1/Items/item-1/SpecialFeatures?startIndex=0&limit=10&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=true",
             "/Users/user-1/Items/item-1/SpecialFeatures?StartIndex=0&Limit=10",
         ] {
             let response = app
@@ -3638,12 +4236,16 @@ mod tests {
 
         for uri in [
             "/emby/Items/item-1/Intros?UserId=user-1&Fields=MediaSources",
+            "/emby/Items/item-1/Intros?userId=user-1&startIndex=1&limit=4&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=false",
             "/Items/item-1/Intros?UserId=user-1&Fields=MediaSources",
             "/emby/Users/user-1/Items/item-1/Intros?Fields=MediaSources",
+            "/emby/Users/user-1/Items/item-1/Intros?startIndex=1&limit=4&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=false",
             "/Users/user-1/Items/item-1/Intros?Fields=MediaSources",
             "/emby/Items/item-1/LocalTrailers?UserId=user-1&Fields=MediaSources",
+            "/emby/Items/item-1/LocalTrailers?userId=user-1&startIndex=1&limit=4&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=false",
             "/Items/item-1/LocalTrailers?UserId=user-1&Fields=MediaSources",
             "/emby/Users/user-1/Items/item-1/LocalTrailers?Fields=MediaSources",
+            "/emby/Users/user-1/Items/item-1/LocalTrailers?startIndex=1&limit=4&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=false",
             "/Users/user-1/Items/item-1/LocalTrailers?Fields=MediaSources",
         ] {
             let response = app
@@ -3669,8 +4271,10 @@ mod tests {
 
         for uri in [
             "/emby/Audio/item-1/Lyrics?UserId=user-1",
+            "/emby/Audio/item-1/Lyrics?userId=user-1",
             "/Audio/item-1/Lyrics?UserId=user-1",
             "/emby/Items/item-1/Lyrics?UserId=user-1",
+            "/emby/Items/item-1/Lyrics?userId=user-1",
             "/Items/item-1/Lyrics?UserId=user-1",
         ] {
             let response = app
@@ -3696,6 +4300,7 @@ mod tests {
 
         for uri in [
             "/emby/Audio/item-1/RemoteSearch/Lyrics?UserId=user-1&MediaSourceId=42",
+            "/emby/Audio/item-1/RemoteSearch/Lyrics?userId=user-1&mediaSourceId=42&providerName=LrcLib&searchTerm=Signal",
             "/Audio/item-1/RemoteSearch/Lyrics?UserId=user-1&MediaSourceId=42",
         ] {
             let response = app
@@ -3743,6 +4348,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emby_post_playback_info_accepts_query_only_payload() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Items/item-1/PlaybackInfo?UserId=user-1&MediaSourceId=42&MaxStreamingBitrate=8000000",
+            "/Items/item-1/PlaybackInfo?UserId=user-1&MediaSourceId=42&MaxStreamingBitrate=8000000",
+            "/emby/Users/user-1/Items/item-1/PlaybackInfo?UserId=user-1&MediaSourceId=42&MaxStreamingBitrate=8000000",
+            "/Users/user-1/Items/item-1/PlaybackInfo?UserId=user-1&MediaSourceId=42&MaxStreamingBitrate=8000000",
+            "/emby/Items/item-1/PlaybackInfo?userId=user-1&mediaSourceId=42&maxStreamingBitrate=8000000&startTimeTicks=100",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("playback info request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
     async fn emby_playback_bitrate_test_aliases_exist() {
         let app = build_router(AppState::for_tests(Config::default()));
 
@@ -3774,6 +4408,7 @@ mod tests {
         for uri in [
             "/emby/Items/item-1/Download?MediaSourceId=42&api_key=test-token",
             "/Items/item-1/Download?MediaSourceId=42&api_key=test-token",
+            "/emby/Items/item-1/Download?mediaSourceId=42&api_key=test-token",
         ] {
             let response = app
                 .clone()
@@ -3788,6 +4423,7 @@ mod tests {
                 .expect("download request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3798,6 +4434,7 @@ mod tests {
         for uri in [
             "/emby/Items/item-1/File?MediaSourceId=42&api_key=test-token",
             "/Items/item-1/File?MediaSourceId=42&api_key=test-token",
+            "/Items/item-1/File?mediaSourceId=42&api_key=test-token",
         ] {
             let response = app
                 .clone()
@@ -3812,6 +4449,7 @@ mod tests {
                 .expect("item file request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3846,27 +4484,42 @@ mod tests {
         let app = build_router(AppState::for_tests(Config::default()));
 
         for uri in [
+            "/emby/Audio/ActiveEncodings?PlaySessionId=play-1&DeviceId=device-1",
+            "/emby/Audio/ActiveEncodings?playSessionId=play-1&deviceId=device-1",
+            "/Audio/ActiveEncodings?PlaySessionId=play-1&DeviceId=device-1",
+            "/emby/Videos/ActiveEncodings?PlaySessionId=play-1&DeviceId=device-1",
+            "/emby/Videos/ActiveEncodings?playSessionId=play-1&deviceId=device-1",
+            "/Videos/ActiveEncodings?PlaySessionId=play-1&DeviceId=device-1",
             "/emby/Videos/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/Videos/item-1/master.m3u8?transcodeSessionId=session-1&mediaSourceId=42&api_key=test-token",
             "/emby/Videos/item-1/main.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/emby/Videos/item-1/live.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/emby/videos/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/videos/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/Videos/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/emby/Audio/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/Audio/item-1/master.m3u8?transcodeSessionId=session-1&mediaSourceId=42&api_key=test-token",
             "/emby/Audio/item-1/main.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/emby/Audio/item-1/live.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/Audio/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
             "/emby/Videos/item-1/hls1/master/0.ts?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/Videos/item-1/hls1/master/0.ts?transcodeSessionId=session-1&mediaSourceId=42&api_key=test-token",
             "/Videos/item-1/hls1/master/0.ts?TranscodeSessionId=session-1&api_key=test-token",
             "/emby/Audio/item-1/hls1/master/0.ts?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/Audio/item-1/hls1/master/0.ts?transcodeSessionId=session-1&mediaSourceId=42&api_key=test-token",
             "/Audio/item-1/hls1/master/0.ts?TranscodeSessionId=session-1&api_key=test-token",
         ] {
             let response = app
                 .clone()
                 .oneshot(
                     Request::builder()
-                        .method(Method::GET)
+                        .method(if uri.contains("ActiveEncodings") {
+                            Method::DELETE
+                        } else {
+                            Method::GET
+                        })
                         .uri(uri)
+                        .header("x-emby-token", "test-token")
                         .body(Body::empty())
                         .expect("request should build"),
                 )
@@ -3874,6 +4527,48 @@ mod tests {
                 .expect("hls transcoding request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_lowercase_audio_playback_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/audio/ActiveEncodings?PlaySessionId=play-1&DeviceId=device-1",
+            "/emby/audio/ActiveEncodings?playSessionId=play-1&deviceId=device-1",
+            "/audio/ActiveEncodings?PlaySessionId=play-1&DeviceId=device-1",
+            "/emby/audio/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/audio/item-1/master.m3u8?transcodeSessionId=session-1&mediaSourceId=42&api_key=test-token",
+            "/audio/item-1/master.m3u8?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/audio/item-1/main.m3u8?TranscodeSessionId=session-1&api_key=test-token",
+            "/audio/item-1/live.m3u8?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/audio/item-1/hls1/master/0.ts?TranscodeSessionId=session-1&api_key=test-token",
+            "/audio/item-1/hls1/master/0.ts?TranscodeSessionId=session-1&api_key=test-token",
+            "/emby/audio/item-1/universal?UserId=user-1&api_key=test-token",
+            "/audio/item-1/universal?UserId=user-1&api_key=test-token",
+            "/emby/audio/item-1/stream.mp3?MediaSourceId=42&api_key=test-token",
+            "/audio/item-1/stream.mp3?MediaSourceId=42&api_key=test-token",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(if uri.contains("ActiveEncodings") {
+                            Method::DELETE
+                        } else {
+                            Method::GET
+                        })
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("audio playback alias request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{uri}");
         }
     }
 
@@ -3883,10 +4578,13 @@ mod tests {
 
         for uri in [
             "/emby/Videos/item-1/AdditionalParts?UserId=user-1&Fields=MediaSources",
+            "/emby/Videos/item-1/AdditionalParts?userId=user-1&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=false",
             "/Videos/item-1/AdditionalParts?UserId=user-1&Fields=MediaSources",
             "/emby/Videos/item-1/stream?MediaSourceId=42&api_key=test-token",
+            "/emby/Videos/item-1/stream?mediaSourceId=42&api_key=test-token",
             "/Videos/item-1/stream?MediaSourceId=42&api_key=test-token",
             "/emby/Videos/item-1/stream.mkv?MediaSourceId=42&api_key=test-token",
+            "/emby/Videos/item-1/stream.mkv?mediaSourceId=42&api_key=test-token",
             "/Videos/item-1/stream.mkv?MediaSourceId=42&api_key=test-token",
         ] {
             let response = app
@@ -3902,6 +4600,7 @@ mod tests {
                 .expect("video stream request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -3993,6 +4692,7 @@ mod tests {
             "/emby/Videos/item-1/movie.mkv?MediaSourceId=42&api_key=test-token",
             "/Videos/item-1/movie.mkv?MediaSourceId=42&api_key=test-token",
             "/emby/videos/item-1/movie.mkv?MediaSourceId=42&api_key=test-token",
+            "/emby/Videos/item-1/movie.mkv?transcodeSessionId=session-1&mediaSourceId=42&api_key=test-token",
             "/videos/item-1/movie.mkv?MediaSourceId=42&api_key=test-token",
         ] {
             let response = app
@@ -4023,11 +4723,17 @@ mod tests {
             ),
             ("/LiveStreams/Open", Body::from(r#"{"UserId":"user-1"}"#)),
             (
+                "/emby/LiveStreams/Open",
+                Body::from(r#"{"openToken":"open-1","userId":"user-1","playSessionId":"play-1"}"#),
+            ),
+            (
                 "/emby/LiveStreams/MediaInfo?LiveStreamId=live-1",
                 Body::empty(),
             ),
+            ("/LiveStreams/MediaInfo?liveStreamId=live-1", Body::empty()),
             ("/LiveStreams/MediaInfo?LiveStreamId=live-1", Body::empty()),
             ("/emby/LiveStreams/Close?LiveStreamId=live-1", Body::empty()),
+            ("/emby/LiveStreams/Close?liveStreamId=live-1", Body::empty()),
             ("/LiveStreams/Close?LiveStreamId=live-1", Body::empty()),
         ] {
             let response = app
@@ -4045,6 +4751,7 @@ mod tests {
                 .expect("live stream request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -4054,8 +4761,10 @@ mod tests {
 
         for uri in [
             "/emby/Audio/item-1/universal?UserId=user-1&DeviceId=device-1&MediaSourceId=42&MaxStreamingBitrate=140000000&Container=mp3,aac,flac&PlaySessionId=play-1&api_key=test-token",
+            "/emby/Audio/item-1/universal?userId=user-1&deviceId=device-1&mediaSourceId=42&maxStreamingBitrate=140000000&audioBitRate=320000&container=mp3,aac,flac&playSessionId=play-1&transcodingProtocol=hls&transcodingContainer=ts&audioCodec=aac&startTimeTicks=100&api_key=test-token",
             "/Audio/item-1/universal?UserId=user-1&DeviceId=device-1&MediaSourceId=42&MaxStreamingBitrate=140000000&Container=mp3,aac,flac&PlaySessionId=play-1&api_key=test-token",
             "/emby/Audio/item-1/stream.mp3?MediaSourceId=42&api_key=test-token",
+            "/emby/Audio/item-1/stream.mp3?mediaSourceId=42&api_key=test-token",
             "/Audio/item-1/stream.mp3?MediaSourceId=42&api_key=test-token",
         ] {
             let response = app
@@ -4071,6 +4780,7 @@ mod tests {
                 .expect("audio stream request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -4083,6 +4793,7 @@ mod tests {
             "/Sessions/Playing",
             "/emby/Sessions/Playing/Ping?PlaySessionId=play-1",
             "/Sessions/Playing/Ping?PlaySessionId=play-1",
+            "/emby/Sessions/Playing/Ping?playSessionId=play-1",
             "/emby/Sessions/Playing/Progress",
             "/Sessions/Playing/Progress",
             "/emby/Sessions/Playing/Stopped",
@@ -4103,6 +4814,65 @@ mod tests {
                 .expect("playback report request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_playback_report_query_aliases_parse_before_repository_boundary() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Sessions/Playing?ItemId=item-1&UserId=user-1&PlaySessionId=play-1&MediaSourceId=42&PlayMethod=DirectStream&PositionTicks=42",
+            "/Sessions/Playing/Progress?ItemId=item-1&UserId=user-1&PlaySessionId=play-1&MediaSourceId=42&IsPaused=true&PositionTicks=42",
+            "/emby/Sessions/Playing/Stopped?ItemId=item-1&UserId=user-1&PlaySessionId=play-1&MediaSourceId=42&PositionTicks=42",
+            "/Sessions/Playing/Progress?itemId=item-1&userId=user-1&playSessionId=play-1&mediaSourceId=42&playMethod=DirectStream&queueableMediaTypes=Audio%2CVideo&positionTicks=42&isPaused=true&playlistItemIds=playlist-item-1%2Cplaylist-item-2",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("query playback report request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_playback_report_accepts_lower_camel_body_fields() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/Sessions/Playing",
+            "/Sessions/Playing/Progress",
+            "/emby/Sessions/Playing/Stopped",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("x-emby-token", "test-token")
+                        .body(Body::from(
+                            r#"{"item":{"id":"item-1"},"userId":"user-1","playSessionId":"play-1","mediaSourceId":"42","playMethod":"DirectStream","queueableMediaTypes":"Audio,Video","positionTicks":42,"isPaused":true,"playlistItemIds":"playlist-item-1,playlist-item-2"}"#,
+                        ))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("lower-camel playback report request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -4162,6 +4932,10 @@ mod tests {
                 Method::POST,
                 "/emby/Users/user-1/Items/item-1/Rating?Likes=true",
             ),
+            (
+                Method::POST,
+                "/emby/Users/user-1/Items/item-1/Rating?likes=true",
+            ),
             (Method::DELETE, "/Users/user-1/Items/item-1/Rating"),
             (
                 Method::POST,
@@ -4170,6 +4944,10 @@ mod tests {
             (
                 Method::POST,
                 "/emby/Users/user-1/Items/item-1/HideFromResume?Hide=true",
+            ),
+            (
+                Method::POST,
+                "/emby/Users/user-1/Items/item-1/HideFromResume?hide=true",
             ),
             (
                 Method::POST,
@@ -4192,6 +4970,7 @@ mod tests {
                 .expect("user data request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -4228,23 +5007,27 @@ mod tests {
             "/emby/Users/user-1/Items/item-1/UserData",
             "/Users/user-1/Items/item-1/UserData",
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri(uri)
-                        .header("content-type", "application/json")
-                        .header("x-emby-token", "test-token")
-                        .body(Body::from(
-                            r#"{"PlaybackPositionTicks":120000,"PlayCount":3,"Played":false,"IsFavorite":true,"Rating":8.5}"#,
-                        ))
-                        .expect("request should build"),
-                )
-                .await
-                .expect("user data request should succeed");
+            for body in [
+                r#"{"PlaybackPositionTicks":120000,"PlayCount":3,"Played":false,"IsFavorite":true,"Rating":8.5}"#,
+                r#"{"playbackPositionTicks":120000,"playCount":3,"played":false,"isFavorite":true,"rating":8.5,"lastPlayedDate":"2026-01-01T00:00:00Z"}"#,
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri(uri)
+                            .header("content-type", "application/json")
+                            .header("x-emby-token", "test-token")
+                            .body(Body::from(body))
+                            .expect("request should build"),
+                    )
+                    .await
+                    .expect("user data request should succeed");
 
-            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+                assert_ne!(response.status(), StatusCode::NOT_FOUND);
+                assert_ne!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            }
         }
     }
 

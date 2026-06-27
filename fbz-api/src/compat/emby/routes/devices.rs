@@ -22,12 +22,14 @@ use super::access::authenticate_request_user;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct DevicesQuery {
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct DeviceInfoQuery {
+    #[serde(alias = "id")]
     pub id: String,
 }
 
@@ -272,6 +274,9 @@ fn empty_camera_upload_history(device_id: Option<&str>) -> ContentUploadHistoryD
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
+
     use super::*;
     use crate::auth::service::AuthenticatedUser;
 
@@ -281,6 +286,18 @@ mod tests {
         assert!(normalize_sort_descending(Some("Descending")));
         assert!(normalize_sort_descending(Some("unknown")));
         assert!(!normalize_sort_descending(Some(" Ascending ")));
+    }
+
+    #[test]
+    fn device_queries_accept_lower_camel_client_fields() {
+        let uri = "/Devices?sortOrder=Ascending".parse::<Uri>().unwrap();
+        let Query(query) = Query::<DevicesQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.sort_order.as_deref(), Some("Ascending"));
+        assert!(!normalize_sort_descending(query.sort_order.as_deref()));
+
+        let uri = "/Devices/Info?id=device-1".parse::<Uri>().unwrap();
+        let Query(query) = Query::<DeviceInfoQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(normalize_device_query_id(&query.id).unwrap(), "device-1");
     }
 
     #[test]

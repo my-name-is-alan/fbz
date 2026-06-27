@@ -16,6 +16,7 @@ use super::{access::authenticate_query_user, items::normalized_parent_id};
 
 const DEFAULT_GENRES_LIMIT: u32 = 100;
 const MAX_GENRES_LIMIT: u32 = 200;
+const MAX_GENRES_START_INDEX: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GenreKind {
@@ -39,22 +40,37 @@ impl GenreKind {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct GenresQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "nameStartsWith", alias = "name_starts_with")]
     pub name_starts_with: Option<String>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct GenreByNameQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
@@ -173,7 +189,7 @@ struct GenreWindow {
 impl GenreWindow {
     fn from_query(query: &GenresQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: i64::from(query.start_index.unwrap_or(0).min(MAX_GENRES_START_INDEX)),
             limit: i64::from(
                 query
                     .limit
@@ -214,6 +230,8 @@ fn genre_to_base_item(record: GenreRecord, kind: GenreKind) -> BaseItemDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -249,6 +267,34 @@ mod tests {
     }
 
     #[test]
+    fn genre_queries_accept_lower_camel_client_fields() {
+        let uri = "/Genres?userId=user-1&parentId=library-1&recursive=true&startIndex=10&limit=500&searchTerm=roc&sortOrder=Descending&nameStartsWith=R&nameStartsWithOrGreater=Q&fields=PrimaryImageAspectRatio&enableImages=true"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<GenresQuery>::try_from_uri(&uri).unwrap();
+
+        let window = GenreWindow::from_query(&query);
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_GENRES_LIMIT));
+        assert_eq!(query.search_term.as_deref(), Some("roc"));
+        assert_eq!(query.name_starts_with.as_deref(), Some("R"));
+        assert_eq!(query.name_starts_with_or_greater.as_deref(), Some("Q"));
+        assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(
+            sort_direction_from_query(query.sort_order.as_deref()),
+            SortDirection::Desc
+        );
+
+        let uri = "/Genres/Action?userId=user-1".parse::<Uri>().unwrap();
+        let Query(query) = Query::<GenreByNameQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
     fn genre_mapping_uses_emby_item_types() {
         let general = genre_to_base_item(
             GenreRecord {
@@ -271,5 +317,17 @@ mod tests {
         assert_eq!(music.item_type, "MusicGenre");
         assert!(general.is_folder);
         assert!(music.is_folder);
+    }
+
+    #[test]
+    fn genre_window_clamps_pathologically_large_start_index() {
+        let window = GenreWindow::from_query(&GenresQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..GenresQuery::default()
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
     }
 }

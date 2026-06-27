@@ -35,14 +35,8 @@ const MIN_DISPATCH_LEASE_SECONDS: u64 = 300;
 const DISPATCH_LEASE_GRACE_SECONDS: u64 = 60;
 const STALE_EXECUTION_MESSAGE: &str = "plugin execution lease expired; dispatch will retry";
 const CLAIM_NEXT_PLUGIN_DISPATCH_SQL: &str = r#"
-            update event_outbox
-            set status = 'delivering',
-                attempts = attempts + 1,
-                locked_by = $2,
-                locked_until = now() + ($3::bigint * interval '1 second'),
-                last_error = null
-            where id = (
-                select id
+            with claimed as (
+                select id, status as prior_status, locked_by as prior_locked_by
                 from event_outbox
                 where event_type = $1
                   and available_at <= now()
@@ -55,15 +49,39 @@ const CLAIM_NEXT_PLUGIN_DISPATCH_SQL: &str = r#"
                 for update skip locked
                 limit 1
             )
+            update event_outbox
+            set status = 'delivering',
+                attempts = attempts + 1,
+                locked_by = $2,
+                locked_until = now() + ($3::bigint * interval '1 second'),
+                last_error = null
+            from claimed
+            where event_outbox.id = claimed.id
             returning
-                id,
-                public_id::text as public_id,
-                payload,
-                attempts,
-                max_attempts
+                event_outbox.id as id,
+                event_outbox.public_id::text as public_id,
+                event_outbox.payload as payload,
+                event_outbox.attempts as attempts,
+                event_outbox.max_attempts as max_attempts,
+                claimed.prior_status as prior_status,
+                claimed.prior_locked_by as prior_locked_by
             "#;
 const EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL: &str = r#"
-with expired_runs as (
+with stale_execution_candidates as (
+    select run.id
+    from plugin_execution_runs run
+    join event_outbox outbox on outbox.id = run.outbox_event_id
+    where run.status = 'running'
+      and run.finished_at is null
+      and (
+          (outbox.status = 'delivering' and outbox.locked_until <= now())
+          or outbox.status in ('delivered', 'failed', 'discarded')
+      )
+    order by run.started_at asc, run.id asc
+    limit 1000
+    for update of run skip locked
+),
+expired_runs as (
     update plugin_execution_runs run
     set status = 'failed',
         error_message = coalesce(run.error_message, $1),
@@ -78,14 +96,8 @@ with expired_runs as (
                 )
             )::integer
         )
-    from event_outbox outbox
-    where run.outbox_event_id = outbox.id
-      and run.status = 'running'
-      and run.finished_at is null
-      and (
-          (outbox.status = 'delivering' and outbox.locked_until <= now())
-          or outbox.status in ('delivered', 'failed', 'discarded')
-      )
+    from stale_execution_candidates candidates
+    where run.id = candidates.id
     returning run.id
 ),
 revoked_tokens as (
@@ -137,6 +149,8 @@ struct ClaimedPluginDispatch {
     payload: Value,
     attempt: i32,
     max_attempts: i32,
+    recovered_stale_lease: bool,
+    prior_locked_by: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -199,6 +213,16 @@ impl PluginExecutionService {
         let Some(event) = self.claim_next_dispatch().await? else {
             return Ok(None);
         };
+
+        if event.recovered_stale_lease {
+            warn!(
+                outbox_event_id = %event.public_id,
+                prior_locked_by = event.prior_locked_by.as_deref().unwrap_or("unknown"),
+                attempt = event.attempt,
+                max_attempts = event.max_attempts,
+                "recovered stale plugin dispatch lease"
+            );
+        }
 
         let dispatch = match parse_dispatch_payload(&event.payload) {
             Ok(dispatch) => dispatch,
@@ -314,12 +338,15 @@ impl PluginExecutionService {
             .map_err(PluginExecutionError::from)?;
 
         row.map(|row| -> Result<ClaimedPluginDispatch, sqlx::Error> {
+            let prior_status: String = row.try_get("prior_status")?;
             Ok(ClaimedPluginDispatch {
                 id: row.try_get("id")?,
                 public_id: row.try_get("public_id")?,
                 payload: row.try_get("payload")?,
                 attempt: row.try_get("attempts")?,
                 max_attempts: row.try_get("max_attempts")?,
+                recovered_stale_lease: prior_status == "delivering",
+                prior_locked_by: row.try_get("prior_locked_by")?,
             })
         })
         .transpose()
@@ -1107,6 +1134,29 @@ mod tests {
     }
 
     #[test]
+    fn plugin_dispatch_stale_lease_reclaim_logs_prior_state() {
+        let production_source = include_str!("execution.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("execution source should include production section");
+
+        assert!(CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("with claimed as ("));
+        assert!(CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("status as prior_status"));
+        assert!(CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("locked_by as prior_locked_by"));
+        assert!(
+            CLAIM_NEXT_PLUGIN_DISPATCH_SQL.contains("claimed.prior_locked_by as prior_locked_by")
+        );
+        assert!(
+            production_source.contains("recovered_stale_lease: prior_status == \"delivering\"")
+        );
+        assert!(production_source.contains("\"recovered stale plugin dispatch lease\""));
+        assert!(production_source.contains("outbox_event_id = %event.public_id"));
+        assert!(production_source.contains("prior_locked_by = event.prior_locked_by"));
+        assert!(production_source.contains("attempt = event.attempt"));
+        assert!(production_source.contains("max_attempts = event.max_attempts"));
+    }
+
+    #[test]
     fn dispatch_lease_uses_minimum_and_timeout_cushion() {
         assert_eq!(dispatch_lease_seconds(5_000), 300);
         assert_eq!(dispatch_lease_seconds(300_001), 361);
@@ -1115,6 +1165,34 @@ mod tests {
 
     #[test]
     fn stale_execution_recovery_sql_closes_runs_and_tokens() {
+        let stale_recovery_migration =
+            include_str!("../../migrations/0074_plugin_execution_stale_recovery_index.sql");
+        let normalized = EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(normalized.contains("with stale_execution_candidates as"));
+        assert!(normalized.contains("from plugin_execution_runs run"));
+        assert!(normalized.contains("join event_outbox outbox"));
+        assert!(normalized.contains("run.status = 'running'"));
+        assert!(normalized.contains("run.finished_at is null"));
+        assert!(normalized.contains("order by run.started_at asc, run.id asc"));
+        assert!(normalized.contains("limit 1000"));
+        assert!(normalized.contains("for update of run skip locked"));
+        assert!(normalized.contains("from stale_execution_candidates candidates"));
+        assert!(normalized.contains("run.id = candidates.id"));
+        assert!(
+            !normalized.contains("with expired_runs as ( update plugin_execution_runs run"),
+            "stale plugin execution recovery should not update every matching running run directly"
+        );
+        assert!(stale_recovery_migration.contains("idx_plugin_execution_runs_stale_recovery"));
+        assert!(
+            stale_recovery_migration.contains("on plugin_execution_runs (started_at asc, id asc)")
+        );
+        assert!(stale_recovery_migration.contains("where status = 'running'"));
+        assert!(stale_recovery_migration.contains("finished_at is null"));
+
         assert!(EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL.contains("plugin_execution_runs run"));
         assert!(EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL.contains("plugin_host_tokens token"));
         assert!(EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL.contains("run.status = 'running'"));
@@ -1149,6 +1227,58 @@ mod tests {
         assert!(migration.contains("attempts < max_attempts"));
     }
 
+    // Live-DB smoke: validates the plugin dispatch claim SQL parses and plans
+    // against the migrated schema. Plain EXPLAIN does not execute the UPDATE,
+    // so it does not claim or mutate queued dispatch events.
+    //   cargo test -- --ignored plugin_dispatch_claim_sql_plans_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn plugin_dispatch_claim_sql_plans_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        for index_name in [
+            "idx_event_outbox_plugin_dispatch_available",
+            "idx_event_outbox_plugin_dispatch_expired_lease",
+        ] {
+            let index_def = sqlx::query_scalar::<_, Option<String>>(
+                r#"
+                select indexdef
+                from pg_indexes
+                where schemaname = 'public'
+                  and indexname = $1
+                "#,
+            )
+            .bind(index_name)
+            .fetch_one(&pool)
+            .await
+            .expect("read plugin dispatch claim index")
+            .unwrap_or_else(|| panic!("{index_name} should exist"));
+            assert!(index_def.contains("event_type = 'plugin.hook.dispatch'::text"));
+            assert!(index_def.contains("attempts < max_attempts"));
+        }
+
+        let plan_rows = sqlx::query(&format!("explain {CLAIM_NEXT_PLUGIN_DISPATCH_SQL}"))
+            .bind(PLUGIN_HOOK_DISPATCH_EVENT)
+            .bind(PLUGIN_EXECUTOR_ID)
+            .bind(dispatch_lease_seconds(5_000) as i64)
+            .fetch_all(&pool)
+            .await
+            .expect("plugin dispatch claim SQL should parse and plan");
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a query plan for plugin dispatch claim"
+        );
+    }
+
     #[test]
     fn plugin_execution_package_public_id_input_keeps_uuid_index_shape() {
         let execution = include_str!("execution.rs");
@@ -1168,6 +1298,35 @@ mod tests {
                 revoked_tokens: 0,
             }
             .recovered_anything()
+        );
+    }
+
+    // Live-DB smoke: validates stale plugin execution recovery parses and
+    // plans against the migrated schema. Plain EXPLAIN does not execute the
+    // UPDATE, so this does not mutate any execution runs or Host Tokens.
+    //   cargo test -- --ignored stale_plugin_execution_recovery_sql_plans_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn stale_plugin_execution_recovery_sql_plans_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let plan_rows = sqlx::query(&format!("explain {EXPIRE_STALE_PLUGIN_EXECUTIONS_SQL}"))
+            .bind(STALE_EXECUTION_MESSAGE)
+            .fetch_all(&pool)
+            .await
+            .expect("stale plugin execution recovery SQL should parse and plan");
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a query plan for stale plugin execution recovery"
         );
     }
 

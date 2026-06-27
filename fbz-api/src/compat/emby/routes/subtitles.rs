@@ -28,39 +28,53 @@ use super::access::authenticate_request_user;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteSubtitleSearchQuery {
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "isPerfectMatch", alias = "is_perfect_match")]
     pub is_perfect_match: Option<bool>,
+    #[serde(alias = "isForced", alias = "is_forced")]
     pub is_forced: Option<bool>,
+    #[serde(alias = "isHearingImpaired", alias = "is_hearing_impaired")]
     pub is_hearing_impaired: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SubtitleStreamQuery {
+    #[serde(alias = "startPositionTicks", alias = "start_position_ticks")]
     pub start_position_ticks: Option<i64>,
+    #[serde(alias = "endPositionTicks", alias = "end_position_ticks")]
     pub end_position_ticks: Option<i64>,
+    #[serde(alias = "copyTimestamps", alias = "copy_timestamps")]
     pub copy_timestamps: Option<bool>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct HlsSubtitlePlaylistQuery {
+    #[serde(alias = "subtitleSegmentLength", alias = "subtitle_segment_length")]
     pub subtitle_segment_length: Option<i64>,
+    #[serde(alias = "manifestSubtitles", alias = "manifest_subtitles")]
     pub manifest_subtitles: Option<String>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteSubtitleDownloadQuery {
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct DeleteSubtitleQuery {
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
 }
 
@@ -673,6 +687,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use axum::{extract::Query, http::Uri};
     use serde_json::json;
 
     use super::*;
@@ -716,6 +731,73 @@ mod tests {
         assert!(normalize_remote_subtitle_id("provider/sub-1").is_err());
         assert!(normalize_remote_subtitle_id(&"x".repeat(513)).is_err());
         assert!(normalize_required_media_source_id(None).is_err());
+    }
+
+    #[test]
+    fn remote_subtitle_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/RemoteSearch/Subtitles/eng?",
+            "mediaSourceId=source-1&userId=user-1",
+            "&isPerfectMatch=true&isForced=false&isHearingImpaired=true"
+        )
+        .parse()
+        .unwrap();
+        let Query(search) = Query::<RemoteSubtitleSearchQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(search.media_source_id.as_deref(), Some("source-1"));
+        assert_eq!(search.user_id.as_deref(), Some("user-1"));
+        assert_eq!(search.is_perfect_match, Some(true));
+        assert_eq!(search.is_forced, Some(false));
+        assert_eq!(search.is_hearing_impaired, Some(true));
+
+        let uri: Uri = "/emby/Items/item-1/RemoteSearch/Subtitles/sub-1?mediaSourceId=42"
+            .parse()
+            .unwrap();
+        let Query(download) = Query::<RemoteSubtitleDownloadQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(download.media_source_id.as_deref(), Some("42"));
+
+        let uri: Uri = "/emby/Items/item-1/Subtitles/3?mediaSourceId=42"
+            .parse()
+            .unwrap();
+        let Query(delete) = Query::<DeleteSubtitleQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(delete.media_source_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn subtitle_stream_query_accepts_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/42/Subtitles/3/Stream.srt?",
+            "startPositionTicks=10&endPositionTicks=20",
+            "&copyTimestamps=true&userId=user-1"
+        )
+        .parse()
+        .unwrap();
+        let Query(query) = Query::<SubtitleStreamQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.start_position_ticks, Some(10));
+        assert_eq!(query.end_position_ticks, Some(20));
+        assert_eq!(query.copy_timestamps, Some(true));
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn hls_subtitle_playlist_query_accepts_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Videos/item-1/subtitles.m3u8?",
+            "subtitleSegmentLength=6&manifestSubtitles=webvtt&userId=user-1"
+        )
+        .parse()
+        .unwrap();
+        let Query(query) = Query::<HlsSubtitlePlaylistQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+
+        let input = hls_subtitle_playlist_input(&query).unwrap();
+
+        assert_eq!(input.target_duration_seconds, 6);
+        assert_eq!(input.manifest_subtitle_format.as_deref(), Some("vtt"));
     }
 
     #[test]

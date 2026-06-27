@@ -13,6 +13,7 @@ mod branding;
 mod channels;
 mod classifications;
 mod collections;
+mod connect;
 mod content;
 mod devices;
 mod display_preferences;
@@ -632,6 +633,10 @@ pub fn router() -> Router<AppState> {
         .route("/Branding/Css", get(branding::branding_css))
         .route("/emby/Branding/Css.css", get(branding::branding_css))
         .route("/Branding/Css.css", get(branding::branding_css))
+        .route("/emby/Connect/Exchange", get(connect::connect_exchange))
+        .route("/Connect/Exchange", get(connect::connect_exchange))
+        .route("/emby/Connect/Pending", get(connect::connect_pending))
+        .route("/Connect/Pending", get(connect::connect_pending))
         .route("/emby/Channels", get(channels::channels))
         .route("/Channels", get(channels::channels))
         .route(
@@ -761,6 +766,30 @@ pub fn router() -> Router<AppState> {
         .route(
             "/Users/{user_id}/Password",
             post(users::update_user_password),
+        )
+        .route(
+            "/emby/Users/{user_id}/EasyPassword",
+            post(users::update_easy_password),
+        )
+        .route(
+            "/Users/{user_id}/EasyPassword",
+            post(users::update_easy_password),
+        )
+        .route(
+            "/emby/Users/{user_id}/Connect/Link",
+            post(connect::connect_link_user).delete(connect::connect_unlink_user),
+        )
+        .route(
+            "/Users/{user_id}/Connect/Link",
+            post(connect::connect_link_user).delete(connect::connect_unlink_user),
+        )
+        .route(
+            "/emby/Users/{user_id}/Connect/Link/Delete",
+            post(connect::connect_unlink_user),
+        )
+        .route(
+            "/Users/{user_id}/Connect/Link/Delete",
+            post(connect::connect_unlink_user),
         )
         .route(
             "/emby/Users/{user_id}/Authenticate",
@@ -1200,6 +1229,22 @@ pub fn router() -> Router<AppState> {
             post(playback::user_playing_item_progress),
         )
         .route(
+            "/emby/Audio/ActiveEncodings",
+            delete(transcoding::delete_active_encodings),
+        )
+        .route(
+            "/emby/audio/ActiveEncodings",
+            delete(transcoding::delete_active_encodings),
+        )
+        .route(
+            "/Audio/ActiveEncodings",
+            delete(transcoding::delete_active_encodings),
+        )
+        .route(
+            "/audio/ActiveEncodings",
+            delete(transcoding::delete_active_encodings),
+        )
+        .route(
             "/emby/Videos/ActiveEncodings",
             delete(transcoding::delete_active_encodings),
         )
@@ -1212,7 +1257,15 @@ pub fn router() -> Router<AppState> {
             get(transcoding::hls_segment),
         )
         .route(
+            "/emby/Videos/{item_id}/hls/{playlist_id}/{segment_file_name}",
+            get(transcoding::hls_segment),
+        )
+        .route(
             "/Videos/{item_id}/hls1/{playlist_id}/{segment_file_name}",
+            get(transcoding::hls_segment),
+        )
+        .route(
+            "/Videos/{item_id}/hls/{playlist_id}/{segment_file_name}",
             get(transcoding::hls_segment),
         )
         .route(
@@ -1290,6 +1343,19 @@ pub fn router() -> Router<AppState> {
             get(items::additional_video_parts),
         )
         .route(
+            "/emby/Videos/{item_id}/AlternateSources",
+            delete(items::delete_video_alternate_sources),
+        )
+        .route(
+            "/Videos/{item_id}/AlternateSources",
+            delete(items::delete_video_alternate_sources),
+        )
+        .route(
+            "/emby/Videos/MergeVersions",
+            post(items::merge_video_versions),
+        )
+        .route("/Videos/MergeVersions", post(items::merge_video_versions))
+        .route(
             "/emby/Videos/{item_id}/{media_source_id}/Subtitles/{index}/Stream.{format}",
             get(subtitles::subtitle_stream),
         )
@@ -1310,7 +1376,15 @@ pub fn router() -> Router<AppState> {
             get(transcoding::audio_hls_segment),
         )
         .route(
+            "/emby/audio/{item_id}/hls1/{playlist_id}/{segment_file_name}",
+            get(transcoding::audio_hls_segment),
+        )
+        .route(
             "/Audio/{item_id}/hls1/{playlist_id}/{segment_file_name}",
+            get(transcoding::audio_hls_segment),
+        )
+        .route(
+            "/audio/{item_id}/hls1/{playlist_id}/{segment_file_name}",
             get(transcoding::audio_hls_segment),
         )
         .route(
@@ -1318,7 +1392,15 @@ pub fn router() -> Router<AppState> {
             get(transcoding::audio_hls_master_manifest),
         )
         .route(
+            "/emby/audio/{item_id}/master.m3u8",
+            get(transcoding::audio_hls_master_manifest),
+        )
+        .route(
             "/Audio/{item_id}/master.m3u8",
+            get(transcoding::audio_hls_master_manifest),
+        )
+        .route(
+            "/audio/{item_id}/master.m3u8",
             get(transcoding::audio_hls_master_manifest),
         )
         .route(
@@ -1326,7 +1408,15 @@ pub fn router() -> Router<AppState> {
             get(transcoding::audio_hls_main_manifest),
         )
         .route(
+            "/emby/audio/{item_id}/main.m3u8",
+            get(transcoding::audio_hls_main_manifest),
+        )
+        .route(
             "/Audio/{item_id}/main.m3u8",
+            get(transcoding::audio_hls_main_manifest),
+        )
+        .route(
+            "/audio/{item_id}/main.m3u8",
             get(transcoding::audio_hls_main_manifest),
         )
         .route(
@@ -1334,7 +1424,15 @@ pub fn router() -> Router<AppState> {
             get(transcoding::audio_hls_live_manifest),
         )
         .route(
+            "/emby/audio/{item_id}/live.m3u8",
+            get(transcoding::audio_hls_live_manifest),
+        )
+        .route(
             "/Audio/{item_id}/live.m3u8",
+            get(transcoding::audio_hls_live_manifest),
+        )
+        .route(
+            "/audio/{item_id}/live.m3u8",
             get(transcoding::audio_hls_live_manifest),
         )
         .route(
@@ -1342,16 +1440,49 @@ pub fn router() -> Router<AppState> {
             get(streaming::universal_audio_stream),
         )
         .route(
+            "/emby/Audio/{item_id}/universal.{container}",
+            get(streaming::universal_audio_stream_container),
+        )
+        .route(
+            "/emby/audio/{item_id}/universal",
+            get(streaming::universal_audio_stream),
+        )
+        .route(
+            "/emby/audio/{item_id}/universal.{container}",
+            get(streaming::universal_audio_stream_container),
+        )
+        .route(
             "/Audio/{item_id}/universal",
             get(streaming::universal_audio_stream),
+        )
+        .route(
+            "/Audio/{item_id}/universal.{container}",
+            get(streaming::universal_audio_stream_container),
+        )
+        .route(
+            "/audio/{item_id}/universal",
+            get(streaming::universal_audio_stream),
+        )
+        .route(
+            "/audio/{item_id}/universal.{container}",
+            get(streaming::universal_audio_stream_container),
         )
         .route(
             "/emby/Audio/{item_id}/Lyrics",
             get(lyrics::item_lyrics),
         )
+        .route(
+            "/emby/audio/{item_id}/Lyrics",
+            get(lyrics::item_lyrics),
+        )
         .route("/Audio/{item_id}/Lyrics", get(lyrics::item_lyrics))
+        .route("/audio/{item_id}/Lyrics", get(lyrics::item_lyrics))
         .route(
             "/emby/Audio/{item_id}/RemoteSearch/Lyrics",
+            get(lyrics::remote_lyrics_search),
+        )
+        .route(
+            "/emby/audio/{item_id}/RemoteSearch/Lyrics",
             get(lyrics::remote_lyrics_search),
         )
         .route(
@@ -1359,11 +1490,55 @@ pub fn router() -> Router<AppState> {
             get(lyrics::remote_lyrics_search),
         )
         .route(
+            "/audio/{item_id}/RemoteSearch/Lyrics",
+            get(lyrics::remote_lyrics_search),
+        )
+        .route(
+            "/emby/Audio/{item_id}/stream",
+            get(streaming::audio_stream_exact),
+        )
+        .route(
+            "/emby/audio/{item_id}/stream",
+            get(streaming::audio_stream_exact),
+        )
+        .route(
+            "/Audio/{item_id}/stream",
+            get(streaming::audio_stream_exact),
+        )
+        .route(
+            "/audio/{item_id}/stream",
+            get(streaming::audio_stream_exact),
+        )
+        .route(
+            "/emby/Audio/{item_id}/stream.{container}",
+            get(streaming::audio_stream_container),
+        )
+        .route(
+            "/emby/audio/{item_id}/stream.{container}",
+            get(streaming::audio_stream_container),
+        )
+        .route(
+            "/Audio/{item_id}/stream.{container}",
+            get(streaming::audio_stream_container),
+        )
+        .route(
+            "/audio/{item_id}/stream.{container}",
+            get(streaming::audio_stream_container),
+        )
+        .route(
             "/emby/Audio/{item_id}/{stream_file_name}",
             get(streaming::audio_stream),
         )
         .route(
+            "/emby/audio/{item_id}/{stream_file_name}",
+            get(streaming::audio_stream),
+        )
+        .route(
             "/Audio/{item_id}/{stream_file_name}",
+            get(streaming::audio_stream),
+        )
+        .route(
+            "/audio/{item_id}/{stream_file_name}",
             get(streaming::audio_stream),
         )
         .route("/videos/{item_id}/{file_name}", get(transcoding::video_file))
@@ -1378,6 +1553,14 @@ pub fn router() -> Router<AppState> {
         .route("/Shows/{series_id}/Episodes", get(shows::episodes))
         .route("/emby/Users/{user_id}/Views", get(views::user_views))
         .route("/Users/{user_id}/Views", get(views::user_views))
+        .route(
+            "/emby/Users/{user_id}/GroupingOptions",
+            get(views::grouping_options),
+        )
+        .route(
+            "/Users/{user_id}/GroupingOptions",
+            get(views::grouping_options),
+        )
         .route("/emby/UserViews", get(views::user_views_by_query))
         .route("/UserViews", get(views::user_views_by_query))
         .route("/emby/Search/Hints", get(items::search_hints))
@@ -1453,14 +1636,46 @@ pub fn router() -> Router<AppState> {
             get(items::artist_instant_mix),
         )
         .route("/Artists/InstantMix", get(items::artist_instant_mix))
+        .route(
+            "/emby/Artists/{artist_id}/InstantMix",
+            get(items::artist_instant_mix_by_path),
+        )
+        .route(
+            "/Artists/{artist_id}/InstantMix",
+            get(items::artist_instant_mix_by_path),
+        )
+        .route(
+            "/emby/Artists/{artist_id}/Songs",
+            get(items::artist_songs),
+        )
+        .route("/Artists/{artist_id}/Songs", get(items::artist_songs))
+        .route(
+            "/emby/Artists/{artist_id}/Albums",
+            get(items::artist_albums),
+        )
+        .route(
+            "/Artists/{artist_id}/Albums",
+            get(items::artist_albums),
+        )
         .route("/emby/Artists/{item_id}/Similar", get(items::similar_items))
         .route("/Artists/{item_id}/Similar", get(items::similar_items))
         .route("/emby/Artists/{name}", get(artists::artist_by_name))
         .route("/Artists/{name}", get(artists::artist_by_name))
         .route("/emby/Albums", get(items::albums))
         .route("/Albums", get(items::albums))
-        .route("/emby/Albums/{item_id}/InstantMix", get(items::similar_items))
-        .route("/Albums/{item_id}/InstantMix", get(items::similar_items))
+        .route(
+            "/emby/Albums/{album_id}/Songs",
+            get(items::album_songs),
+        )
+        .route("/Albums/{album_id}/Songs", get(items::album_songs))
+        .route(
+            "/emby/Albums/{item_id}/InstantMix",
+            get(items::item_instant_mix),
+        )
+        .route(
+            "/Albums/{item_id}/InstantMix",
+            get(items::item_instant_mix),
+        )
         .route("/emby/Albums/{item_id}/Similar", get(items::similar_items))
         .route("/Albums/{item_id}/Similar", get(items::similar_items))
         .route(
@@ -1538,10 +1753,19 @@ pub fn router() -> Router<AppState> {
         )
         .route("/emby/Songs", get(items::songs))
         .route("/Songs", get(items::songs))
-        .route("/emby/Songs/{item_id}/InstantMix", get(items::similar_items))
-        .route("/Songs/{item_id}/InstantMix", get(items::similar_items))
-        .route("/emby/Items/{item_id}/InstantMix", get(items::similar_items))
-        .route("/Items/{item_id}/InstantMix", get(items::similar_items))
+        .route(
+            "/emby/Songs/{item_id}/InstantMix",
+            get(items::item_instant_mix),
+        )
+        .route(
+            "/Songs/{item_id}/InstantMix",
+            get(items::item_instant_mix),
+        )
+        .route(
+            "/emby/Items/{item_id}/InstantMix",
+            get(items::item_instant_mix),
+        )
+        .route("/Items/{item_id}/InstantMix", get(items::item_instant_mix))
         .route("/emby/Items/Prefixes", get(prefixes::item_prefixes))
         .route("/Items/Prefixes", get(prefixes::item_prefixes))
         .route(
@@ -1710,6 +1934,8 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Counts", get(items::item_counts))
         .route("/emby/Items/Filters", get(classifications::items_filters))
         .route("/Items/Filters", get(classifications::items_filters))
+        .route("/emby/Items/Filters2", get(classifications::items_filters2))
+        .route("/Items/Filters2", get(classifications::items_filters2))
         .route("/emby/Items/Access", post(user_data::update_item_access))
         .route("/Items/Access", post(user_data::update_item_access))
         .route(
@@ -1738,6 +1964,135 @@ pub fn router() -> Router<AppState> {
         )
         .route("/emby/Images/Remote", get(images::remote_image_proxy))
         .route("/Images/Remote", get(images::remote_image_proxy))
+        .route("/emby/Images/General", get(images::global_image_catalog))
+        .route("/Images/General", get(images::global_image_catalog))
+        .route(
+            "/emby/Images/General/{name}/{image_type}",
+            get(images::general_image),
+        )
+        .route(
+            "/Images/General/{name}/{image_type}",
+            get(images::general_image),
+        )
+        .route(
+            "/emby/Images/MediaInfo",
+            get(images::global_image_catalog),
+        )
+        .route("/Images/MediaInfo", get(images::global_image_catalog))
+        .route(
+            "/emby/Images/MediaInfo/{theme}/{name}",
+            get(images::themed_global_image),
+        )
+        .route(
+            "/Images/MediaInfo/{theme}/{name}",
+            get(images::themed_global_image),
+        )
+        .route("/emby/Images/Ratings", get(images::global_image_catalog))
+        .route("/Images/Ratings", get(images::global_image_catalog))
+        .route(
+            "/emby/Images/Ratings/{theme}/{name}",
+            get(images::themed_global_image),
+        )
+        .route(
+            "/Images/Ratings/{theme}/{name}",
+            get(images::themed_global_image),
+        )
+        .route(
+            "/emby/Artists/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/Artists/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/emby/Artists/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/Artists/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/emby/Genres/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/Genres/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/emby/Genres/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/Genres/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/emby/MusicGenres/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/MusicGenres/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/emby/MusicGenres/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/MusicGenres/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/emby/Persons/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/Persons/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/emby/Persons/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/Persons/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/emby/Studios/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/Studios/{name}/Images/{image_type}",
+            get(images::named_entity_image),
+        )
+        .route(
+            "/emby/Studios/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/Studios/{name}/Images/{image_type}/{index}",
+            get(images::named_entity_image_index),
+        )
+        .route(
+            "/emby/Users/{user_id}/Images/{image_type}",
+            get(images::user_image),
+        )
+        .route(
+            "/Users/{user_id}/Images/{image_type}",
+            get(images::user_image),
+        )
+        .route(
+            "/emby/Users/{user_id}/Images/{image_type}/{index}",
+            get(images::user_image_index),
+        )
+        .route(
+            "/Users/{user_id}/Images/{image_type}/{index}",
+            get(images::user_image_index),
+        )
         .route(
             "/emby/Items/{item_id}/RemoteImages",
             get(images::remote_images),
@@ -1771,6 +2126,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/Items/{item_id}/ExternalIdInfos",
             get(item_lookup::external_id_infos),
+        )
+        .route(
+            "/emby/Items/{item_id}/MetadataEditor",
+            get(item_lookup::metadata_editor_info),
+        )
+        .route(
+            "/Items/{item_id}/MetadataEditor",
+            get(item_lookup::metadata_editor_info),
         )
         .route(
             "/emby/Items/RemoteSearch/Image",
@@ -1919,6 +2282,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/Items/{item_id}/Images/{image_type}/{index}/Url",
             post(images::update_item_image_url),
+        )
+        .route(
+            "/emby/Items/{item_id}/Images/{image_type}/{index}/{tag}/{format}/{max_width}/{max_height}/{percent_played}/{unplayed_count}",
+            get(images::item_image_long_form),
+        )
+        .route(
+            "/Items/{item_id}/Images/{image_type}/{index}/{tag}/{format}/{max_width}/{max_height}/{percent_played}/{unplayed_count}",
+            get(images::item_image_long_form),
         )
         .route(
             "/emby/Items/{item_id}/Images/{image_type}/{index}",
@@ -2114,10 +2485,23 @@ mod tests {
 
         assert!(routes.contains(".route(\"/emby/Albums\", get(items::albums))"));
         assert!(routes.contains(".route(\"/Albums\", get(items::albums))"));
+        assert!(routes.contains("\"/emby/Albums/{album_id}/Songs\""));
+        assert!(routes.contains("\"/Albums/{album_id}/Songs\""));
+        assert!(routes.contains("get(items::album_songs)"));
+        assert!(routes.contains("\"/emby/Artists/{artist_id}/Songs\""));
+        assert!(routes.contains("\"/Artists/{artist_id}/Songs\""));
+        assert!(routes.contains("\"/emby/Artists/{artist_id}/Albums\""));
+        assert!(routes.contains("\"/Artists/{artist_id}/Albums\""));
+        assert!(routes.contains("get(items::artist_songs)"));
+        assert!(routes.contains("get(items::artist_albums)"));
         assert!(routes.contains(".route(\"/emby/Songs\", get(items::songs))"));
         assert!(routes.contains(".route(\"/Songs\", get(items::songs))"));
         assert!(routes.contains("\"/emby/Audio/{item_id}/universal\""));
         assert!(routes.contains("\"/Audio/{item_id}/universal\""));
+        assert!(routes.contains("\"/emby/Audio/{item_id}/universal.{container}\""));
+        assert!(routes.contains("\"/emby/audio/{item_id}/universal.{container}\""));
+        assert!(routes.contains("\"/Audio/{item_id}/universal.{container}\""));
+        assert!(routes.contains("\"/audio/{item_id}/universal.{container}\""));
         assert!(routes.contains("\"/emby/Audio/{item_id}/RemoteSearch/Lyrics\""));
         assert!(routes.contains("\"/Audio/{item_id}/RemoteSearch/Lyrics\""));
     }
@@ -2143,6 +2527,7 @@ mod tests {
         // Assemble needles at runtime so this assertion's own source text does not
         // satisfy (or contradict) the checks under `include_str!`.
         let artist = format!("items::artist_instant_mix{}", ")");
+        let artist_by_path = format!("items::artist_instant_mix_by_path{}", ")");
         let genre_by_id = format!("items::music_genre_instant_mix_by_id{}", ")");
         let removed_stub = format!("instant_mix::empty{}instant_mix", "_");
         let removed_mod = format!("mod instant_mix{}", ";");
@@ -2150,10 +2535,41 @@ mod tests {
         // Bare Artists/MusicGenres InstantMix now resolve real Audio filtered by
         // the `?Id=` seed instead of the removed empty stub.
         assert!(routes.contains(&artist));
+        for route in [
+            "\"/emby/Artists/{artist_id}/InstantMix\"",
+            "\"/Artists/{artist_id}/InstantMix\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains(&artist_by_path));
         assert!(routes.contains(&genre_by_id));
         // The empty instant-mix stub module has been retired.
         assert!(!routes.contains(&removed_stub));
         assert!(!routes.contains(&removed_mod));
+    }
+
+    #[test]
+    fn item_seed_instant_mix_routes_resolve_real_genre_seeded_audio() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/Songs/{item_id}/InstantMix\"",
+            "\"/Songs/{item_id}/InstantMix\"",
+            "\"/emby/Albums/{item_id}/InstantMix\"",
+            "\"/Albums/{item_id}/InstantMix\"",
+            "\"/emby/Items/{item_id}/InstantMix\"",
+            "\"/Items/{item_id}/InstantMix\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        // Song/Album/Item instant mix now resolves a real genre-seeded Audio mix
+        // instead of the same-library similar-items fallback.
+        let item_mix = format!("items::item_instant_mix{}", ")");
+        assert!(routes.contains(&item_mix));
+        // The `/Similar` siblings keep the similar-items handler.
+        assert!(
+            routes.contains(".route(\"/Albums/{item_id}/Similar\", get(items::similar_items))")
+        );
     }
 
     #[test]
@@ -2165,25 +2581,188 @@ mod tests {
     }
 
     #[test]
+    fn named_and_user_image_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/Artists/{name}/Images/{image_type}\"",
+            "\"/Artists/{name}/Images/{image_type}\"",
+            "\"/emby/Artists/{name}/Images/{image_type}/{index}\"",
+            "\"/Artists/{name}/Images/{image_type}/{index}\"",
+            "\"/emby/Genres/{name}/Images/{image_type}\"",
+            "\"/Genres/{name}/Images/{image_type}\"",
+            "\"/emby/Genres/{name}/Images/{image_type}/{index}\"",
+            "\"/Genres/{name}/Images/{image_type}/{index}\"",
+            "\"/emby/MusicGenres/{name}/Images/{image_type}\"",
+            "\"/MusicGenres/{name}/Images/{image_type}\"",
+            "\"/emby/MusicGenres/{name}/Images/{image_type}/{index}\"",
+            "\"/MusicGenres/{name}/Images/{image_type}/{index}\"",
+            "\"/emby/Persons/{name}/Images/{image_type}\"",
+            "\"/Persons/{name}/Images/{image_type}\"",
+            "\"/emby/Persons/{name}/Images/{image_type}/{index}\"",
+            "\"/Persons/{name}/Images/{image_type}/{index}\"",
+            "\"/emby/Studios/{name}/Images/{image_type}\"",
+            "\"/Studios/{name}/Images/{image_type}\"",
+            "\"/emby/Studios/{name}/Images/{image_type}/{index}\"",
+            "\"/Studios/{name}/Images/{image_type}/{index}\"",
+            "\"/emby/Users/{user_id}/Images/{image_type}\"",
+            "\"/Users/{user_id}/Images/{image_type}\"",
+            "\"/emby/Users/{user_id}/Images/{image_type}/{index}\"",
+            "\"/Users/{user_id}/Images/{image_type}/{index}\"",
+            "\"/emby/Items/{item_id}/Images/{image_type}/{index}/{tag}/{format}/{max_width}/{max_height}/{percent_played}/{unplayed_count}\"",
+            "\"/Items/{item_id}/Images/{image_type}/{index}/{tag}/{format}/{max_width}/{max_height}/{percent_played}/{unplayed_count}\"",
+            "\"/emby/Images/General\"",
+            "\"/Images/General\"",
+            "\"/emby/Images/General/{name}/{image_type}\"",
+            "\"/Images/General/{name}/{image_type}\"",
+            "\"/emby/Images/MediaInfo\"",
+            "\"/Images/MediaInfo\"",
+            "\"/emby/Images/MediaInfo/{theme}/{name}\"",
+            "\"/Images/MediaInfo/{theme}/{name}\"",
+            "\"/emby/Images/Ratings\"",
+            "\"/Images/Ratings\"",
+            "\"/emby/Images/Ratings/{theme}/{name}\"",
+            "\"/Images/Ratings/{theme}/{name}\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains("get(images::named_entity_image)"));
+        assert!(routes.contains("get(images::named_entity_image_index)"));
+        assert!(routes.contains("get(images::user_image)"));
+        assert!(routes.contains("get(images::user_image_index)"));
+        assert!(routes.contains("get(images::item_image_long_form)"));
+        assert!(routes.contains("get(images::global_image_catalog)"));
+        assert!(routes.contains("get(images::general_image)"));
+        assert!(routes.contains("get(images::themed_global_image)"));
+    }
+
+    #[test]
     fn dynamic_hls_routes_are_registered_with_official_prefixed_and_plain_paths() {
         let routes = include_str!("mod.rs");
 
         for route in [
+            "\"/emby/Audio/ActiveEncodings\"",
+            "\"/emby/audio/ActiveEncodings\"",
+            "\"/Audio/ActiveEncodings\"",
+            "\"/audio/ActiveEncodings\"",
             "\"/emby/Videos/ActiveEncodings\"",
             "\"/Videos/ActiveEncodings\"",
             "\"/emby/Videos/{item_id}/master.m3u8\"",
             "\"/emby/Videos/{item_id}/main.m3u8\"",
             "\"/emby/Videos/{item_id}/live.m3u8\"",
             "\"/emby/Audio/{item_id}/master.m3u8\"",
+            "\"/emby/audio/{item_id}/master.m3u8\"",
             "\"/emby/Audio/{item_id}/main.m3u8\"",
             "\"/emby/Audio/{item_id}/live.m3u8\"",
             "\"/Audio/{item_id}/master.m3u8\"",
+            "\"/audio/{item_id}/master.m3u8\"",
             "\"/emby/Videos/{item_id}/hls1/{playlist_id}/{segment_file_name}\"",
+            "\"/emby/Videos/{item_id}/hls/{playlist_id}/{segment_file_name}\"",
             "\"/emby/Audio/{item_id}/hls1/{playlist_id}/{segment_file_name}\"",
+            "\"/emby/audio/{item_id}/hls1/{playlist_id}/{segment_file_name}\"",
+            "\"/Videos/{item_id}/hls/{playlist_id}/{segment_file_name}\"",
             "\"/emby/Videos/{item_id}/subtitles.m3u8\"",
             "\"/emby/Videos/{item_id}/live_subtitles.m3u8\"",
         ] {
             assert!(routes.contains(route), "missing route {route}");
         }
+    }
+
+    #[test]
+    fn official_audio_stream_and_video_version_routes_are_registered() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/Audio/{item_id}/stream\"",
+            "\"/emby/audio/{item_id}/stream\"",
+            "\"/Audio/{item_id}/stream\"",
+            "\"/audio/{item_id}/stream\"",
+            "\"/emby/Audio/{item_id}/stream.{container}\"",
+            "\"/emby/audio/{item_id}/stream.{container}\"",
+            "\"/Audio/{item_id}/stream.{container}\"",
+            "\"/audio/{item_id}/stream.{container}\"",
+            "\"/emby/Videos/{item_id}/AlternateSources\"",
+            "\"/Videos/{item_id}/AlternateSources\"",
+            "\"/emby/Videos/MergeVersions\"",
+            "\"/Videos/MergeVersions\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains("get(streaming::audio_stream_exact)"));
+        assert!(routes.contains("get(streaming::audio_stream_container)"));
+        assert!(routes.contains("delete(items::delete_video_alternate_sources)"));
+        assert!(routes.contains("post(items::merge_video_versions)"));
+    }
+
+    #[test]
+    fn official_filters2_routes_are_registered() {
+        let routes = include_str!("mod.rs");
+
+        for route in ["\"/emby/Items/Filters2\"", "\"/Items/Filters2\""] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains("get(classifications::items_filters2)"));
+    }
+
+    #[test]
+    fn metadata_editor_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/Items/{item_id}/MetadataEditor\"",
+            "\"/Items/{item_id}/MetadataEditor\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains("get(item_lookup::metadata_editor_info)"));
+    }
+
+    #[test]
+    fn user_grouping_options_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/Users/{user_id}/GroupingOptions\"",
+            "\"/Users/{user_id}/GroupingOptions\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains("get(views::grouping_options)"));
+    }
+
+    #[test]
+    fn easy_password_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/Users/{user_id}/EasyPassword\"",
+            "\"/Users/{user_id}/EasyPassword\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains("post(users::update_easy_password)"));
+    }
+
+    #[test]
+    fn connect_service_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/Connect/Exchange\"",
+            "\"/Connect/Exchange\"",
+            "\"/emby/Connect/Pending\"",
+            "\"/Connect/Pending\"",
+            "\"/emby/Users/{user_id}/Connect/Link\"",
+            "\"/Users/{user_id}/Connect/Link\"",
+            "\"/emby/Users/{user_id}/Connect/Link/Delete\"",
+            "\"/Users/{user_id}/Connect/Link/Delete\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+
+        assert!(routes.contains("get(connect::connect_exchange)"));
+        assert!(routes.contains("get(connect::connect_pending)"));
+        assert!(routes.contains("post(connect::connect_link_user)"));
+        assert!(routes.contains("delete(connect::connect_unlink_user)"));
     }
 }

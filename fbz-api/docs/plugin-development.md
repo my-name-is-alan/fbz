@@ -10,7 +10,7 @@
 - 插件必须声明最小权限；未声明权限的 Host API 会返回 403。
 - 插件收到同一个 dispatch 的重试时，必须按幂等键去重。
 - 通知目标、bot token、webhook URL 等敏感出站配置由管理员管理，插件只提交通知请求。
-- 大库扫描必须使用 cursor 分页，不应使用 offset 扫全库。
+- 大库扫描必须使用 cursor 分页；Host API 不提供 offset 扫全库路径。
 
 ## 插件类型
 
@@ -176,7 +176,7 @@ GET /api/plugin/libraries/{libraryId}/items?limit=200&cursor=<nextCursor>
 
 - 优先使用 `nextCursor` 翻页。
 - 不要把 `totalRecordCount` 当成精确全库数量。
-- 避免 `startIndex` 扫全库；它只保留给小范围兼容场景。
+- `startIndex` 只为兼容旧调用保留解析，服务端不会用它执行 offset 翻页。
 - 每次处理后将 cursor 写入插件私有 KV，便于失败后续跑。
 
 ## 通知插件推荐边界

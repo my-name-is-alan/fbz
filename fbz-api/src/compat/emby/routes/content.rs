@@ -41,20 +41,35 @@ pub struct ContentSectionDto {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ContentSectionItemsQuery {
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "mediaTypes", alias = "media_types")]
     pub media_types: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
+    #[serde(alias = "filters")]
     pub filters: Option<String>,
+    #[serde(alias = "isFavorite", alias = "is_favorite")]
     pub is_favorite: Option<bool>,
+    #[serde(alias = "isPlayed", alias = "is_played")]
     pub is_played: Option<bool>,
 }
 
@@ -302,6 +317,51 @@ mod tests {
             .expect("music section should map");
         assert_eq!(music.include_item_types.as_deref(), Some("Audio"));
         assert_eq!(music.media_types.as_deref(), Some("Audio"));
+    }
+
+    #[test]
+    fn content_section_items_query_accepts_lower_camel_and_snake_case_fields() {
+        let lower_camel_uri: http::Uri = "/emby/Users/user-1/Sections/music/Items?parentId=library-1&startIndex=5&limit=20&recursive=true&includeItemTypes=Audio&mediaTypes=Audio&sortBy=SortName&sortOrder=Ascending&fields=MediaSources&enableImages=true&imageTypeLimit=1&enableImageTypes=Primary&isFavorite=true&isPlayed=false"
+            .parse()
+            .unwrap();
+        let Query(lower_camel) =
+            Query::<ContentSectionItemsQuery>::try_from_uri(&lower_camel_uri).unwrap();
+
+        assert_eq!(lower_camel.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(lower_camel.start_index, Some(5));
+        assert_eq!(lower_camel.limit, Some(20));
+        assert_eq!(lower_camel.recursive, Some(true));
+        assert_eq!(lower_camel.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(lower_camel.media_types.as_deref(), Some("Audio"));
+        assert_eq!(lower_camel.sort_by.as_deref(), Some("SortName"));
+        assert_eq!(lower_camel.sort_order.as_deref(), Some("Ascending"));
+        assert_eq!(lower_camel.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(lower_camel.enable_images, Some(true));
+        assert_eq!(lower_camel.image_type_limit, Some(1));
+        assert_eq!(lower_camel.enable_image_types.as_deref(), Some("Primary"));
+        assert_eq!(lower_camel.is_favorite, Some(true));
+        assert_eq!(lower_camel.is_played, Some(false));
+
+        let snake_case_uri: http::Uri = "/Users/user-1/Sections/resume/Items?parent_id=library-1&start_index=2&include_item_types=Movie&media_types=Video&sort_by=DateCreated&sort_order=Descending&enable_images=false&image_type_limit=2&enable_image_types=Primary,Backdrop&is_favorite=false&is_played=true"
+            .parse()
+            .unwrap();
+        let Query(snake_case) =
+            Query::<ContentSectionItemsQuery>::try_from_uri(&snake_case_uri).unwrap();
+
+        assert_eq!(snake_case.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(snake_case.start_index, Some(2));
+        assert_eq!(snake_case.include_item_types.as_deref(), Some("Movie"));
+        assert_eq!(snake_case.media_types.as_deref(), Some("Video"));
+        assert_eq!(snake_case.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(snake_case.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(snake_case.enable_images, Some(false));
+        assert_eq!(snake_case.image_type_limit, Some(2));
+        assert_eq!(
+            snake_case.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+        assert_eq!(snake_case.is_favorite, Some(false));
+        assert_eq!(snake_case.is_played, Some(true));
     }
 
     #[test]

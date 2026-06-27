@@ -16,15 +16,20 @@ const MAX_COLLECTION_NAME_LEN: usize = 256;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CreateCollectionQuery {
+    #[serde(alias = "isLocked", alias = "is_locked")]
     pub is_locked: Option<bool>,
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "ids")]
     pub ids: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CollectionItemsQuery {
+    #[serde(alias = "ids")]
     pub ids: Option<String>,
 }
 
@@ -181,6 +186,8 @@ fn collection_write_disabled_error() -> AppError {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -216,6 +223,30 @@ mod tests {
         assert_eq!(input.parent_id.as_deref(), Some("parent-1"));
         assert_eq!(input.ids, ["item-1", "item-2"]);
         assert!(input.is_locked);
+    }
+
+    #[test]
+    fn collection_queries_accept_lower_camel_client_fields() {
+        let uri =
+            "/Collections?isLocked=true&name=Favorites&parentId=parent-1&ids=item-1,item-2,item-1"
+                .parse::<Uri>()
+                .unwrap();
+        let Query(query) = Query::<CreateCollectionQuery>::try_from_uri(&uri).unwrap();
+        let input = create_collection_input(query).unwrap();
+
+        assert_eq!(input.name, "Favorites");
+        assert_eq!(input.parent_id.as_deref(), Some("parent-1"));
+        assert_eq!(input.ids, ["item-1", "item-2"]);
+        assert!(input.is_locked);
+
+        let uri = "/Collections/collection-1/Items?ids=item-1,item-2,item-1"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<CollectionItemsQuery>::try_from_uri(&uri).unwrap();
+        let input = collection_items_input("collection-1", query.ids.as_deref()).unwrap();
+
+        assert_eq!(input.collection_id, "collection-1");
+        assert_eq!(input.ids, ["item-1", "item-2"]);
     }
 
     #[test]

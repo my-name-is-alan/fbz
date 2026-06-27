@@ -19,20 +19,35 @@ use super::{
 
 const DEFAULT_PREFIXES_LIMIT: u32 = 1_000;
 const MAX_PREFIXES_LIMIT: u32 = 2_000;
+const MAX_PREFIXES_START_INDEX: u32 = 10_000;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PrefixesQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "nameStartsWith", alias = "name_starts_with")]
     pub name_starts_with: Option<String>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(alias = "nameLessThan", alias = "name_less_than")]
     pub name_less_than: Option<String>,
+    #[serde(alias = "artistType", alias = "artist_type")]
     pub artist_type: Option<String>,
 }
 
@@ -120,7 +135,12 @@ struct PrefixWindow {
 impl PrefixWindow {
     fn from_query(query: &PrefixesQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or_default()),
+            start_index: i64::from(
+                query
+                    .start_index
+                    .unwrap_or_default()
+                    .min(MAX_PREFIXES_START_INDEX),
+            ),
             limit: i64::from(
                 query
                     .limit
@@ -133,6 +153,8 @@ impl PrefixWindow {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -169,6 +191,42 @@ mod tests {
         assert_eq!(query.name_starts_with_or_greater.as_deref(), Some("A"));
         assert_eq!(query.name_less_than.as_deref(), Some("Z"));
         assert_eq!(query.artist_type.as_deref(), Some("AlbumArtist"));
+    }
+
+    #[test]
+    fn prefixes_query_accepts_lower_camel_client_fields() {
+        let uri = "/Items/Prefixes?userId=user-1&parentId=library-1&recursive=true&startIndex=10&limit=5000&includeItemTypes=MusicAlbum,Audio&searchTerm=bow&nameStartsWith=B&nameStartsWithOrGreater=A&nameLessThan=Z&artistType=AlbumArtist"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<PrefixesQuery>::try_from_uri(&uri).unwrap();
+
+        let window = PrefixWindow::from_query(&query);
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_PREFIXES_LIMIT));
+        assert_eq!(
+            query.include_item_types.as_deref(),
+            Some("MusicAlbum,Audio")
+        );
+        assert_eq!(query.search_term.as_deref(), Some("bow"));
+        assert_eq!(query.name_starts_with.as_deref(), Some("B"));
+        assert_eq!(query.name_starts_with_or_greater.as_deref(), Some("A"));
+        assert_eq!(query.name_less_than.as_deref(), Some("Z"));
+        assert_eq!(query.artist_type.as_deref(), Some("AlbumArtist"));
+    }
+
+    #[test]
+    fn prefix_window_clamps_pathologically_large_start_index() {
+        let window = PrefixWindow::from_query(&PrefixesQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..PrefixesQuery::default()
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
     }
 
     #[test]

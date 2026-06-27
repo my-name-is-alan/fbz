@@ -16,6 +16,7 @@ use crate::{
 };
 
 const MAX_LIVE_TV_EMPTY_LIMIT: u32 = 200;
+const MAX_LIVE_TV_EMPTY_START_INDEX: u32 = 10_000;
 const MAX_LIVE_TV_PROGRAM_ID_LEN: usize = 128;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub struct LiveTvListQuery {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct TimerDefaultsQuery {
+    #[serde(alias = "programId", alias = "program_id")]
     pub program_id: Option<String>,
 }
 
@@ -105,7 +107,10 @@ pub async fn live_tv_folder() -> Json<BaseItemDto> {
 }
 
 pub async fn empty_query(Query(query): Query<LiveTvListQuery>) -> Json<QueryResultDto<Value>> {
-    let start_index = query.start_index.unwrap_or_default();
+    let start_index = query
+        .start_index
+        .unwrap_or_default()
+        .min(MAX_LIVE_TV_EMPTY_START_INDEX);
     let _limit = query.limit.unwrap_or(MAX_LIVE_TV_EMPTY_LIMIT);
     Json(QueryResultDto::new(Vec::new(), 0, start_index))
 }
@@ -214,6 +219,8 @@ fn normalize_optional_program_id(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -259,6 +266,18 @@ mod tests {
         assert_eq!(value["ChannelIds"], json!([]));
     }
 
+    #[test]
+    fn timer_defaults_query_accepts_lower_camel_client_fields() {
+        let uri = "/LiveTv/Timers/Defaults?programId=program-1"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<TimerDefaultsQuery>::try_from_uri(&uri).unwrap();
+        let value = serde_json::to_value(default_timer_info(query.program_id)).unwrap();
+
+        assert_eq!(value["ProgramId"], json!("program-1"));
+        assert_eq!(value["TimerType"], json!("Program"));
+    }
+
     #[tokio::test]
     async fn empty_query_preserves_requested_start_index() {
         let query = LiveTvListQuery {
@@ -269,6 +288,20 @@ mod tests {
         let Json(result) = empty_query(Query(query)).await;
 
         assert_eq!(result.start_index, 25);
+        assert_eq!(result.total_record_count, 0);
+        assert!(result.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_query_clamps_pathologically_large_start_index() {
+        let query = LiveTvListQuery {
+            start_index: Some(500_000),
+            limit: Some(10),
+        };
+
+        let Json(result) = empty_query(Query(query)).await;
+
+        assert_eq!(result.start_index, 10_000);
         assert_eq!(result.total_record_count, 0);
         assert!(result.items.is_empty());
     }

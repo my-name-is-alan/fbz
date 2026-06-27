@@ -231,10 +231,14 @@ impl SchedulerService {
                     .repository
                     .ensure_partition_coverage(PARTITION_MAINTENANCE_MONTHS_AHEAD)
                     .await?;
+                let refreshed_rollup_rows = self
+                    .repository
+                    .refresh_queue_stats_rollup_for_month("today")
+                    .await?;
                 Ok(SchedulerRunSummary {
                     task_key: task.task_key.clone(),
                     task_type: task.task_type.clone(),
-                    queued_jobs: created_partitions,
+                    queued_jobs: created_partitions + refreshed_rollup_rows,
                 })
             }
             other => Err(SchedulerError::UnsupportedTaskType(other.to_owned())),
@@ -490,13 +494,21 @@ mod tests {
     #[test]
     fn partition_maintenance_task_is_wired_end_to_end() {
         let source = include_str!("service.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("service source should include production section");
 
         // Bootstrapped from the configured schedule.
-        assert!(source.contains("schedules.partition_maintenance"));
-        assert!(source.contains("CORE_PARTITION_MAINTENANCE_TASK_KEY"));
+        assert!(production_source.contains("schedules.partition_maintenance"));
+        assert!(production_source.contains("CORE_PARTITION_MAINTENANCE_TASK_KEY"));
         // Dispatched to the idempotent coverage function.
-        assert!(source.contains("CORE_PARTITION_MAINTENANCE_TASK_TYPE =>"));
-        assert!(source.contains("ensure_partition_coverage(PARTITION_MAINTENANCE_MONTHS_AHEAD)"));
+        assert!(production_source.contains("CORE_PARTITION_MAINTENANCE_TASK_TYPE =>"));
+        assert!(
+            production_source
+                .contains("ensure_partition_coverage(PARTITION_MAINTENANCE_MONTHS_AHEAD)")
+        );
+        assert!(production_source.contains("refresh_queue_stats_rollup_for_month"));
     }
 
     #[test]

@@ -23,15 +23,20 @@ const MAX_LYRICS_SIDECAR_BYTES: u64 = 1024 * 1024;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct LyricsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteLyricsSearchQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
+    #[serde(alias = "providerName", alias = "provider_name")]
     pub provider_name: Option<String>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
 }
 
@@ -379,6 +384,7 @@ fn lrc_fraction_to_ticks(value: &str) -> Option<i64> {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use axum::{extract::Query, http::Uri};
     use serde_json::json;
 
     use super::*;
@@ -402,6 +408,28 @@ mod tests {
             "SearchTerm": "Signal Alice"
         }))
         .unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.media_source_id.as_deref(), Some("42"));
+        assert_eq!(query.provider_name.as_deref(), Some("LrcLib"));
+        assert_eq!(query.search_term.as_deref(), Some("Signal Alice"));
+    }
+
+    #[test]
+    fn lyrics_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = "/emby/Audio/item-1/Lyrics?userId=user-1".parse().unwrap();
+        let Query(query) = Query::<LyricsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+
+        let uri: Uri = concat!(
+            "/emby/Audio/item-1/RemoteSearch/Lyrics?",
+            "userId=user-1&mediaSourceId=42",
+            "&providerName=LrcLib&searchTerm=Signal%20Alice"
+        )
+        .parse()
+        .unwrap();
+        let Query(query) = Query::<RemoteLyricsSearchQuery>::try_from_uri(&uri).unwrap();
 
         assert_eq!(query.user_id.as_deref(), Some("user-1"));
         assert_eq!(query.media_source_id.as_deref(), Some("42"));

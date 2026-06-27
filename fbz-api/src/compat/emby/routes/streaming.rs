@@ -44,25 +44,40 @@ const DEFAULT_UNIVERSAL_AUDIO_CODEC: &str = "aac";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct DirectStreamQuery {
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UniversalAudioQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "deviceId", alias = "device_id")]
     pub device_id: Option<String>,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
+    #[serde(alias = "maxStreamingBitrate", alias = "max_streaming_bitrate")]
     pub max_streaming_bitrate: Option<i64>,
+    #[serde(alias = "audioBitRate", alias = "audio_bit_rate")]
     pub audio_bit_rate: Option<i64>,
+    #[serde(alias = "container")]
     pub container: Option<String>,
+    #[serde(alias = "maxSampleRate", alias = "max_sample_rate")]
     pub max_sample_rate: Option<i32>,
+    #[serde(alias = "playSessionId", alias = "play_session_id")]
     pub play_session_id: Option<String>,
+    #[serde(alias = "transcodingProtocol", alias = "transcoding_protocol")]
     pub transcoding_protocol: Option<String>,
+    #[serde(alias = "transcodingContainer", alias = "transcoding_container")]
     pub transcoding_container: Option<String>,
+    #[serde(alias = "audioCodec", alias = "audio_codec")]
     pub audio_codec: Option<String>,
+    #[serde(alias = "enableRedirection", alias = "enable_redirection")]
     pub enable_redirection: Option<bool>,
+    #[serde(alias = "enableRemoteMedia", alias = "enable_remote_media")]
     pub enable_remote_media: Option<bool>,
+    #[serde(alias = "startTimeTicks", alias = "start_time_ticks")]
     pub start_time_ticks: Option<i64>,
 }
 
@@ -104,9 +119,22 @@ pub async fn universal_audio_stream(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, AppError> {
-    let input = universal_audio_input(&query)?;
+    universal_audio_stream_response(state, item_id, query, None, headers, uri).await
+}
+
+async fn universal_audio_stream_response(
+    state: AppState,
+    item_id: String,
+    query: UniversalAudioQuery,
+    path_container: Option<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let input = universal_audio_input_with_path_container(&query, path_container.as_deref())?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    assert_universal_audio_request_user(&user, &input)?;
     if input.requests_hls_transcode() {
-        return universal_audio_hls_stream(state, item_id, input, headers, uri).await;
+        return universal_audio_hls_stream(state, user, item_id, input, headers, uri).await;
     }
 
     stream_source(
@@ -119,6 +147,16 @@ pub async fn universal_audio_stream(
     .await
 }
 
+pub async fn universal_audio_stream_container(
+    State(state): State<AppState>,
+    AxumPath((item_id, container)): AxumPath<(String, String)>,
+    Query(query): Query<UniversalAudioQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    universal_audio_stream_response(state, item_id, query, Some(container), headers, uri).await
+}
+
 pub async fn audio_stream(
     State(state): State<AppState>,
     AxumPath((item_id, stream_file_name)): AxumPath<(String, String)>,
@@ -127,6 +165,27 @@ pub async fn audio_stream(
     uri: Uri,
 ) -> Result<Response, AppError> {
     validate_stream_file_name(&stream_file_name)?;
+    stream_source(state, item_id, query, headers, uri).await
+}
+
+pub async fn audio_stream_exact(
+    State(state): State<AppState>,
+    AxumPath(item_id): AxumPath<String>,
+    Query(query): Query<DirectStreamQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    stream_source(state, item_id, query, headers, uri).await
+}
+
+pub async fn audio_stream_container(
+    State(state): State<AppState>,
+    AxumPath((item_id, container)): AxumPath<(String, String)>,
+    Query(query): Query<DirectStreamQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    validate_stream_file_name(&format!("stream.{container}"))?;
     stream_source(state, item_id, query, headers, uri).await
 }
 
@@ -205,14 +264,13 @@ async fn stream_source_response(
 
 async fn universal_audio_hls_stream(
     state: AppState,
+    user: AuthenticatedUser,
     item_id: String,
     input: UniversalAudioInput,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, AppError> {
     let access_token = access_token_from_request(&headers, uri.query())?;
-    let user = authenticate_request_user(&state, &headers, &uri).await?;
-    assert_universal_audio_user(&user, input.user_id.as_deref())?;
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
@@ -406,6 +464,13 @@ fn assert_universal_audio_user(
     Ok(())
 }
 
+fn assert_universal_audio_request_user(
+    user: &AuthenticatedUser,
+    input: &UniversalAudioInput,
+) -> Result<(), AppError> {
+    assert_universal_audio_user(user, input.user_id.as_deref())
+}
+
 fn universal_audio_transcode_session_input(
     user_id: i64,
     source: &PlaybackMediaSourceRecord,
@@ -475,13 +540,22 @@ fn redirect_response(location: &str) -> Result<Response, AppError> {
     Ok(response)
 }
 
-fn universal_audio_input(query: &UniversalAudioQuery) -> Result<UniversalAudioInput, AppError> {
+fn universal_audio_input_with_path_container(
+    query: &UniversalAudioQuery,
+    path_container: Option<&str>,
+) -> Result<UniversalAudioInput, AppError> {
+    let container = query.container.as_deref().or_else(|| {
+        path_container
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    });
+
     Ok(UniversalAudioInput {
         media_source_id: normalize_optional_id(query.media_source_id.as_deref(), "MediaSourceId")?,
         user_id: normalize_optional_id(query.user_id.as_deref(), "UserId")?,
         device_id: normalize_optional_id(query.device_id.as_deref(), "DeviceId")?,
         containers: normalize_token_list(
-            query.container.as_deref(),
+            container,
             &[
                 "aac", "ape", "flac", "m4a", "mp2", "mp3", "mpa", "oga", "ogg", "opus", "wav",
                 "webm", "webma", "wma",
@@ -749,6 +823,21 @@ fn parse_range_header(
     let (start, end) = range_value
         .split_once('-')
         .ok_or_else(|| AppError::unprocessable("invalid range header"))?;
+    if start.trim().is_empty() {
+        let suffix_len = end
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| AppError::unprocessable("invalid range suffix"))?;
+        if suffix_len == 0 {
+            return Err(AppError::unprocessable("invalid range suffix"));
+        }
+
+        let start = total_len.saturating_sub(suffix_len);
+        return Ok(Some(ByteRange {
+            start,
+            end: total_len - 1,
+        }));
+    }
 
     let start = start
         .trim()
@@ -763,7 +852,9 @@ fn parse_range_header(
     };
 
     if start > end || start >= total_len {
-        return Err(AppError::unprocessable("range is outside stream length"));
+        return Err(AppError::range_not_satisfiable(
+            "range is outside stream length",
+        ));
     }
 
     Ok(Some(ByteRange {
@@ -882,6 +973,7 @@ impl ByteRange {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
     use axum::http::HeaderValue;
 
     use crate::config::MediaConfig;
@@ -936,8 +1028,35 @@ mod tests {
     }
 
     #[test]
+    fn range_parser_supports_suffix_byte_ranges() {
+        let range = parse_range_header(Some(&HeaderValue::from_static("bytes=-25")), 100)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(range.start, 75);
+        assert_eq!(range.end, 99);
+        assert_eq!(range.len(), 25);
+
+        let whole_file = parse_range_header(Some(&HeaderValue::from_static("bytes=-250")), 100)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(whole_file.start, 0);
+        assert_eq!(whole_file.end, 99);
+        assert_eq!(whole_file.len(), 100);
+    }
+
+    #[test]
     fn range_parser_rejects_multiple_ranges() {
         assert!(parse_range_header(Some(&HeaderValue::from_static("bytes=0-1,2-3")), 100).is_err());
+    }
+
+    #[test]
+    fn range_parser_reports_unsatisfiable_ranges_with_416() {
+        let err =
+            parse_range_header(Some(&HeaderValue::from_static("bytes=100-200")), 100).unwrap_err();
+
+        assert_eq!(err.status_code(), StatusCode::RANGE_NOT_SATISFIABLE);
     }
 
     #[test]
@@ -953,17 +1072,97 @@ mod tests {
     }
 
     #[test]
+    fn direct_stream_query_accepts_lower_camel_media_source_id() {
+        let uri: Uri = "/emby/Videos/item-1/stream?mediaSourceId=42"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<DirectStreamQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.media_source_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn official_audio_stream_aliases_keep_direct_stream_query_shape() {
+        let uri: Uri = "/emby/Audio/item-1/stream.mp3?mediaSourceId=42"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<DirectStreamQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.media_source_id.as_deref(), Some("42"));
+        assert!(validate_stream_file_name("stream").is_ok());
+        assert!(validate_stream_file_name("stream.mp3").is_ok());
+        assert!(validate_stream_file_name("stream../mp3").is_err());
+    }
+
+    #[test]
+    fn universal_audio_query_accepts_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Audio/item-1/universal?",
+            "userId=user-1&deviceId=device-1&mediaSourceId=42",
+            "&maxStreamingBitrate=140000000&audioBitRate=320000",
+            "&container=mp3%2Caac&maxSampleRate=48000",
+            "&playSessionId=play-1&transcodingProtocol=hls",
+            "&transcodingContainer=ts&audioCodec=aac",
+            "&enableRedirection=true&enableRemoteMedia=false",
+            "&startTimeTicks=123000"
+        )
+        .parse()
+        .unwrap();
+        let Query(query) = Query::<UniversalAudioQuery>::try_from_uri(&uri).unwrap();
+
+        let input = universal_audio_input_with_path_container(&query, None)
+            .expect("lower-camel universal audio query");
+
+        assert_eq!(input.user_id.as_deref(), Some("user-1"));
+        assert_eq!(input.device_id.as_deref(), Some("device-1"));
+        assert_eq!(input.media_source_id.as_deref(), Some("42"));
+        assert_eq!(input.max_streaming_bitrate, Some(140_000_000));
+        assert_eq!(input.containers, ["mp3", "aac"]);
+        assert_eq!(input.max_sample_rate, Some(48_000));
+        assert_eq!(input.play_session_id.as_deref(), Some("play-1"));
+        assert_eq!(input.transcoding_protocol.as_deref(), Some("hls"));
+        assert_eq!(input.transcoding_container.as_deref(), Some("ts"));
+        assert_eq!(input.audio_codec.as_deref(), Some("aac"));
+        assert_eq!(input.enable_redirection, Some(true));
+        assert_eq!(input.enable_remote_media, Some(false));
+        assert_eq!(input.start_time_ticks, Some(123_000));
+    }
+
+    #[test]
+    fn universal_audio_path_container_is_query_container_fallback() {
+        let input =
+            universal_audio_input_with_path_container(&UniversalAudioQuery::default(), Some("mp3"))
+                .expect("safe path container should normalize");
+
+        assert_eq!(input.containers, ["mp3"]);
+
+        let input = universal_audio_input_with_path_container(
+            &UniversalAudioQuery {
+                container: Some("aac".to_owned()),
+                ..UniversalAudioQuery::default()
+            },
+            Some("mp3"),
+        )
+        .expect("query container should win over path container");
+
+        assert_eq!(input.containers, ["aac"]);
+    }
+
+    #[test]
     fn universal_audio_query_normalizes_safe_values() {
-        let input = universal_audio_input(&UniversalAudioQuery {
-            media_source_id: Some("42".to_owned()),
-            container: Some(" mp3, AAC,../bad,flac,mp3, ".to_owned()),
-            transcoding_protocol: Some(" HLS ".to_owned()),
-            transcoding_container: Some(" TS ".to_owned()),
-            audio_codec: Some(" AAC ".to_owned()),
-            max_streaming_bitrate: Some(140_000_000),
-            start_time_ticks: Some(123_000),
-            ..UniversalAudioQuery::default()
-        })
+        let input = universal_audio_input_with_path_container(
+            &UniversalAudioQuery {
+                media_source_id: Some("42".to_owned()),
+                container: Some(" mp3, AAC,../bad,flac,mp3, ".to_owned()),
+                transcoding_protocol: Some(" HLS ".to_owned()),
+                transcoding_container: Some(" TS ".to_owned()),
+                audio_codec: Some(" AAC ".to_owned()),
+                max_streaming_bitrate: Some(140_000_000),
+                start_time_ticks: Some(123_000),
+                ..UniversalAudioQuery::default()
+            },
+            None,
+        )
         .expect("safe universal audio query should normalize");
 
         assert_eq!(input.media_source_id.as_deref(), Some("42"));
@@ -977,19 +1176,25 @@ mod tests {
 
     #[test]
     fn universal_audio_query_uses_audio_bit_rate_as_bitrate_fallback() {
-        let audio_bit_rate_only = universal_audio_input(&UniversalAudioQuery {
-            audio_bit_rate: Some(320_000),
-            ..UniversalAudioQuery::default()
-        })
+        let audio_bit_rate_only = universal_audio_input_with_path_container(
+            &UniversalAudioQuery {
+                audio_bit_rate: Some(320_000),
+                ..UniversalAudioQuery::default()
+            },
+            None,
+        )
         .expect("safe audio bit rate should normalize");
 
         assert_eq!(audio_bit_rate_only.max_streaming_bitrate, Some(320_000));
 
-        let max_streaming_bitrate_wins = universal_audio_input(&UniversalAudioQuery {
-            max_streaming_bitrate: Some(192_000),
-            audio_bit_rate: Some(320_000),
-            ..UniversalAudioQuery::default()
-        })
+        let max_streaming_bitrate_wins = universal_audio_input_with_path_container(
+            &UniversalAudioQuery {
+                max_streaming_bitrate: Some(192_000),
+                audio_bit_rate: Some(320_000),
+                ..UniversalAudioQuery::default()
+            },
+            None,
+        )
         .expect("explicit max streaming bitrate should normalize");
 
         assert_eq!(
@@ -1001,33 +1206,68 @@ mod tests {
     #[test]
     fn universal_audio_query_rejects_unsafe_or_unbounded_values() {
         assert!(
-            universal_audio_input(&UniversalAudioQuery {
-                max_streaming_bitrate: Some(0),
-                ..UniversalAudioQuery::default()
-            })
+            universal_audio_input_with_path_container(
+                &UniversalAudioQuery {
+                    max_streaming_bitrate: Some(0),
+                    ..UniversalAudioQuery::default()
+                },
+                None,
+            )
             .is_err()
         );
         assert!(
-            universal_audio_input(&UniversalAudioQuery {
-                audio_bit_rate: Some(0),
-                ..UniversalAudioQuery::default()
-            })
+            universal_audio_input_with_path_container(
+                &UniversalAudioQuery {
+                    audio_bit_rate: Some(0),
+                    ..UniversalAudioQuery::default()
+                },
+                None,
+            )
             .is_err()
         );
         assert!(
-            universal_audio_input(&UniversalAudioQuery {
-                start_time_ticks: Some(-1),
-                ..UniversalAudioQuery::default()
-            })
+            universal_audio_input_with_path_container(
+                &UniversalAudioQuery {
+                    start_time_ticks: Some(-1),
+                    ..UniversalAudioQuery::default()
+                },
+                None,
+            )
             .is_err()
         );
         assert!(
-            universal_audio_input(&UniversalAudioQuery {
-                transcoding_protocol: Some("../hls".to_owned()),
-                ..UniversalAudioQuery::default()
-            })
+            universal_audio_input_with_path_container(
+                &UniversalAudioQuery {
+                    transcoding_protocol: Some("../hls".to_owned()),
+                    ..UniversalAudioQuery::default()
+                },
+                None,
+            )
             .is_err()
         );
+    }
+
+    #[test]
+    fn universal_audio_user_guard_applies_before_direct_or_hls_branch() {
+        let user = AuthenticatedUser {
+            id: 7,
+            public_id: "user-1".to_owned(),
+            username: "alice".to_owned(),
+            role_name: "User".to_owned(),
+            role_name_normalized: "user".to_owned(),
+        };
+        let input = universal_audio_input_with_path_container(
+            &UniversalAudioQuery {
+                user_id: Some("other-user".to_owned()),
+                ..UniversalAudioQuery::default()
+            },
+            None,
+        )
+        .expect("safe universal audio query should normalize");
+
+        let err = assert_universal_audio_request_user(&user, &input).unwrap_err();
+
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -1041,15 +1281,18 @@ mod tests {
             supports_transcoding: true,
             ..test_source()
         };
-        let input = universal_audio_input(&UniversalAudioQuery {
-            media_source_id: Some("2".to_owned()),
-            transcoding_protocol: Some("hls".to_owned()),
-            transcoding_container: Some("ts".to_owned()),
-            audio_codec: Some("mp3".to_owned()),
-            max_streaming_bitrate: Some(320_000),
-            play_session_id: Some("play-1".to_owned()),
-            ..UniversalAudioQuery::default()
-        })
+        let input = universal_audio_input_with_path_container(
+            &UniversalAudioQuery {
+                media_source_id: Some("2".to_owned()),
+                transcoding_protocol: Some("hls".to_owned()),
+                transcoding_container: Some("ts".to_owned()),
+                audio_codec: Some("mp3".to_owned()),
+                max_streaming_bitrate: Some(320_000),
+                play_session_id: Some("play-1".to_owned()),
+                ..UniversalAudioQuery::default()
+            },
+            None,
+        )
         .expect("hls universal audio query should normalize");
 
         assert!(input.requests_hls_transcode());

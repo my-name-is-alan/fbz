@@ -35,8 +35,9 @@ use crate::{
         target_config::{redacted_target_config, secretize_target_config},
     },
     scan::service::{ScanError, ScanRunSummary, ScanService},
-    scheduler::service::{
-        SchedulerError, SchedulerRunSummary, SchedulerService, default_worker_id,
+    scheduler::{
+        repository::{PartitionArchiveCandidate, QueueStatsRollupRecord, SchedulerRepository},
+        service::{SchedulerError, SchedulerRunSummary, SchedulerService, default_worker_id},
     },
     state::AppState,
     transcode::{
@@ -59,6 +60,9 @@ const MAX_PLUGIN_HOST_API_CALLS_LIST_LIMIT: i64 = 1_000;
 const MAX_SCHEDULED_TASKS_LIST_LIMIT: i64 = 200;
 const MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT: i64 = 500;
 const MAX_TRANSCODE_SESSIONS_LIST_LIMIT: i64 = 200;
+const MAX_PARTITION_ROLLUPS_LIST_LIMIT: i64 = 1_000;
+const MAX_PARTITION_ARCHIVE_CANDIDATES_LIST_LIMIT: i64 = 500;
+const MAX_PARTITION_RETENTION_MONTHS: i32 = 120;
 const DEFAULT_LIBRARY_METADATA_REFRESH_LIMIT: i64 = 1_000;
 const MAX_LIBRARY_METADATA_REFRESH_LIMIT: i64 = 50_000;
 const MAX_NOTIFICATION_TARGET_NAME_LEN: usize = 128;
@@ -162,6 +166,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/admin/event-stream-mirror/status",
             get(event_stream_mirror_status),
+        )
+        .route(
+            "/api/admin/partition-maintenance/rollups",
+            get(list_partition_rollups),
+        )
+        .route(
+            "/api/admin/partition-maintenance/archive-candidates",
+            get(list_partition_archive_candidates),
         )
         .route(
             "/api/admin/plugin-dispatches/{dispatch_id}/replay",
@@ -671,6 +683,46 @@ pub struct EventStreamMirrorStatusDto {
     pub oldest_unmirrored_created_at: Option<String>,
     pub next_retry_at: Option<String>,
     pub last_error: Option<String>,
+    pub counts_are_exact: bool,
+    pub sample_limit: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionRollupQueryDto {
+    pub table_name: Option<String>,
+    pub from_bucket_date: Option<String>,
+    pub to_bucket_date: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionRollupDto {
+    pub bucket_date: String,
+    pub table_name: String,
+    pub status: String,
+    pub row_count: i64,
+    pub finalized_at: String,
+    pub source_partition: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionArchiveCandidateQueryDto {
+    pub retention_months: Option<i32>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionArchiveCandidateDto {
+    pub table_name: String,
+    pub partition_name: String,
+    pub bucket_date: String,
+    pub partition_end: String,
+    pub rollup_statuses: i64,
+    pub rollup_rows: i64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1894,6 +1946,84 @@ pub async fn event_stream_mirror_status(
     )))
 }
 
+pub async fn list_partition_rollups(
+    State(state): State<AppState>,
+    Query(query): Query<PartitionRollupQueryDto>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<PartitionRollupDto>>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let table_name = query
+        .table_name
+        .as_deref()
+        .map(validate_partition_rollup_table_name)
+        .transpose()?
+        .map(str::to_owned);
+    let from_bucket_date = query
+        .from_bucket_date
+        .as_deref()
+        .map(validate_partition_bucket_date)
+        .transpose()?
+        .unwrap_or("1970-01-01");
+    let to_bucket_date = query
+        .to_bucket_date
+        .as_deref()
+        .map(validate_partition_bucket_date)
+        .transpose()?
+        .unwrap_or("9999-12-31");
+    if from_bucket_date >= to_bucket_date {
+        return Err(AppError::unprocessable(
+            "fromBucketDate must be earlier than toBucketDate",
+        ));
+    }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let records = SchedulerRepository::new(database.clone())
+        .list_queue_stats_rollup(
+            table_name.as_deref(),
+            from_bucket_date,
+            to_bucket_date,
+            partition_rollup_list_limit(query.limit),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list partition rollups: {err}")))?;
+
+    Ok(Json(
+        records.into_iter().map(PartitionRollupDto::from).collect(),
+    ))
+}
+
+pub async fn list_partition_archive_candidates(
+    State(state): State<AppState>,
+    Query(query): Query<PartitionArchiveCandidateQueryDto>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<PartitionArchiveCandidateDto>>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let records = SchedulerRepository::new(database.clone())
+        .list_partition_archive_candidates(
+            validate_partition_retention_months(query.retention_months),
+            partition_archive_candidate_list_limit(query.limit),
+        )
+        .await
+        .map_err(|err| {
+            AppError::internal(format!(
+                "failed to list partition archive candidates: {err}"
+            ))
+        })?;
+
+    Ok(Json(
+        records
+            .into_iter()
+            .map(PartitionArchiveCandidateDto::from)
+            .collect(),
+    ))
+}
+
 pub async fn replay_plugin_dispatch(
     State(state): State<AppState>,
     Path(dispatch_id): Path<String>,
@@ -2218,6 +2348,22 @@ fn transcode_session_list_limit(value: Option<i64>) -> i64 {
         .clamp(1, MAX_TRANSCODE_SESSIONS_LIST_LIMIT)
 }
 
+fn partition_rollup_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_PARTITION_ROLLUPS_LIST_LIMIT)
+        .clamp(1, MAX_PARTITION_ROLLUPS_LIST_LIMIT)
+}
+
+fn partition_archive_candidate_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_PARTITION_ARCHIVE_CANDIDATES_LIST_LIMIT)
+        .clamp(1, MAX_PARTITION_ARCHIVE_CANDIDATES_LIST_LIMIT)
+}
+
+fn validate_partition_retention_months(value: Option<i32>) -> i32 {
+    value.unwrap_or(6).clamp(0, MAX_PARTITION_RETENTION_MONTHS)
+}
+
 fn notification_request_list_limit(value: Option<i64>) -> i64 {
     value
         .unwrap_or(MAX_NOTIFICATION_REQUESTS_LIST_LIMIT)
@@ -2382,6 +2528,74 @@ fn validate_transcode_hardware_acceleration(value: &str) -> Result<&str, AppErro
         ));
     }
     Ok(value)
+}
+
+fn validate_partition_rollup_table_name(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("tableName", value, 64)?;
+    if matches!(
+        value,
+        "job_events"
+            | "plugin_host_api_calls"
+            | "scheduled_task_runs"
+            | "job_runs"
+            | "playback_sessions"
+    ) {
+        return Ok(value);
+    }
+
+    Err(AppError::unprocessable(
+        "tableName must be one of job_events, plugin_host_api_calls, scheduled_task_runs, job_runs, or playback_sessions",
+    ))
+}
+
+fn validate_partition_bucket_date(value: &str) -> Result<&str, AppError> {
+    let value = validate_bounded_text("bucketDate", value, 10)?;
+    let bytes = value.as_bytes();
+    let has_date_shape = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit());
+    if !has_date_shape {
+        return Err(AppError::unprocessable(
+            "bucketDate must use YYYY-MM-DD format",
+        ));
+    }
+
+    let year = parse_date_component("bucketDate", &value[0..4])?;
+    let month = parse_date_component("bucketDate", &value[5..7])?;
+    let day = parse_date_component("bucketDate", &value[8..10])?;
+    if !(1..=12).contains(&month) {
+        return Err(AppError::unprocessable("bucketDate month is invalid"));
+    }
+    let max_day = days_in_month(year, month);
+    if day == 0 || day > max_day {
+        return Err(AppError::unprocessable("bucketDate day is invalid"));
+    }
+
+    Ok(value)
+}
+
+fn parse_date_component(field: &str, value: &str) -> Result<i32, AppError> {
+    value
+        .parse::<i32>()
+        .map_err(|_| AppError::unprocessable(format!("{field} must use YYYY-MM-DD format")))
+}
+
+fn days_in_month(year: i32, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn validate_positive_i64_cursor(field: &str, value: &str) -> Result<i64, AppError> {
@@ -2916,6 +3130,34 @@ impl EventStreamMirrorStatusDto {
             oldest_unmirrored_created_at: record.oldest_unmirrored_created_at,
             next_retry_at: record.next_retry_at,
             last_error: record.last_error,
+            counts_are_exact: record.counts_are_exact,
+            sample_limit: record.sample_limit,
+        }
+    }
+}
+
+impl From<QueueStatsRollupRecord> for PartitionRollupDto {
+    fn from(record: QueueStatsRollupRecord) -> Self {
+        Self {
+            bucket_date: record.bucket_date,
+            table_name: record.table_name,
+            status: record.status,
+            row_count: record.row_count,
+            finalized_at: record.finalized_at,
+            source_partition: record.source_partition,
+        }
+    }
+}
+
+impl From<PartitionArchiveCandidate> for PartitionArchiveCandidateDto {
+    fn from(record: PartitionArchiveCandidate) -> Self {
+        Self {
+            table_name: record.table_name,
+            partition_name: record.partition_name,
+            bucket_date: record.bucket_date,
+            partition_end: record.partition_end,
+            rollup_statuses: record.rollup_statuses,
+            rollup_rows: record.rollup_rows,
         }
     }
 }
@@ -3153,6 +3395,66 @@ mod tests {
         assert!(routes.contains("list_plugin_host_api_calls_for_run_page"));
         assert!(routes.contains("plugin_host_api_call_limit(query.limit)"));
         assert!(routes.contains("pagination_headers(page.has_more, page.next_cursor.as_deref())"));
+    }
+
+    #[test]
+    fn partition_maintenance_admin_routes_are_read_only_and_bounded() {
+        let routes = include_str!("routes.rs");
+        let production_source = routes
+            .split("#[cfg(test)]")
+            .next()
+            .expect("routes source should include production section");
+
+        assert!(production_source.contains("\"/api/admin/partition-maintenance/rollups\""));
+        assert!(production_source.contains("get(list_partition_rollups)"));
+        assert!(
+            production_source.contains("\"/api/admin/partition-maintenance/archive-candidates\"")
+        );
+        assert!(production_source.contains("get(list_partition_archive_candidates)"));
+        assert!(production_source.contains("pub struct PartitionRollupQueryDto"));
+        assert!(production_source.contains("pub struct PartitionArchiveCandidateQueryDto"));
+        assert!(production_source.contains("PartitionRollupDto"));
+        assert!(production_source.contains("PartitionArchiveCandidateDto"));
+        assert!(production_source.contains("partition_rollup_list_limit(query.limit)"));
+        assert!(production_source.contains("partition_archive_candidate_list_limit(query.limit)"));
+        assert!(production_source.contains("validate_partition_rollup_table_name"));
+        assert!(production_source.contains("validate_partition_retention_months"));
+        assert!(production_source.contains("SchedulerRepository::new(database.clone())"));
+        assert!(production_source.contains(".list_queue_stats_rollup("));
+        assert!(production_source.contains(".list_partition_archive_candidates("));
+        assert!(partition_rollup_list_limit(Some(10_000)) <= 1_000);
+        assert!(partition_archive_candidate_list_limit(Some(10_000)) <= 500);
+    }
+
+    #[test]
+    fn partition_maintenance_query_guards_are_bounded() {
+        assert_eq!(
+            partition_rollup_list_limit(None),
+            MAX_PARTITION_ROLLUPS_LIST_LIMIT
+        );
+        assert_eq!(partition_rollup_list_limit(Some(0)), 1);
+        assert_eq!(
+            partition_archive_candidate_list_limit(None),
+            MAX_PARTITION_ARCHIVE_CANDIDATES_LIST_LIMIT
+        );
+        assert_eq!(partition_archive_candidate_list_limit(Some(0)), 1);
+        assert_eq!(validate_partition_retention_months(None), 6);
+        assert_eq!(validate_partition_retention_months(Some(-10)), 0);
+        assert_eq!(
+            validate_partition_retention_months(Some(MAX_PARTITION_RETENTION_MONTHS + 10)),
+            MAX_PARTITION_RETENTION_MONTHS
+        );
+        assert_eq!(
+            validate_partition_rollup_table_name("job_events").unwrap(),
+            "job_events"
+        );
+        assert!(validate_partition_rollup_table_name("event_outbox").is_err());
+        assert_eq!(
+            validate_partition_bucket_date("2026-06-01").unwrap(),
+            "2026-06-01"
+        );
+        assert!(validate_partition_bucket_date("2026-02-30").is_err());
+        assert!(validate_partition_bucket_date("2026-6-1").is_err());
     }
 
     #[test]
@@ -3800,6 +4102,35 @@ mod tests {
         assert_eq!(dto.config["headers"]["x-api-key"], "[redacted]");
         assert_eq!(dto.delivery_count, 2);
         assert_eq!(dto.failure_count, 1);
+    }
+
+    #[test]
+    fn event_stream_mirror_status_dto_exposes_count_precision() {
+        let mut config = Config::default();
+        config.redis.event_stream_batch_size = 42;
+        let dto = EventStreamMirrorStatusDto::from_config_and_record(
+            &config,
+            EventStreamMirrorStatusRecord {
+                unmirrored_count: 10_000,
+                claimable_count: 3,
+                locked_count: 2,
+                backoff_count: 1,
+                failed_count: 4,
+                max_attempts: 5,
+                oldest_unmirrored_created_at: Some("2026-06-01T00:00:00Z".to_owned()),
+                next_retry_at: None,
+                last_error: Some("redis unavailable".to_owned()),
+                counts_are_exact: false,
+                sample_limit: 10_000,
+            },
+        );
+
+        let json = serde_json::to_value(dto).expect("dto should serialize");
+
+        assert_eq!(json["batchSize"], 42);
+        assert_eq!(json["unmirroredCount"], 10_000);
+        assert_eq!(json["countsAreExact"], false);
+        assert_eq!(json["sampleLimit"], 10_000);
     }
 
     #[test]

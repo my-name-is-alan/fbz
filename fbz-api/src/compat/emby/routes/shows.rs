@@ -26,40 +26,65 @@ use super::{
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ShowItemsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "seasonId", alias = "season_id")]
     pub season_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct NextUpQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "seriesId", alias = "series_id")]
     pub series_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UpcomingQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
 }
 
@@ -263,8 +288,63 @@ async fn authenticated_query_user(
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
+
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn show_item_queries_accept_lower_camel_client_fields() {
+        let uri = "/Shows/series-1/Seasons?userId=user-1&seasonId=season-1&startIndex=10&limit=25&includeItemTypes=Season&sortBy=SortName&sortOrder=Descending&fields=Overview"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<ShowItemsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.season_id.as_deref(), Some("season-1"));
+        assert_eq!(query.start_index, Some(10));
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.include_item_types.as_deref(), Some("Season"));
+        assert_eq!(query.sort_by.as_deref(), Some("SortName"));
+        assert_eq!(query.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(query.fields.as_deref(), Some("Overview"));
+    }
+
+    #[test]
+    fn next_up_query_accepts_lower_camel_client_fields() {
+        let uri = "/Shows/NextUp?userId=user-1&seriesId=series-1&parentId=library-1&startIndex=10&limit=25&includeItemTypes=Episode&sortBy=IndexNumber&sortOrder=Descending&fields=Overview"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<NextUpQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.series_id.as_deref(), Some("series-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.start_index, Some(10));
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.include_item_types.as_deref(), Some("Episode"));
+        assert_eq!(query.sort_by.as_deref(), Some("IndexNumber"));
+        assert_eq!(query.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(query.fields.as_deref(), Some("Overview"));
+    }
+
+    #[test]
+    fn upcoming_query_accepts_lower_camel_client_fields() {
+        let uri = "/Shows/Upcoming?userId=user-1&parentId=library-1&startIndex=10&limit=25&includeItemTypes=Episode&sortBy=PremiereDate&sortOrder=Ascending&fields=Overview"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<UpcomingQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.start_index, Some(10));
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.include_item_types.as_deref(), Some("Episode"));
+        assert_eq!(query.sort_by.as_deref(), Some("PremiereDate"));
+        assert_eq!(query.sort_order.as_deref(), Some("Ascending"));
+        assert_eq!(query.fields.as_deref(), Some("Overview"));
+    }
 
     #[test]
     fn upcoming_query_parses_official_pascal_case_fields() {

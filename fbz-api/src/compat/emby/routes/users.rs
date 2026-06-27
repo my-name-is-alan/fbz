@@ -35,39 +35,56 @@ use super::access::authenticate_request_user;
 const USER_LOGIN_EVENT: &str = "user.login";
 const DEFAULT_USERS_QUERY_LIMIT: i64 = 100;
 const MAX_USERS_QUERY_LIMIT: i64 = 100;
+const MAX_USERS_QUERY_START_INDEX: i64 = 10_000;
 const MAX_USERS_QUERY_TEXT_LEN: usize = 128;
 const MAX_EMBY_USER_WRITE_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UsersQuery {
+    #[serde(alias = "isHidden", alias = "is_hidden")]
     pub is_hidden: Option<bool>,
+    #[serde(alias = "isDisabled", alias = "is_disabled")]
     pub is_disabled: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<i64>,
+    #[serde(alias = "limit")]
     pub limit: Option<i64>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CreateUserByNameDto {
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "copyFromUserId", alias = "copy_from_user_id")]
     pub copy_from_user_id: Option<String>,
+    #[serde(alias = "userCopyOptions", alias = "user_copy_options")]
     pub user_copy_options: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UpdateUserPasswordDto {
+    #[serde(alias = "id")]
     pub id: Option<String>,
+    #[serde(alias = "newPw", alias = "new_pw")]
     pub new_pw: Option<String>,
+    #[serde(alias = "resetPassword", alias = "reset_password")]
     pub reset_password: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ForgotPasswordRequestDto {
+    #[serde(alias = "enteredUsername", alias = "entered_username")]
     pub entered_username: Option<String>,
 }
 
@@ -82,6 +99,7 @@ pub struct ForgotPasswordResultDto {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ForgotPasswordPinDto {
+    #[serde(alias = "pin")]
     pub pin: Option<String>,
 }
 
@@ -250,6 +268,7 @@ pub async fn update_user(
     authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
     let _user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let _payload = parse_user_management_generic_body(&headers, &body)?;
 
     Err(user_mutation_disabled_error())
 }
@@ -264,6 +283,7 @@ pub async fn update_user_configuration(
     authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
     let _user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let _payload = parse_user_management_generic_body(&headers, &body)?;
 
     Err(user_mutation_disabled_error())
 }
@@ -278,6 +298,7 @@ pub async fn update_user_configuration_partial(
     authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
     let _user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let _payload = parse_user_management_generic_body(&headers, &body)?;
 
     Err(user_mutation_disabled_error())
 }
@@ -292,6 +313,7 @@ pub async fn update_user_policy(
     authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
     let _user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let _payload = parse_user_management_generic_body(&headers, &body)?;
 
     Err(user_mutation_disabled_error())
 }
@@ -307,6 +329,21 @@ pub async fn update_user_password(
     ensure_user_write_body_size(&body)?;
     let request: UpdateUserPasswordDto = parse_emby_body(&headers, &body)?;
     let _input = password_update_input(&user_id, request)?;
+
+    Err(user_mutation_disabled_error())
+}
+
+pub async fn update_easy_password(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<(), AppError> {
+    authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
+    ensure_user_write_body_size(&body)?;
+    let request: UpdateUserPasswordDto = parse_emby_body(&headers, &body)?;
+    let _input = easy_password_update_input(&user_id, request)?;
 
     Err(user_mutation_disabled_error())
 }
@@ -562,6 +599,13 @@ fn password_update_input(
     })
 }
 
+fn easy_password_update_input(
+    path_user_id: &str,
+    request: UpdateUserPasswordDto,
+) -> Result<PasswordUpdateInput, AppError> {
+    password_update_input(path_user_id, request)
+}
+
 fn ensure_user_write_body_size(body: &Bytes) -> Result<(), AppError> {
     if body.len() > MAX_EMBY_USER_WRITE_BODY_BYTES {
         return Err(AppError::unprocessable(format!(
@@ -570,6 +614,13 @@ fn ensure_user_write_body_size(body: &Bytes) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn parse_user_management_generic_body(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<Value, AppError> {
+    parse_emby_body(headers, body)
 }
 
 fn user_mutation_disabled_error() -> AppError {
@@ -681,9 +732,15 @@ fn auth_service_error_to_app_error(error: AuthServiceError) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header::CONTENT_TYPE};
 
     use super::*;
+
+    fn json_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+        headers
+    }
 
     #[test]
     fn device_policy_errors_are_forbidden() {
@@ -777,6 +834,53 @@ mod tests {
     }
 
     #[test]
+    fn users_query_accepts_lower_camel_and_snake_case_filters() {
+        let lower_camel_uri: Uri = "/emby/Users/Query?isHidden=false&isDisabled=true&startIndex=3&limit=500&nameStartsWithOrGreater=Bob&sortOrder=Descending"
+            .parse()
+            .unwrap();
+        let Query(lower_camel) = Query::<UsersQuery>::try_from_uri(&lower_camel_uri).unwrap();
+        let lower_input = users_query_input(lower_camel);
+
+        assert_eq!(lower_input.is_hidden, Some(false));
+        assert_eq!(lower_input.is_disabled, Some(true));
+        assert_eq!(lower_input.start_index, 3);
+        assert_eq!(lower_input.limit, MAX_USERS_QUERY_LIMIT);
+        assert_eq!(
+            lower_input.name_starts_with_or_greater.as_deref(),
+            Some("Bob")
+        );
+        assert!(lower_input.sort_descending);
+
+        let snake_case_uri: Uri = "/Users/Prefixes?is_hidden=true&is_disabled=false&start_index=2&limit=20&name_starts_with_or_greater=Alice&sort_order=Ascending"
+            .parse()
+            .unwrap();
+        let Query(snake_case) = Query::<UsersQuery>::try_from_uri(&snake_case_uri).unwrap();
+        let snake_input = users_query_input(snake_case);
+
+        assert_eq!(snake_input.is_hidden, Some(true));
+        assert_eq!(snake_input.is_disabled, Some(false));
+        assert_eq!(snake_input.start_index, 2);
+        assert_eq!(snake_input.limit, 20);
+        assert_eq!(
+            snake_input.name_starts_with_or_greater.as_deref(),
+            Some("Alice")
+        );
+        assert!(!snake_input.sort_descending);
+    }
+
+    #[test]
+    fn users_query_clamps_pathologically_large_start_index() {
+        let input = users_query_input(UsersQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..UsersQuery::default()
+        });
+
+        assert_eq!(input.start_index, 10_000);
+        assert_eq!(input.limit, 50);
+    }
+
+    #[test]
     fn forgot_password_request_normalizes_username() {
         let request = serde_json::from_value::<ForgotPasswordRequestDto>(json!({
             "EnteredUsername": "  Alice  "
@@ -795,6 +899,107 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn user_management_bodies_accept_lower_camel_and_snake_case_fields() {
+        let forgot = serde_json::from_value::<ForgotPasswordRequestDto>(json!({
+            "enteredUsername": "  Alice  "
+        }))
+        .expect("lower-camel forgot password request should deserialize");
+        assert_eq!(
+            forgot_password_request_input(forgot)
+                .expect("forgot password username should normalize")
+                .entered_username,
+            "Alice"
+        );
+
+        let pin = serde_json::from_value::<ForgotPasswordPinDto>(json!({
+            "pin": "  123456  "
+        }))
+        .expect("lowercase forgot password pin should deserialize");
+        assert_eq!(
+            forgot_password_pin_input(pin)
+                .expect("forgot password pin should normalize")
+                .pin,
+            "123456"
+        );
+
+        let create = serde_json::from_value::<CreateUserByNameDto>(json!({
+            "name": "  Bob  ",
+            "copyFromUserId": " template-user ",
+            "userCopyOptions": ["UserPolicy"]
+        }))
+        .expect("lower-camel create user request should deserialize");
+        let create_input = create_user_input(create).expect("create user input should normalize");
+        assert_eq!(create_input.name, "Bob");
+        assert_eq!(
+            create_input.copy_from_user_id.as_deref(),
+            Some("template-user")
+        );
+        assert_eq!(create_input.user_copy_options, ["UserPolicy"]);
+
+        let snake_create = serde_json::from_value::<CreateUserByNameDto>(json!({
+            "copy_from_user_id": " template-user ",
+            "user_copy_options": ["UserConfiguration"],
+            "name": "  Carol  "
+        }))
+        .expect("snake-case create user request should deserialize");
+        let snake_create_input =
+            create_user_input(snake_create).expect("create user input should normalize");
+        assert_eq!(snake_create_input.name, "Carol");
+        assert_eq!(
+            snake_create_input.copy_from_user_id.as_deref(),
+            Some("template-user")
+        );
+        assert_eq!(snake_create_input.user_copy_options, ["UserConfiguration"]);
+
+        let password = serde_json::from_value::<UpdateUserPasswordDto>(json!({
+            "id": " user-1 ",
+            "newPw": "  secret  ",
+            "resetPassword": false
+        }))
+        .expect("lower-camel password request should deserialize");
+        let password_input = password_update_input("user-1", password)
+            .expect("password update input should normalize");
+        assert_eq!(password_input.new_password.as_deref(), Some("secret"));
+        assert!(!password_input.reset_password);
+
+        let snake_password = serde_json::from_value::<UpdateUserPasswordDto>(json!({
+            "id": " user-1 ",
+            "new_pw": "  secret2  ",
+            "reset_password": false
+        }))
+        .expect("snake-case password request should deserialize");
+        let snake_password_input = password_update_input("user-1", snake_password)
+            .expect("password update input should normalize");
+        assert_eq!(
+            snake_password_input.new_password.as_deref(),
+            Some("secret2")
+        );
+        assert!(!snake_password_input.reset_password);
+
+        let easy_password = serde_json::from_value::<UpdateUserPasswordDto>(json!({
+            "id": " user-1 ",
+            "newPw": "  1234  ",
+            "resetPassword": false
+        }))
+        .expect("lower-camel easy password request should deserialize");
+        let easy_password_input = easy_password_update_input("user-1", easy_password)
+            .expect("easy password update input should normalize");
+        assert_eq!(easy_password_input.new_password.as_deref(), Some("1234"));
+        assert!(!easy_password_input.reset_password);
+    }
+
+    #[test]
+    fn user_management_generic_write_body_rejects_malformed_json() {
+        let headers = json_headers();
+        let body = Bytes::from_static(br#"{"Id":"user-1""#);
+
+        let err = parse_user_management_generic_body(&headers, &body).unwrap_err();
+
+        assert_eq!(err.status_code(), http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(err.message().contains("invalid JSON request body"));
     }
 
     #[test]
@@ -958,7 +1163,7 @@ fn users_query_input(query: UsersQuery) -> UsersQueryFilter {
         start_index: query
             .start_index
             .unwrap_or_default()
-            .clamp(0, i64::from(u32::MAX)),
+            .clamp(0, MAX_USERS_QUERY_START_INDEX),
         limit: query
             .limit
             .unwrap_or(DEFAULT_USERS_QUERY_LIMIT)

@@ -13,6 +13,7 @@ pub enum AppError {
     Forbidden { message: String },
     NotFound { message: String },
     Conflict { message: String },
+    RangeNotSatisfiable { message: String },
     TooManyRequests { message: String },
     UnprocessableEntity { message: String },
     Internal { message: String },
@@ -55,6 +56,12 @@ impl AppError {
         }
     }
 
+    pub fn range_not_satisfiable(message: impl Into<String>) -> Self {
+        Self::RangeNotSatisfiable {
+            message: message.into(),
+        }
+    }
+
     pub fn too_many_requests(message: impl Into<String>) -> Self {
         Self::TooManyRequests {
             message: message.into(),
@@ -79,6 +86,7 @@ impl AppError {
             Self::Forbidden { .. } => StatusCode::FORBIDDEN,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::UnprocessableEntity { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -91,6 +99,7 @@ impl AppError {
             Self::Forbidden { .. } => "forbidden",
             Self::NotFound { .. } => "not_found",
             Self::Conflict { .. } => "conflict",
+            Self::RangeNotSatisfiable { .. } => "range_not_satisfiable",
             Self::TooManyRequests { .. } => "too_many_requests",
             Self::UnprocessableEntity { .. } => "unprocessable_entity",
             Self::Internal { .. } => "internal_server_error",
@@ -103,6 +112,7 @@ impl AppError {
             | Self::Forbidden { message }
             | Self::NotFound { message }
             | Self::Conflict { message }
+            | Self::RangeNotSatisfiable { message }
             | Self::TooManyRequests { message }
             | Self::UnprocessableEntity { message }
             | Self::Internal { message } => message,
@@ -149,6 +159,10 @@ mod tests {
             (AppError::not_found("missing"), StatusCode::NOT_FOUND),
             (AppError::conflict("exists"), StatusCode::CONFLICT),
             (
+                AppError::range_not_satisfiable("outside resource length"),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+            ),
+            (
                 AppError::too_many_requests("rate limited"),
                 StatusCode::TOO_MANY_REQUESTS,
             ),
@@ -177,6 +191,10 @@ mod tests {
         assert_eq!(AppError::forbidden("denied").code(), "forbidden");
         assert_eq!(AppError::not_found("missing").code(), "not_found");
         assert_eq!(AppError::conflict("exists").code(), "conflict");
+        assert_eq!(
+            AppError::range_not_satisfiable("outside resource length").code(),
+            "range_not_satisfiable"
+        );
         assert_eq!(
             AppError::too_many_requests("rate limited").code(),
             "too_many_requests"

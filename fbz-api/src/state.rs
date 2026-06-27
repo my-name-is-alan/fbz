@@ -17,78 +17,438 @@ pub struct AppState {
 }
 
 const READINESS_QUEUE_SUMMARY_SQL: &str = r#"
-with job_counts as (
-    select count(*) filter (where status = 'queued')::bigint as queued,
-           count(*) filter (where status = 'running')::bigint as running,
-           count(*) filter (where status = 'failed')::bigint as failed
-    from jobs
-    where status in ('queued', 'running', 'failed')
+with readiness_sample_limit as (
+    select 10000::bigint as lower_bound_count
+),
+job_queue_sample as (
+    select 'queued'::text as status
+    from (
+        select 1
+        from jobs
+        where status = 'queued'
+        limit 10001
+    ) queued_jobs
+    union all
+    select 'running'::text as status
+    from (
+        select 1
+        from jobs
+        where status = 'running'
+        limit 10001
+    ) running_jobs
+    union all
+    select 'failed'::text as status
+    from (
+        select 1
+        from jobs
+        where status = 'failed'
+        limit 10001
+    ) failed_jobs
+    union all
+    select 'expired_lease'::text as status
+    from (
+        select 1
+        from jobs
+        where status = 'running'
+          and locked_until <= now()
+        limit 10001
+    ) expired_job_leases
+),
+job_counts as (
+    select least(
+               count(*) filter (where status = 'queued'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as queued,
+           least(
+               count(*) filter (where status = 'running'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as running,
+           least(
+               count(*) filter (where status = 'failed'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as failed,
+           least(
+               count(*) filter (where status = 'expired_lease'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as expired_leases
+    from job_queue_sample
+),
+event_outbox_sample as (
+    select 'pending'::text as status
+    from (
+        select 1
+        from event_outbox
+        where status = 'pending'
+        limit 10001
+    ) pending_events
+    union all
+    select 'delivering'::text as status
+    from (
+        select 1
+        from event_outbox
+        where status = 'delivering'
+        limit 10001
+    ) delivering_events
+    union all
+    select 'failed'::text as status
+    from (
+        select 1
+        from event_outbox
+        where status = 'failed'
+        limit 10001
+    ) failed_events
+    union all
+    select 'expired_lease'::text as status
+    from (
+        select 1
+        from event_outbox
+        where status = 'delivering'
+          and locked_until <= now()
+        limit 10001
+    ) expired_event_leases
 ),
 event_counts as (
-    select count(*) filter (where status = 'pending')::bigint as queued,
-           count(*) filter (where status = 'delivering')::bigint as running,
-           count(*) filter (where status = 'failed')::bigint as failed
-    from event_outbox
-    where status in ('pending', 'delivering', 'failed')
+    select least(
+               count(*) filter (where status = 'pending'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as queued,
+           least(
+               count(*) filter (where status = 'delivering'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as running,
+           least(
+               count(*) filter (where status = 'failed'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as failed,
+           least(
+               count(*) filter (where status = 'expired_lease'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as expired_leases
+    from event_outbox_sample
+),
+transcode_queue_sample as (
+    select 'queued'::text as status
+    from (
+        select 1
+        from transcoding_sessions
+        where status = 'queued'
+        limit 10001
+    ) queued_transcodes
+    union all
+    select 'running'::text as status
+    from (
+        select 1
+        from transcoding_sessions
+        where status = 'running'
+        limit 10001
+    ) running_transcodes
+    union all
+    select 'failed'::text as status
+    from (
+        select 1
+        from transcoding_sessions
+        where status = 'failed'
+        limit 10001
+    ) failed_transcodes
+    union all
+    select 'expired_lease'::text as status
+    from (
+        select 1
+        from transcoding_sessions
+        where status = 'running'
+          and lease_expires_at <= now()
+        limit 10001
+    ) expired_transcode_leases
 ),
 transcode_counts as (
-    select count(*) filter (where status = 'queued')::bigint as queued,
-           count(*) filter (where status = 'running')::bigint as running,
-           count(*) filter (where status = 'failed')::bigint as failed
-    from transcoding_sessions
-    where status in ('queued', 'running', 'failed')
+    select least(
+               count(*) filter (where status = 'queued'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as queued,
+           least(
+               count(*) filter (where status = 'running'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as running,
+           least(
+               count(*) filter (where status = 'failed'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as failed,
+           least(
+               count(*) filter (where status = 'expired_lease'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as expired_leases
+    from transcode_queue_sample
+),
+notification_queue_sample as (
+    select 'queued'::text as status
+    from (
+        select 1
+        from plugin_notification_requests
+        where status = 'queued'
+        limit 10001
+    ) queued_notifications
+    union all
+    select 'delivering'::text as status
+    from (
+        select 1
+        from plugin_notification_requests
+        where status = 'delivering'
+        limit 10001
+    ) delivering_notifications
+    union all
+    select 'failed'::text as status
+    from (
+        select 1
+        from plugin_notification_requests
+        where status = 'failed'
+        limit 10001
+    ) failed_notifications
 ),
 notification_counts as (
-    select count(*) filter (where status = 'queued')::bigint as queued,
-           count(*) filter (where status = 'delivering')::bigint as running,
-           count(*) filter (where status = 'failed')::bigint as failed
-    from plugin_notification_requests
-    where status in ('queued', 'delivering', 'failed')
+    select least(
+               count(*) filter (where status = 'queued'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as queued,
+           least(
+               count(*) filter (where status = 'delivering'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as running,
+           least(
+               count(*) filter (where status = 'failed'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as failed,
+           0::bigint as expired_leases
+    from notification_queue_sample
+),
+event_stream_mirror_sample as (
+    select 'unmirrored'::text as status,
+           stream_mirror_attempts
+    from (
+        select stream_mirror_attempts
+        from event_outbox
+        where stream_mirrored_at is null
+        limit 10001
+    ) unmirrored_events
+    union all
+    select 'claimable'::text as status,
+           stream_mirror_attempts
+    from (
+        select stream_mirror_attempts
+        from event_outbox
+        where stream_mirrored_at is null
+          and (
+              stream_mirror_locked_until is null
+              or stream_mirror_locked_until <= now()
+          )
+        limit 10001
+    ) claimable_events
+    union all
+    select 'locked'::text as status,
+           stream_mirror_attempts
+    from (
+        select stream_mirror_attempts
+        from event_outbox
+        where stream_mirrored_at is null
+          and stream_mirror_locked_by is not null
+          and stream_mirror_locked_until > now()
+        limit 10001
+    ) locked_events
+    union all
+    select 'backoff'::text as status,
+           stream_mirror_attempts
+    from (
+        select stream_mirror_attempts
+        from event_outbox
+        where stream_mirrored_at is null
+          and stream_mirror_locked_by is null
+          and stream_mirror_locked_until > now()
+        limit 10001
+    ) backoff_events
+    union all
+    select 'failed'::text as status,
+           stream_mirror_attempts
+    from (
+        select stream_mirror_attempts
+        from event_outbox
+        where stream_mirrored_at is null
+          and stream_mirror_last_error is not null
+        limit 10001
+    ) failed_mirror_events
+    union all
+    select 'expired_lease'::text as status,
+           stream_mirror_attempts
+    from (
+        select stream_mirror_attempts
+        from event_outbox
+        where stream_mirrored_at is null
+          and stream_mirror_locked_by is not null
+          and stream_mirror_locked_until <= now()
+        limit 10001
+    ) expired_mirror_leases
 ),
 event_stream_mirror_counts as (
-    select count(*)::bigint as unmirrored,
-           count(*) filter (
-               where stream_mirror_locked_until is null
-                  or stream_mirror_locked_until <= now()
+    select least(
+               count(*) filter (where status = 'unmirrored'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as unmirrored,
+           least(
+               count(*) filter (where status = 'claimable'),
+               (select lower_bound_count from readiness_sample_limit)
            )::bigint as claimable,
-           count(*) filter (
-               where stream_mirror_locked_by is not null
-                 and stream_mirror_locked_until > now()
+           least(
+               count(*) filter (where status = 'locked'),
+               (select lower_bound_count from readiness_sample_limit)
            )::bigint as locked,
-           count(*) filter (
-               where stream_mirror_locked_by is null
-                 and stream_mirror_locked_until > now()
+           least(
+               count(*) filter (where status = 'backoff'),
+               (select lower_bound_count from readiness_sample_limit)
            )::bigint as backoff,
-           count(*) filter (
-               where stream_mirror_last_error is not null
+           least(
+               count(*) filter (where status = 'failed'),
+               (select lower_bound_count from readiness_sample_limit)
            )::bigint as failed,
-           coalesce(max(stream_mirror_attempts), 0)::integer as max_attempts
-    from event_outbox
-    where stream_mirrored_at is null
+           coalesce(
+               max(stream_mirror_attempts) filter (where status = 'unmirrored'),
+               0
+           )::integer as max_attempts,
+           least(
+               count(*) filter (where status = 'expired_lease'),
+               (select lower_bound_count from readiness_sample_limit)
+           )::bigint as expired_leases
+    from event_stream_mirror_sample
 )
 select job_counts.queued as jobs_queued,
        job_counts.running as jobs_running,
        job_counts.failed as jobs_failed,
+       job_counts.expired_leases as jobs_expired_leases,
        event_counts.queued as event_outbox_queued,
        event_counts.running as event_outbox_running,
        event_counts.failed as event_outbox_failed,
+       event_counts.expired_leases as event_outbox_expired_leases,
        transcode_counts.queued as transcodes_queued,
        transcode_counts.running as transcodes_running,
        transcode_counts.failed as transcodes_failed,
+       transcode_counts.expired_leases as transcodes_expired_leases,
        notification_counts.queued as notifications_queued,
        notification_counts.running as notifications_running,
        notification_counts.failed as notifications_failed,
+       notification_counts.expired_leases as notifications_expired_leases,
        event_stream_mirror_counts.unmirrored as event_stream_mirror_unmirrored,
        event_stream_mirror_counts.claimable as event_stream_mirror_claimable,
        event_stream_mirror_counts.locked as event_stream_mirror_locked,
        event_stream_mirror_counts.backoff as event_stream_mirror_backoff,
        event_stream_mirror_counts.failed as event_stream_mirror_failed,
-       event_stream_mirror_counts.max_attempts as event_stream_mirror_max_attempts
+       event_stream_mirror_counts.max_attempts as event_stream_mirror_max_attempts,
+       event_stream_mirror_counts.expired_leases as event_stream_mirror_expired_leases
 from job_counts
 cross join event_counts
 cross join transcode_counts
 cross join notification_counts
 cross join event_stream_mirror_counts
+"#;
+
+const READINESS_SCHEDULER_SUMMARY_SQL: &str = r#"
+with readiness_scheduler_sample_limit as (
+    select 10000::bigint as lower_bound_count
+),
+due_task_candidates as (
+    select tasks.id,
+           tasks.max_concurrency
+    from scheduled_tasks tasks
+    where tasks.enabled = true
+      and tasks.schedule_kind in ('interval', 'cron')
+      and tasks.next_run_at is not null
+      and tasks.next_run_at <= now()
+    order by tasks.next_run_at asc, tasks.id asc
+    limit 10001
+),
+due_task_sample as (
+    select 'due'::text as status
+    from due_task_candidates tasks
+    cross join lateral (
+        select count(*)::bigint as active_running_runs
+        from (
+            select 1
+            from scheduled_task_runs runs
+            where runs.task_id = tasks.id
+              and runs.status = 'running'
+              and runs.lease_expires_at > now()
+            limit least(
+                tasks.max_concurrency::bigint,
+                (select lower_bound_count + 1 from readiness_scheduler_sample_limit)
+            )
+        ) active_run_sample
+    ) active_runs
+    where active_running_runs <= (select lower_bound_count from readiness_scheduler_sample_limit)
+      and active_running_runs < tasks.max_concurrency
+    limit 10001
+),
+due_counts as (
+    select least(
+               count(*) filter (where status = 'due'),
+               (select lower_bound_count from readiness_scheduler_sample_limit)
+           )::bigint as due_tasks
+    from due_task_sample
+),
+scheduler_run_sample as (
+    select 'running'::text as status
+    from (
+        select 1
+        from scheduled_task_runs
+        where status = 'running'
+          and lease_expires_at > now()
+        order by lease_expires_at asc, id asc
+        limit 10001
+    ) running_runs
+    union all
+    select 'expired'::text as status
+    from (
+        select 1
+        from scheduled_task_runs
+        where status = 'running'
+          and lease_expires_at <= now()
+        order by lease_expires_at asc, id asc
+        limit 10001
+    ) expired_runs
+    union all
+    select 'manual_running'::text as status
+    from (
+        select 1
+        from scheduled_task_runs
+        where status = 'running'
+          and lease_expires_at > now()
+          and trigger_type = 'manual'
+        order by lease_expires_at asc, id asc
+        limit 10001
+    ) manual_running_runs
+),
+run_counts as (
+    select least(
+               count(*) filter (
+                   where status = 'running'
+               ),
+               (select lower_bound_count from readiness_scheduler_sample_limit)
+           )::bigint as running_runs,
+           least(
+               count(*) filter (
+                   where status = 'expired'
+               ),
+               (select lower_bound_count from readiness_scheduler_sample_limit)
+           )::bigint as expired_runs,
+           least(
+               count(*) filter (
+                   where status = 'manual_running'
+               ),
+               (select lower_bound_count from readiness_scheduler_sample_limit)
+           )::bigint as manual_running_runs
+    from scheduler_run_sample
+)
+select due_counts.due_tasks,
+       run_counts.running_runs,
+       run_counts.expired_runs,
+       run_counts.manual_running_runs
+from due_counts
+cross join run_counts
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +463,7 @@ impl ReadinessSnapshot {
         self.database == DependencyStatus::Ok
             && self.redis == DependencyStatus::Ok
             && self.runtime.queues.status == DependencyStatus::Ok
+            && self.runtime.scheduler.status == DependencyStatus::Ok
     }
 }
 
@@ -111,6 +472,7 @@ pub struct RuntimeReadinessSnapshot {
     pub roles: RoleReadinessSnapshot,
     pub workers: Vec<WorkerReadinessSnapshot>,
     pub queues: QueueReadinessSnapshot,
+    pub scheduler: SchedulerReadinessSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -136,6 +498,59 @@ pub struct QueueReadinessSnapshot {
     pub transcodes: QueueBacklogSnapshot,
     pub notifications: QueueBacklogSnapshot,
     pub event_stream_mirror: EventStreamMirrorBacklogSnapshot,
+    pub assigned_backlog: i64,
+    pub has_assigned_backlog: bool,
+    pub assigned_expired_leases: i64,
+    pub has_assigned_expired_leases: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SchedulerReadinessSnapshot {
+    pub status: DependencyStatus,
+    pub due_tasks: i64,
+    pub running_runs: i64,
+    pub expired_runs: i64,
+    pub manual_running_runs: i64,
+    pub drained_by_node: bool,
+}
+
+impl SchedulerReadinessSnapshot {
+    fn not_configured() -> Self {
+        Self {
+            status: DependencyStatus::NotConfigured,
+            due_tasks: 0,
+            running_runs: 0,
+            expired_runs: 0,
+            manual_running_runs: 0,
+            drained_by_node: false,
+        }
+    }
+
+    fn unhealthy(config: &Config) -> Self {
+        let mut snapshot = Self {
+            status: DependencyStatus::Unhealthy,
+            due_tasks: 0,
+            running_runs: 0,
+            expired_runs: 0,
+            manual_running_runs: 0,
+            drained_by_node: false,
+        };
+        annotate_scheduler_responsibility(&mut snapshot, config);
+        snapshot
+    }
+
+    fn from_row(row: &PgRow, config: &Config) -> Result<Self, sqlx::Error> {
+        let mut snapshot = Self {
+            status: DependencyStatus::Ok,
+            due_tasks: row.try_get("due_tasks")?,
+            running_runs: row.try_get("running_runs")?,
+            expired_runs: row.try_get("expired_runs")?,
+            manual_running_runs: row.try_get("manual_running_runs")?,
+            drained_by_node: false,
+        };
+        annotate_scheduler_responsibility(&mut snapshot, config);
+        Ok(snapshot)
+    }
 }
 
 impl QueueReadinessSnapshot {
@@ -147,6 +562,10 @@ impl QueueReadinessSnapshot {
             transcodes: QueueBacklogSnapshot::default(),
             notifications: QueueBacklogSnapshot::default(),
             event_stream_mirror: EventStreamMirrorBacklogSnapshot::default(),
+            assigned_backlog: 0,
+            has_assigned_backlog: false,
+            assigned_expired_leases: 0,
+            has_assigned_expired_leases: false,
         }
     }
 
@@ -158,6 +577,10 @@ impl QueueReadinessSnapshot {
             transcodes: QueueBacklogSnapshot::default(),
             notifications: QueueBacklogSnapshot::default(),
             event_stream_mirror: EventStreamMirrorBacklogSnapshot::default(),
+            assigned_backlog: 0,
+            has_assigned_backlog: false,
+            assigned_expired_leases: 0,
+            has_assigned_expired_leases: false,
         }
     }
 
@@ -168,24 +591,28 @@ impl QueueReadinessSnapshot {
                 queued: row.try_get("jobs_queued")?,
                 running: row.try_get("jobs_running")?,
                 failed: row.try_get("jobs_failed")?,
+                expired_leases: row.try_get("jobs_expired_leases")?,
                 drained_by_node: false,
             },
             event_outbox: QueueBacklogSnapshot {
                 queued: row.try_get("event_outbox_queued")?,
                 running: row.try_get("event_outbox_running")?,
                 failed: row.try_get("event_outbox_failed")?,
+                expired_leases: row.try_get("event_outbox_expired_leases")?,
                 drained_by_node: false,
             },
             transcodes: QueueBacklogSnapshot {
                 queued: row.try_get("transcodes_queued")?,
                 running: row.try_get("transcodes_running")?,
                 failed: row.try_get("transcodes_failed")?,
+                expired_leases: row.try_get("transcodes_expired_leases")?,
                 drained_by_node: false,
             },
             notifications: QueueBacklogSnapshot {
                 queued: row.try_get("notifications_queued")?,
                 running: row.try_get("notifications_running")?,
                 failed: row.try_get("notifications_failed")?,
+                expired_leases: row.try_get("notifications_expired_leases")?,
                 drained_by_node: false,
             },
             event_stream_mirror: EventStreamMirrorBacklogSnapshot {
@@ -195,8 +622,13 @@ impl QueueReadinessSnapshot {
                 backoff: row.try_get("event_stream_mirror_backoff")?,
                 failed: row.try_get("event_stream_mirror_failed")?,
                 max_attempts: row.try_get("event_stream_mirror_max_attempts")?,
+                expired_leases: row.try_get("event_stream_mirror_expired_leases")?,
                 drained_by_node: false,
             },
+            assigned_backlog: 0,
+            has_assigned_backlog: false,
+            assigned_expired_leases: 0,
+            has_assigned_expired_leases: false,
         })
     }
 }
@@ -206,6 +638,7 @@ pub struct QueueBacklogSnapshot {
     pub queued: i64,
     pub running: i64,
     pub failed: i64,
+    pub expired_leases: i64,
     /// Whether the current node runs a worker that drains this queue. The
     /// backlog counts are global (the queue lives in PostgreSQL), so this flag
     /// lets operators tell "backlog this node is responsible for" apart from
@@ -222,6 +655,7 @@ pub struct EventStreamMirrorBacklogSnapshot {
     pub backoff: i64,
     pub failed: i64,
     pub max_attempts: i32,
+    pub expired_leases: i64,
     /// Whether this node runs the Redis Streams mirror worker (worker role with
     /// event streams enabled) and therefore drains this backlog.
     pub drained_by_node: bool,
@@ -279,10 +713,11 @@ impl AppState {
     }
 
     pub async fn readiness(&self) -> ReadinessSnapshot {
-        let (database, redis, queues) = tokio::join!(
+        let (database, redis, queues, scheduler) = tokio::join!(
             self.check_database(),
             self.check_redis(),
-            self.summarize_queues()
+            self.summarize_queues(),
+            self.summarize_scheduler()
         );
 
         ReadinessSnapshot {
@@ -292,6 +727,7 @@ impl AppState {
                 roles: role_summary(&self.config),
                 workers: worker_summaries(&self.config),
                 queues,
+                scheduler,
             },
         }
     }
@@ -353,6 +789,25 @@ impl AppState {
         annotate_queue_responsibilities(&mut snapshot, &self.config);
         snapshot
     }
+
+    async fn summarize_scheduler(&self) -> SchedulerReadinessSnapshot {
+        let Some(database) = &self.database else {
+            let mut snapshot = SchedulerReadinessSnapshot::not_configured();
+            annotate_scheduler_responsibility(&mut snapshot, &self.config);
+            return snapshot;
+        };
+
+        match tokio::time::timeout(
+            self.readiness_timeout(),
+            sqlx::query(READINESS_SCHEDULER_SUMMARY_SQL).fetch_one(database),
+        )
+        .await
+        {
+            Ok(Ok(row)) => SchedulerReadinessSnapshot::from_row(&row, &self.config)
+                .unwrap_or_else(|_| SchedulerReadinessSnapshot::unhealthy(&self.config)),
+            _ => SchedulerReadinessSnapshot::unhealthy(&self.config),
+        }
+    }
 }
 
 /// Mark which readiness queues the current node actually drains, so the
@@ -384,6 +839,58 @@ fn annotate_queue_responsibilities(snapshot: &mut QueueReadinessSnapshot, config
     // Streams mirror worker's responsibility.
     snapshot.event_stream_mirror.drained_by_node =
         worker_role && config.redis.event_streams_enabled;
+    snapshot.assigned_backlog = assigned_queue_backlog(snapshot);
+    snapshot.has_assigned_backlog = snapshot.assigned_backlog > 0;
+    snapshot.assigned_expired_leases =
+        assigned_expired_leases(snapshot, event_outbox_dispatch_drained_by_node(config));
+    snapshot.has_assigned_expired_leases = snapshot.assigned_expired_leases > 0;
+}
+
+fn assigned_queue_backlog(snapshot: &QueueReadinessSnapshot) -> i64 {
+    let mut total = 0;
+    for queue in [
+        snapshot.jobs,
+        snapshot.event_outbox,
+        snapshot.transcodes,
+        snapshot.notifications,
+    ] {
+        if queue.drained_by_node {
+            total += queue.queued + queue.running + queue.failed;
+        }
+    }
+    if snapshot.event_stream_mirror.drained_by_node {
+        total += snapshot.event_stream_mirror.unmirrored;
+    }
+    total
+}
+
+fn assigned_expired_leases(
+    snapshot: &QueueReadinessSnapshot,
+    event_outbox_dispatch_drained_by_node: bool,
+) -> i64 {
+    let mut total = 0;
+    for queue in [snapshot.jobs, snapshot.transcodes, snapshot.notifications] {
+        if queue.drained_by_node {
+            total += queue.expired_leases;
+        }
+    }
+    if event_outbox_dispatch_drained_by_node {
+        total += snapshot.event_outbox.expired_leases;
+    }
+    if snapshot.event_stream_mirror.drained_by_node {
+        total += snapshot.event_stream_mirror.expired_leases;
+    }
+    total
+}
+
+fn event_outbox_dispatch_drained_by_node(config: &Config) -> bool {
+    let worker_role = matches!(&config.node.role, NodeRole::All | NodeRole::Worker);
+    worker_role && (config.plugin_worker.enabled || config.notification_worker.enabled)
+}
+
+fn annotate_scheduler_responsibility(snapshot: &mut SchedulerReadinessSnapshot, config: &Config) {
+    let scheduler_role = matches!(&config.node.role, NodeRole::All | NodeRole::Scheduler);
+    snapshot.drained_by_node = scheduler_role && config.scheduler.enabled;
 }
 
 fn role_summary(config: &Config) -> RoleReadinessSnapshot {
@@ -472,6 +979,15 @@ mod tests {
 
         assert_eq!(snapshot.database, DependencyStatus::NotConfigured);
         assert_eq!(snapshot.redis, DependencyStatus::NotConfigured);
+        assert_eq!(snapshot.runtime.queues.assigned_backlog, 0);
+        assert!(!snapshot.runtime.queues.has_assigned_backlog);
+        assert_eq!(
+            snapshot.runtime.scheduler.status,
+            DependencyStatus::NotConfigured
+        );
+        assert_eq!(snapshot.runtime.scheduler.due_tasks, 0);
+        assert_eq!(snapshot.runtime.scheduler.running_runs, 0);
+        assert!(!snapshot.runtime.scheduler.drained_by_node);
         assert!(!snapshot.is_ready());
     }
 
@@ -571,6 +1087,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readiness_reports_scheduler_responsibility_by_node_role() {
+        let mut scheduler = Config::default();
+        scheduler.node.role = NodeRole::Scheduler;
+        scheduler.scheduler.enabled = true;
+
+        let summary = AppState::for_tests(scheduler)
+            .readiness()
+            .await
+            .runtime
+            .scheduler;
+        assert_eq!(summary.status, DependencyStatus::NotConfigured);
+        assert!(summary.drained_by_node);
+        assert_eq!(summary.due_tasks, 0);
+        assert_eq!(summary.running_runs, 0);
+        assert_eq!(summary.expired_runs, 0);
+        assert_eq!(summary.manual_running_runs, 0);
+
+        let mut api = Config::default();
+        api.node.role = NodeRole::Api;
+        api.scheduler.enabled = true;
+
+        let summary = AppState::for_tests(api).readiness().await.runtime.scheduler;
+        assert!(!summary.drained_by_node);
+    }
+
+    #[tokio::test]
     async fn readiness_marks_queue_drain_responsibility_by_node_role() {
         // Worker node with the relevant workers enabled drains those queues.
         let mut worker = Config::default();
@@ -602,6 +1144,8 @@ mod tests {
         assert!(!queues.notifications.drained_by_node);
         assert!(!queues.event_outbox.drained_by_node);
         assert!(!queues.event_stream_mirror.drained_by_node);
+        assert_eq!(queues.assigned_backlog, 0);
+        assert!(!queues.has_assigned_backlog);
 
         // Worker role but the specific workers disabled => queue not drained here.
         let mut idle_worker = Config::default();
@@ -634,6 +1178,84 @@ mod tests {
         assert!(queues.event_outbox.drained_by_node);
         assert!(!queues.event_stream_mirror.drained_by_node);
         assert!(!queues.jobs.drained_by_node);
+        assert_eq!(queues.assigned_backlog, 0);
+        assert!(!queues.has_assigned_backlog);
+    }
+
+    #[test]
+    fn queue_readiness_summarizes_backlog_assigned_to_this_node() {
+        let mut queues = QueueReadinessSnapshot {
+            status: DependencyStatus::Ok,
+            jobs: QueueBacklogSnapshot {
+                queued: 2,
+                running: 1,
+                failed: 1,
+                expired_leases: 1,
+                drained_by_node: true,
+            },
+            event_outbox: QueueBacklogSnapshot {
+                queued: 4,
+                running: 0,
+                failed: 1,
+                expired_leases: 2,
+                drained_by_node: false,
+            },
+            transcodes: QueueBacklogSnapshot {
+                queued: 1,
+                running: 1,
+                failed: 0,
+                expired_leases: 0,
+                drained_by_node: true,
+            },
+            notifications: QueueBacklogSnapshot {
+                queued: 9,
+                running: 0,
+                failed: 0,
+                expired_leases: 3,
+                drained_by_node: false,
+            },
+            event_stream_mirror: EventStreamMirrorBacklogSnapshot {
+                unmirrored: 3,
+                claimable: 2,
+                locked: 1,
+                backoff: 0,
+                failed: 0,
+                max_attempts: 2,
+                expired_leases: 4,
+                drained_by_node: true,
+            },
+            assigned_backlog: 0,
+            has_assigned_backlog: false,
+            assigned_expired_leases: 0,
+            has_assigned_expired_leases: false,
+        };
+
+        queues.assigned_backlog = assigned_queue_backlog(&queues);
+        queues.has_assigned_backlog = queues.assigned_backlog > 0;
+        queues.assigned_expired_leases = assigned_expired_leases(&queues, false);
+        queues.has_assigned_expired_leases = queues.assigned_expired_leases > 0;
+
+        assert_eq!(queues.assigned_backlog, 9);
+        assert!(queues.has_assigned_backlog);
+        assert_eq!(queues.assigned_expired_leases, 5);
+        assert!(queues.has_assigned_expired_leases);
+    }
+
+    #[test]
+    fn queue_readiness_assigns_expired_leases_by_worker_kind() {
+        let mut queues = QueueReadinessSnapshot::not_configured();
+        queues.event_outbox.expired_leases = 7;
+        queues.event_stream_mirror.expired_leases = 3;
+
+        let mut mirror_only = Config::default();
+        mirror_only.node.role = NodeRole::Worker;
+        mirror_only.redis.event_streams_enabled = true;
+        annotate_queue_responsibilities(&mut queues, &mirror_only);
+
+        assert!(queues.event_outbox.drained_by_node);
+        assert!(queues.event_stream_mirror.drained_by_node);
+        assert_eq!(queues.assigned_expired_leases, 3);
+        assert!(queues.has_assigned_expired_leases);
     }
 
     #[test]
@@ -648,8 +1270,198 @@ mod tests {
         assert!(READINESS_QUEUE_SUMMARY_SQL.contains("event_stream_mirror_locked"));
         assert!(READINESS_QUEUE_SUMMARY_SQL.contains("event_stream_mirror_backoff"));
         assert!(READINESS_QUEUE_SUMMARY_SQL.contains("event_stream_mirror_failed"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("jobs_expired_leases"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("event_outbox_expired_leases"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("transcodes_expired_leases"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("event_stream_mirror_expired_leases"));
         assert!(READINESS_QUEUE_SUMMARY_SQL.contains("filter (where status = 'queued')"));
         assert!(READINESS_QUEUE_SUMMARY_SQL.contains("filter (where status = 'pending')"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("locked_until <= now()"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("lease_expires_at <= now()"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("stream_mirror_locked_until <= now()"));
         assert!(!READINESS_QUEUE_SUMMARY_SQL.contains("offset "));
+    }
+
+    #[test]
+    fn readiness_queue_summary_sql_bounds_high_growth_counts() {
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("readiness_sample_limit"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("limit 10001"));
+
+        for cte in [
+            "job_queue_sample as",
+            "event_outbox_sample as",
+            "transcode_queue_sample as",
+            "notification_queue_sample as",
+            "event_stream_mirror_sample as",
+        ] {
+            assert!(
+                READINESS_QUEUE_SUMMARY_SQL.contains(cte),
+                "missing bounded readiness CTE: {cte}"
+            );
+        }
+
+        let normalized = READINESS_QUEUE_SUMMARY_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+
+        assert!(
+            !normalized.contains("from jobs where status in ('queued', 'running', 'failed')"),
+            "readiness should not exact-count the full jobs queue"
+        );
+        assert!(
+            !normalized
+                .contains("from event_outbox where status in ('pending', 'delivering', 'failed')"),
+            "readiness should not exact-count the full event outbox"
+        );
+        assert!(
+            !normalized.contains(
+                "from transcoding_sessions where status in ('queued', 'running', 'failed')"
+            ),
+            "readiness should not exact-count the full transcode queue"
+        );
+        assert!(
+            !normalized.contains(
+                "from plugin_notification_requests where status in ('queued', 'delivering', 'failed')"
+            ),
+            "readiness should not exact-count the full notification queue"
+        );
+    }
+
+    #[test]
+    fn readiness_event_outbox_indexes_match_bounded_summary_shapes() {
+        let migration = include_str!("../migrations/0070_readiness_event_outbox_indexes.sql");
+
+        assert!(migration.contains("idx_event_outbox_readiness_status"));
+        assert!(migration.contains("on event_outbox (status, locked_until, id)"));
+        assert!(migration.contains("where status in ('pending', 'delivering', 'failed')"));
+        assert!(migration.contains("idx_event_outbox_stream_mirror_failed"));
+        assert!(migration.contains("on event_outbox (id)"));
+        assert!(migration.contains("stream_mirrored_at is null"));
+        assert!(migration.contains("stream_mirror_last_error is not null"));
+
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("where status = 'delivering'"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("and locked_until <= now()"));
+        assert!(READINESS_QUEUE_SUMMARY_SQL.contains("stream_mirror_last_error is not null"));
+    }
+
+    #[test]
+    fn readiness_scheduler_summary_sql_uses_due_and_lease_aggregates() {
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("from scheduled_tasks"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("from scheduled_task_runs"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("next_run_at <= now()"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("status = 'running'"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("lease_expires_at > now()"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("lease_expires_at <= now()"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("trigger_type = 'manual'"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("due_tasks"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("manual_running_runs"));
+        assert!(!READINESS_SCHEDULER_SUMMARY_SQL.contains("offset "));
+    }
+
+    #[test]
+    fn readiness_scheduler_summary_uses_bounded_lower_bound_samples() {
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("readiness_scheduler_sample_limit"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("limit 10001"));
+
+        for cte in [
+            "due_task_candidates",
+            "due_task_sample",
+            "active_run_sample",
+            "scheduler_run_sample",
+        ] {
+            assert!(
+                READINESS_SCHEDULER_SUMMARY_SQL.contains(cte),
+                "missing bounded scheduler readiness CTE: {cte}"
+            );
+        }
+
+        assert!(
+            READINESS_SCHEDULER_SUMMARY_SQL
+                .contains("active_running_runs <= (select lower_bound_count from readiness_scheduler_sample_limit)")
+        );
+
+        let normalized = READINESS_SCHEDULER_SUMMARY_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !normalized.contains("select count(*)::bigint as due_tasks from scheduled_tasks"),
+            "scheduler due readiness should not exact-count all due tasks"
+        );
+        assert!(
+            !normalized.contains("run_counts as ( select count(*) filter"),
+            "scheduler run readiness should not aggregate directly over all running task runs"
+        );
+    }
+
+    #[test]
+    fn readiness_scheduler_indexes_match_bounded_summary_shapes() {
+        let migration = include_str!("../migrations/0072_readiness_scheduled_task_run_indexes.sql");
+
+        assert!(migration.contains("idx_scheduled_task_runs_readiness_running_lease"));
+        assert!(migration.contains("on scheduled_task_runs (lease_expires_at, id)"));
+        assert!(migration.contains("where status = 'running'"));
+        assert!(migration.contains("idx_scheduled_task_runs_readiness_manual_running_lease"));
+        assert!(migration.contains("on scheduled_task_runs (trigger_type, lease_expires_at, id)"));
+
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("order by lease_expires_at asc, id asc"));
+        assert!(READINESS_SCHEDULER_SUMMARY_SQL.contains("and trigger_type = 'manual'"));
+    }
+
+    // Live-DB smoke: validates the exact production readiness SQL parses, plans
+    // and type-checks against the real migrated schema via EXPLAIN. Plain
+    // EXPLAIN does not execute the SELECT, so it is non-mutating.
+    //   cargo test -- --ignored readiness_queue_summary_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn readiness_queue_summary_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let plan_rows = sqlx::query(&format!("explain {READINESS_QUEUE_SUMMARY_SQL}"))
+            .fetch_all(&pool)
+            .await
+            .expect("readiness SQL should parse and plan against the live schema");
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a query plan for the readiness summary"
+        );
+    }
+
+    // Live-DB smoke: validates the scheduler readiness SQL against the real
+    // migrated schema without mutating scheduler state.
+    //   cargo test -- --ignored readiness_scheduler_summary_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn readiness_scheduler_summary_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let plan_rows = sqlx::query(&format!("explain {READINESS_SCHEDULER_SUMMARY_SQL}"))
+            .fetch_all(&pool)
+            .await
+            .expect("scheduler readiness SQL should parse and plan against the live schema");
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a query plan for the scheduler readiness summary"
+        );
     }
 }

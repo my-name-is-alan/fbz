@@ -21,6 +21,7 @@ use super::{
 
 const DEFAULT_PLAYLISTS_LIMIT: u32 = 100;
 const MAX_PLAYLISTS_LIMIT: u32 = 200;
+const MAX_PLAYLIST_START_INDEX: u32 = 10_000;
 const MAX_PLAYLIST_IDS: usize = 256;
 const MAX_PLAYLIST_ID_LEN: usize = 128;
 const MAX_PLAYLIST_NAME_LEN: usize = 256;
@@ -29,53 +30,76 @@ const MAX_PLAYLIST_MEDIA_TYPE_LEN: usize = 64;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaylistsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaylistItemsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CreatePlaylistQuery {
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "ids")]
     pub ids: Option<String>,
+    #[serde(alias = "mediaType", alias = "media_type")]
     pub media_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct AddToPlaylistInfoQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "ids")]
     pub ids: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct AddPlaylistItemsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "ids")]
     pub ids: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemovePlaylistItemsQuery {
+    #[serde(alias = "entryIds", alias = "entry_ids")]
     pub entry_ids: Option<String>,
 }
 
@@ -263,7 +287,7 @@ struct PlaylistWindow {
 impl PlaylistWindow {
     fn from_parts(start_index: Option<u32>, limit: Option<u32>) -> Self {
         Self {
-            start_index: i64::from(start_index.unwrap_or(0)),
+            start_index: i64::from(start_index.unwrap_or(0).min(MAX_PLAYLIST_START_INDEX)),
             limit: i64::from(
                 limit
                     .unwrap_or(DEFAULT_PLAYLISTS_LIMIT)
@@ -449,6 +473,8 @@ fn playlist_write_disabled_error() -> AppError {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -477,6 +503,52 @@ mod tests {
             sort_direction_from_query(query.sort_order.as_deref()),
             SortDirection::Desc
         );
+    }
+
+    #[test]
+    fn playlist_queries_accept_lower_camel_client_fields() {
+        let uri = "/Playlists?userId=user-1&parentId=library-1&startIndex=10&limit=500&searchTerm=mix&sortOrder=Descending&fields=PrimaryImageAspectRatio&enableImages=true"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<PlaylistsQuery>::try_from_uri(&uri).unwrap();
+
+        let window = PlaylistWindow::from_parts(query.start_index, query.limit);
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_PLAYLISTS_LIMIT));
+        assert_eq!(query.search_term.as_deref(), Some("mix"));
+        assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(
+            sort_direction_from_query(query.sort_order.as_deref()),
+            SortDirection::Desc
+        );
+
+        let uri = "/Playlists/playlist-1/Items?userId=user-1&startIndex=10&limit=500&fields=MediaSources&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary,Backdrop"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<PlaylistItemsQuery>::try_from_uri(&uri).unwrap();
+        let window = PlaylistWindow::from_parts(query.start_index, query.limit);
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_PLAYLISTS_LIMIT));
+        assert_eq!(query.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(query.image_type_limit, Some(2));
+        assert_eq!(
+            query.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+    }
+
+    #[test]
+    fn playlist_window_clamps_pathologically_large_start_index() {
+        let window = PlaylistWindow::from_parts(Some(500_000), Some(50));
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
     }
 
     #[test]
@@ -554,6 +626,42 @@ mod tests {
         let moved = move_playlist_item_input("playlist-1", "entry-1", "3").unwrap();
 
         assert_eq!(moved.new_index, 3);
+    }
+
+    #[test]
+    fn playlist_write_queries_accept_lower_camel_client_fields() {
+        let uri = "/Playlists?name=Road%20Trip&ids=item-1,item-2,item-1&mediaType=Audio"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<CreatePlaylistQuery>::try_from_uri(&uri).unwrap();
+        let create = create_playlist_input(query).unwrap();
+
+        assert_eq!(create.name, "Road Trip");
+        assert_eq!(create.ids, ["item-1", "item-2"]);
+        assert_eq!(create.media_type.as_deref(), Some("Audio"));
+
+        let uri = "/Playlists/playlist-1/AddToPlaylistInfo?userId=user-1&ids=item-1,item-2,item-1"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<AddToPlaylistInfoQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        let add = add_to_playlist_input("playlist-1", query.ids.as_deref()).unwrap();
+        assert_eq!(add.ids, ["item-1", "item-2"]);
+        assert!(add.contains_duplicates);
+
+        let uri = "/Playlists/playlist-1/Items?userId=user-1&ids=item-1,item-2"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<AddPlaylistItemsQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.ids.as_deref(), Some("item-1,item-2"));
+
+        let uri = "/Playlists/playlist-1/Items?entryIds=entry-1,entry-2"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<RemovePlaylistItemsQuery>::try_from_uri(&uri).unwrap();
+        let remove = remove_playlist_items_input("playlist-1", query.entry_ids.as_deref()).unwrap();
+        assert_eq!(remove.ids, ["entry-1", "entry-2"]);
     }
 
     #[test]

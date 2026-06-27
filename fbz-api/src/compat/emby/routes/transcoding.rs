@@ -33,21 +33,27 @@ use super::{
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct HlsFileQuery {
+    #[serde(alias = "transcodeSessionId", alias = "transcode_session_id")]
     pub transcode_session_id: String,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct VideoFileQuery {
+    #[serde(alias = "transcodeSessionId", alias = "transcode_session_id")]
     pub transcode_session_id: Option<String>,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ActiveEncodingQuery {
+    #[serde(alias = "deviceId", alias = "device_id")]
     pub device_id: Option<String>,
+    #[serde(alias = "playSessionId", alias = "play_session_id")]
     pub play_session_id: Option<String>,
 }
 
@@ -377,7 +383,7 @@ async fn read_hls_file(
         .as_deref()
         .ok_or_else(|| AppError::conflict("hls output path is not ready"))?;
     let output_dir = PathBuf::from(output_path);
-    let target = if is_manifest_file(file_name) {
+    let target = if file_name.eq_ignore_ascii_case("master.m3u8") {
         PathBuf::from(
             session
                 .manifest_path
@@ -611,7 +617,8 @@ fn hls_file_url(
         .unwrap_or_default();
 
     format!(
-        "/emby/Videos/{item_id}/{file_name}?TranscodeSessionId={session_id}{media_source}&api_key={access_token}"
+        "/emby/{}/{item_id}/{file_name}?TranscodeSessionId={session_id}{media_source}&api_key={access_token}",
+        route_kind.route_segment()
     )
 }
 
@@ -719,6 +726,8 @@ fn normalize_optional_active_encoding_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::Query;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn hls_file_name_validation_blocks_traversal() {
@@ -746,6 +755,43 @@ mod tests {
 
         assert_eq!(stream_query.transcode_session_id, None);
         assert_eq!(stream_query.media_source_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn hls_file_query_accepts_lower_camel_client_fields() {
+        let uri: Uri =
+            "/emby/Videos/item-1/master.m3u8?transcodeSessionId=session-1&mediaSourceId=42"
+                .parse()
+                .unwrap();
+        let Query(query) = Query::<HlsFileQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.transcode_session_id, "session-1");
+        assert_eq!(query.media_source_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn video_file_query_accepts_lower_camel_client_fields() {
+        let uri: Uri =
+            "/emby/Videos/item-1/movie.mkv?transcodeSessionId=session-1&mediaSourceId=42"
+                .parse()
+                .unwrap();
+        let Query(query) = Query::<VideoFileQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.transcode_session_id.as_deref(), Some("session-1"));
+        assert_eq!(query.media_source_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn active_encoding_query_accepts_lower_camel_client_fields() {
+        let uri: Uri = "/emby/Audio/ActiveEncodings?playSessionId=play-1&deviceId=device-1"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<ActiveEncodingQuery>::try_from_uri(&uri).unwrap();
+
+        let input = active_encoding_input(&query).unwrap();
+
+        assert_eq!(input.play_session_id, "play-1");
+        assert_eq!(input.device_id.as_deref(), Some("device-1"));
     }
 
     #[test]
@@ -837,6 +883,56 @@ mod tests {
     }
 
     #[test]
+    fn audio_manifest_rewrite_uses_audio_routes_for_relative_playlist_files() {
+        let manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nmain.m3u8\n";
+
+        let rewritten = rewrite_hls_manifest(
+            manifest,
+            HlsRouteKind::Audio,
+            "track-1",
+            Some(42),
+            "session-1",
+            "token-1",
+        );
+
+        assert!(rewritten.contains(
+            "/emby/Audio/track-1/main.m3u8?TranscodeSessionId=session-1&MediaSourceId=42&api_key=token-1"
+        ));
+        assert!(!rewritten.contains("/emby/Videos/track-1/main.m3u8"));
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_file_reads_requested_manifest_from_output_directory() {
+        let output_dir = unique_test_dir("fbz-hls-manifest-read");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        tokio::fs::write(output_dir.join("master.m3u8"), b"#EXTM3U\n# master\n")
+            .await
+            .unwrap();
+        tokio::fs::write(output_dir.join("main.m3u8"), b"#EXTM3U\n# main\n")
+            .await
+            .unwrap();
+
+        let session = HlsTranscodeSessionRecord {
+            id: "session-1".to_owned(),
+            status: "completed".to_owned(),
+            item_id: "item-1".to_owned(),
+            media_file_id: Some(42),
+            output_path: Some(output_dir.to_string_lossy().into_owned()),
+            manifest_path: Some(
+                output_dir
+                    .join("master.m3u8")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+
+        let bytes = read_hls_file(&session, "main.m3u8").await;
+        let _ = tokio::fs::remove_dir_all(&output_dir).await;
+
+        assert_eq!(bytes.unwrap(), b"#EXTM3U\n# main\n");
+    }
+
+    #[test]
     fn content_type_matches_hls_extensions() {
         assert_eq!(
             hls_content_type("master.m3u8"),
@@ -879,5 +975,13 @@ mod tests {
         assert!(source.contains("cleanup_session_output_dir_best_effort"));
         assert!(source.contains("state.config().storage.transcode_cache_dir"));
         assert!(source.contains("\"active_encoding_cancel\""));
+    }
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
     }
 }

@@ -320,6 +320,7 @@ impl AuthRepository {
         &self,
         user_id: i64,
         limit: i64,
+        device_id: Option<&str>,
     ) -> Result<Vec<SessionInfoRecord>, sqlx::Error> {
         let rows = sqlx::query(
             r#"
@@ -338,6 +339,7 @@ impl AuthRepository {
             where s.user_id = $1
               and s.revoked_at is null
               and s.expires_at > now()
+              and ($3::text is null or d.device_id = $3)
               and not exists (
                   select 1
                   from devices revoked
@@ -350,6 +352,7 @@ impl AuthRepository {
         )
         .bind(user_id)
         .bind(limit.clamp(1, 100))
+        .bind(device_id.map(str::trim))
         .fetch_all(&self.pool)
         .await?;
 
@@ -819,6 +822,18 @@ mod tests {
         assert!(repository.contains("where public_id = case"));
         assert!(repository.contains("then $1::uuid"));
         assert!(!repository.contains(&bad_filter));
+    }
+
+    #[test]
+    fn active_session_list_filters_optional_device_id_in_sql() {
+        let repository = include_str!("repository.rs");
+        let signature = ["device_id: Option<&str", ">"].join("");
+        let predicate = ["and ($3::text is null or d.device_id = ", "$3)"].join("");
+        let bind = [".bind(device_id.map(str::", "trim))"].join("");
+
+        assert!(repository.contains(&signature));
+        assert!(repository.contains(&predicate));
+        assert!(repository.contains(&bind));
     }
 
     #[test]

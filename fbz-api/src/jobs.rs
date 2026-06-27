@@ -15,26 +15,35 @@ pub struct ExpiredJobSummary {
 }
 
 const EXPIRE_STALE_RUNNING_JOBS_SQL: &str = r#"
-with expired_jobs as (
-    update jobs
+with stale_job_candidates as (
+    select id
+    from jobs
+    where job_type = $1
+      and status = 'running'
+      and locked_until <= now()
+    order by locked_until asc, id asc
+    limit 1000
+    for update skip locked
+),
+expired_jobs as (
+    update jobs as j
     set status = 'failed',
         locked_by = null,
         locked_until = null,
         last_error = case
-            when attempts >= max_attempts then $3
+            when j.attempts >= j.max_attempts then $3
             else $2
         end,
         finished_at = case
-            when attempts >= max_attempts then coalesce(finished_at, now())
-            else finished_at
+            when j.attempts >= j.max_attempts then coalesce(j.finished_at, now())
+            else j.finished_at
         end,
         updated_at = now()
-    where job_type = $1
-      and status = 'running'
-      and locked_until <= now()
-    returning id,
-              last_error,
-              attempts < max_attempts as retryable
+    from stale_job_candidates candidates
+    where j.id = candidates.id
+    returning j.id,
+              j.last_error,
+              j.attempts < j.max_attempts as retryable
 ),
 expired_runs as (
     update job_runs jr
@@ -283,6 +292,70 @@ mod tests {
     }
 
     #[test]
+    fn stale_job_recovery_uses_bounded_locked_candidate_batch() {
+        let normalized = EXPIRE_STALE_RUNNING_JOBS_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("stale_job_candidates"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("order by locked_until asc, id asc"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("limit 1000"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("for update skip locked"));
+        assert!(
+            !normalized
+                .contains("update jobs set status = 'failed' locked_by = null locked_until = null"),
+            "stale job recovery should update a bounded candidate batch, not every expired job"
+        );
+    }
+
+    #[test]
+    fn stale_job_recovery_index_matches_candidate_batch_shape() {
+        let migration = include_str!("../migrations/0073_stale_job_recovery_index.sql");
+
+        assert!(migration.contains("idx_jobs_stale_recovery"));
+        assert!(migration.contains("on jobs (job_type, locked_until asc, id asc)"));
+        assert!(migration.contains("where status = 'running'"));
+        assert!(migration.contains("locked_until is not null"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("where job_type = $1"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("status = 'running'"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("locked_until <= now()"));
+        assert!(EXPIRE_STALE_RUNNING_JOBS_SQL.contains("order by locked_until asc, id asc"));
+    }
+
+    // Live-DB smoke: validates the bounded stale-job recovery SQL parses and
+    // plans against the real migrated schema. Plain EXPLAIN does not execute
+    // the UPDATE, so this is non-mutating.
+    //   cargo test -- --ignored stale_job_recovery_sql_plans_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn stale_job_recovery_sql_plans_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let plan_rows = sqlx::query(&format!("explain {EXPIRE_STALE_RUNNING_JOBS_SQL}"))
+            .bind("library.scan")
+            .bind("lease expired; will retry")
+            .bind("lease expired; max attempts reached")
+            .fetch_all(&pool)
+            .await
+            .expect("bounded stale job recovery SQL should plan against live schema");
+
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a plan for stale job recovery SQL"
+        );
+    }
+
+    #[test]
     fn job_payload_dedupe_indexes_match_queue_queries() {
         let metadata_index = include_str!("../migrations/0015_metadata_refresh.sql");
         let probe_index = include_str!("../migrations/0023_media_probe_jobs.sql");
@@ -314,6 +387,11 @@ mod tests {
             scheduler_repository
                 .contains("j.payload->>'libraryId' = eligible_libraries.library_public_id")
         );
+        assert!(scheduler_repository.contains("j.status in ('queued', 'running', 'failed')"));
+        assert!(scheduler_repository.contains("j.attempts < j.max_attempts"));
+        assert!(admin_repository.contains("j.payload->>'libraryId' = target_library.public_id"));
+        assert!(admin_repository.contains("j.status in ('queued', 'running', 'failed')"));
+        assert!(admin_repository.contains("j.attempts < j.max_attempts"));
     }
 
     #[test]
@@ -373,6 +451,42 @@ mod tests {
     }
 
     #[test]
+    fn notification_delivery_attempt_partitioning_documents_success_idempotency_blocker() {
+        let notification_schema = include_str!("../migrations/0009_notification_delivery.sql");
+        let delivery_source = include_str!("notifications/delivery.rs");
+        let partition_design = include_str!("../docs/database-partitioning-design.md");
+
+        assert!(notification_schema.contains("idx_notification_delivery_attempts_target_success"));
+        assert!(
+            notification_schema.contains("where status = 'succeeded' and target_id is not null")
+        );
+        assert!(delivery_source.contains("has_successful_attempt(request.id, target.id)"));
+        assert!(delivery_source.contains("status = 'succeeded'"));
+
+        assert!(partition_design.contains("idx_notification_delivery_attempts_target_success"));
+        assert!(
+            partition_design
+                .contains("same request + target may have at most one successful delivery")
+        );
+        assert!(partition_design.contains("do not partition"));
+    }
+
+    #[test]
+    fn plugin_notification_request_partitioning_documents_attempt_fk_blocker() {
+        let notification_schema = include_str!("../migrations/0009_notification_delivery.sql");
+        let partition_design = include_str!("../docs/database-partitioning-design.md");
+
+        assert!(notification_schema.contains(
+            "notification_request_id bigint not null references plugin_notification_requests(id) on delete cascade"
+        ));
+        assert!(
+            partition_design.contains("notification_delivery_attempts.notification_request_id")
+        );
+        assert!(partition_design.contains("request/attempt pair must be redesigned together"));
+        assert!(partition_design.contains("do not partition `plugin_notification_requests`"));
+    }
+
+    #[test]
     fn job_runs_partition_migration_drops_inbound_fk_and_partitions_by_started_at() {
         let migration = include_str!("../migrations/0067_partition_job_runs.sql");
 
@@ -393,6 +507,8 @@ mod tests {
     #[test]
     fn partition_coverage_function_covers_all_partitioned_tables_idempotently() {
         let migration = include_str!("../migrations/0068_partition_coverage_function.sql");
+        let playback_migration = include_str!("../migrations/0069_partition_playback_sessions.sql");
+        let partition_design = include_str!("../docs/database-partitioning-design.md");
 
         assert!(migration.contains("create or replace function ensure_partition_coverage"));
         // Covers every partitioned table (0064-0067).
@@ -407,6 +523,89 @@ mod tests {
         assert!(migration.contains("create table %I partition of %I"));
         // Applies initial forward coverage on migration.
         assert!(migration.contains("select ensure_partition_coverage(18)"));
+
+        // 0069 extends the rolling coverage function to the fifth partitioned
+        // table; keep the design docs from drifting back to the 0068-only list.
+        assert!(playback_migration.contains("'playback_sessions'"));
+        assert!(partition_design.contains("五表"));
+        assert!(partition_design.contains("playback_sessions"));
+    }
+
+    #[test]
+    fn queue_stats_rollup_migration_creates_materialized_partition_counts() {
+        let migration = include_str!("../migrations/0076_queue_stats_rollup.sql");
+        let partition_design = include_str!("../docs/database-partitioning-design.md");
+
+        assert!(migration.contains("create table if not exists queue_stats_rollup"));
+        assert!(migration.contains("bucket_date date not null"));
+        assert!(migration.contains("table_name text not null"));
+        assert!(migration.contains("status text not null"));
+        assert!(migration.contains("row_count bigint not null"));
+        assert!(migration.contains("primary key (bucket_date, table_name, status)"));
+        assert!(migration.contains("idx_queue_stats_rollup_table_bucket"));
+        assert!(migration.contains("check (row_count >= 0)"));
+        assert!(partition_design.contains("queue_stats_rollup"));
+        assert!(partition_design.contains("row_count"));
+    }
+
+    // Live-DB smoke: validates the queue_stats_rollup schema exists after the
+    // full migration chain. It only inspects catalog metadata.
+    //   cargo test -- --ignored queue_stats_rollup_schema_exists_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn queue_stats_rollup_schema_exists_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let table_exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            select to_regclass('public.queue_stats_rollup') is not null
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check queue_stats_rollup table");
+        assert!(table_exists);
+
+        let primary_key = sqlx::query_scalar::<_, String>(
+            r#"
+            select pg_get_constraintdef(c.oid)
+            from pg_constraint c
+            join pg_class t on t.oid = c.conrelid
+            where t.relname = 'queue_stats_rollup'
+              and c.contype = 'p'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("queue_stats_rollup primary key should exist");
+        assert!(primary_key.contains("bucket_date"));
+        assert!(primary_key.contains("table_name"));
+        assert!(primary_key.contains("status"));
+
+        let index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_queue_stats_rollup_table_bucket'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("queue_stats_rollup read index should exist");
+        let index_def = index_def.to_ascii_lowercase();
+        assert!(index_def.contains("table_name"));
+        assert!(index_def.contains("bucket_date desc"));
+        assert!(index_def.contains("status"));
     }
 
     #[test]

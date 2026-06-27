@@ -26,10 +26,12 @@ use crate::{
 use super::access::authenticate_request_user;
 
 const MAX_VIRTUAL_FOLDERS_LIMIT: u32 = 200;
+const MAX_VIRTUAL_FOLDERS_START_INDEX: u32 = 10_000;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaFoldersQuery {
+    #[serde(alias = "isHidden", alias = "is_hidden")]
     pub is_hidden: Option<bool>,
 }
 
@@ -181,7 +183,10 @@ struct VirtualFoldersWindow {
 }
 
 fn virtual_folders_window(query: VirtualFoldersQuery) -> VirtualFoldersWindow {
-    let response_start_index = query.start_index.unwrap_or_default();
+    let response_start_index = query
+        .start_index
+        .unwrap_or_default()
+        .min(MAX_VIRTUAL_FOLDERS_START_INDEX);
     let limit = query
         .limit
         .unwrap_or(MAX_VIRTUAL_FOLDERS_LIMIT)
@@ -364,6 +369,8 @@ fn subfolder_name(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -444,6 +451,38 @@ mod tests {
             start_index: Some(10),
             limit: Some(500),
         });
+
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, MAX_VIRTUAL_FOLDERS_LIMIT as usize);
+        assert_eq!(window.response_start_index, 10);
+    }
+
+    #[test]
+    fn virtual_folders_query_window_clamps_pathologically_large_start_index() {
+        let window = virtual_folders_window(VirtualFoldersQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
+        assert_eq!(window.response_start_index, 10_000);
+    }
+
+    #[test]
+    fn media_folder_queries_accept_lower_camel_client_fields() {
+        let uri = "/Library/MediaFolders?isHidden=true"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<MediaFoldersQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.is_hidden, Some(true));
+
+        let uri = "/Library/VirtualFolders/Query?startIndex=10&limit=500"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<VirtualFoldersQuery>::try_from_uri(&uri).unwrap();
+        let window = virtual_folders_window(query);
 
         assert_eq!(window.start_index, 10);
         assert_eq!(window.limit, MAX_VIRTUAL_FOLDERS_LIMIT as usize);

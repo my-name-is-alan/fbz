@@ -139,31 +139,6 @@ impl UsersRepository {
         &self,
         filter: UsersQueryFilter,
     ) -> Result<UsersQueryPage, sqlx::Error> {
-        let total_record_count: i64 = sqlx::query_scalar(
-            r#"
-            select count(*)::bigint
-            from users u
-            where ($1::boolean is null or $1 = false)
-              and ($2::boolean is null or u.is_disabled = $2)
-              and (
-                  $3::text is null
-                  or u.username_normalized >= lower($3)
-              )
-            "#,
-        )
-        .bind(filter.is_hidden)
-        .bind(filter.is_disabled)
-        .bind(filter.name_starts_with_or_greater.as_deref())
-        .fetch_one(&self.pool)
-        .await?;
-
-        if total_record_count == 0 || filter.start_index >= total_record_count {
-            return Ok(UsersQueryPage {
-                records: Vec::new(),
-                total_record_count,
-            });
-        }
-
         let rows = sqlx::query(
             r#"
             select
@@ -220,7 +195,7 @@ impl UsersRepository {
                 case when not $4::boolean then u.username_normalized end asc,
                 case when not $4::boolean then u.id end asc
             offset $5
-            limit $6
+            limit $6 + 1
             "#,
         )
         .bind(filter.is_hidden)
@@ -232,13 +207,43 @@ impl UsersRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(UsersQueryPage {
-            records: rows
-                .into_iter()
-                .map(UserDetailRecord::from_row)
-                .collect::<Result<Vec<_>, _>>()?,
-            total_record_count,
-        })
+        users_query_page_lower_bound_from_rows(rows, filter.start_index, filter.limit)
+    }
+}
+
+fn users_query_page_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<UsersQueryPage, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let records = rows
+        .into_iter()
+        .take(visible_limit)
+        .map(UserDetailRecord::from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count =
+        users_query_lower_bound_total_record_count(start_index, records.len(), has_more);
+
+    Ok(UsersQueryPage {
+        records,
+        total_record_count,
+    })
+}
+
+fn users_query_lower_bound_total_record_count(
+    start_index: i64,
+    item_count: usize,
+    has_more: bool,
+) -> i64 {
+    if item_count == 0 {
+        0
+    } else {
+        start_index
+            .max(0)
+            .saturating_add(item_count as i64)
+            .saturating_add(i64::from(has_more))
     }
 }
 
@@ -268,5 +273,107 @@ impl UserDetailRecord {
             enable_all_folders: row.try_get("enable_all_folders")?,
             enabled_folders: row.try_get("enabled_folders")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repository_source() -> String {
+        include_str!("repository.rs").replace("\r\n", "\n")
+    }
+
+    fn users_query_source() -> String {
+        let repository = repository_source();
+        let query_start = repository
+            .find("pub async fn list_users_query")
+            .expect("users query repository method should exist");
+        let query_end = repository[query_start..]
+            .find("\nimpl PublicUserRecord")
+            .map(|offset| query_start + offset)
+            .expect("users query repository method should stay before row mappers");
+        repository[query_start..query_end].to_owned()
+    }
+
+    #[test]
+    fn users_query_uses_lower_bound_pagination_result() {
+        let query = users_query_source();
+
+        assert!(
+            !query.contains("let total_record_count: i64 = sqlx::query_scalar"),
+            "Users/Query should not exact-count the full users table before fetching the page"
+        );
+        assert!(
+            !query.contains("select count(*)::bigint\n            from users u"),
+            "Users/Query should not exact-count the full users table before fetching the page"
+        );
+        assert!(
+            query.contains("limit $6 + 1"),
+            "Users/Query should fetch one probe row for lower-bound count semantics"
+        );
+        assert!(
+            query.contains(
+                "users_query_page_lower_bound_from_rows(rows, filter.start_index, filter.limit)"
+            ),
+            "Users/Query should drop the probe row before mapping the response"
+        );
+    }
+
+    #[test]
+    fn users_query_lower_bound_count_preserves_start_index_window() {
+        let query = users_query_source();
+
+        assert!(
+            query.contains("fn users_query_lower_bound_total_record_count"),
+            "Users/Query lower-bound counting should be isolated for overflow-safe window math"
+        );
+        assert!(
+            query.contains(".saturating_add(item_count as i64)"),
+            "Users/Query lower-bound count should include the visible page after StartIndex"
+        );
+        assert!(
+            query.contains(".saturating_add(i64::from(has_more))"),
+            "Users/Query lower-bound count should include a one-row has-more probe"
+        );
+        assert_eq!(users_query_lower_bound_total_record_count(0, 0, false), 0);
+        assert_eq!(users_query_lower_bound_total_record_count(3, 2, false), 5);
+        assert_eq!(users_query_lower_bound_total_record_count(3, 2, true), 6);
+        assert_eq!(
+            users_query_lower_bound_total_record_count(i64::MAX, 100, true),
+            i64::MAX
+        );
+    }
+
+    // Live-DB smoke: validates the Emby Users/Query SQL parses and executes
+    // against the real migrated schema. The query is a read-only SELECT, so it
+    // does not mutate user records.
+    //   cargo test -- --ignored users_query_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn users_query_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let repository = UsersRepository::new(pool);
+        repository
+            .list_users_query(UsersQueryFilter {
+                is_hidden: Some(false),
+                is_disabled: None,
+                start_index: 0,
+                limit: 5,
+                name_starts_with_or_greater: Some("A".to_owned()),
+                sort_descending: false,
+            })
+            .await
+            .expect("Users/Query should execute against the live schema");
     }
 }

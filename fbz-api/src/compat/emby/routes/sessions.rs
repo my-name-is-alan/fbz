@@ -24,13 +24,18 @@ use super::access::authenticate_request_user;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SessionsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "deviceId", alias = "device_id")]
+    pub device_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlayQueueQuery {
+    #[serde(alias = "id")]
     pub id: Option<String>,
+    #[serde(alias = "deviceId", alias = "device_id")]
     pub device_id: Option<String>,
 }
 
@@ -53,10 +58,15 @@ pub struct CreateAuthKeyQuery {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SessionCapabilitiesQuery {
+    #[serde(alias = "id")]
     pub id: Option<String>,
+    #[serde(alias = "playableMediaTypes", alias = "playable_media_types")]
     pub playable_media_types: Option<String>,
+    #[serde(alias = "supportedCommands", alias = "supported_commands")]
     pub supported_commands: Option<String>,
+    #[serde(alias = "supportsMediaControl", alias = "supports_media_control")]
     pub supports_media_control: Option<bool>,
+    #[serde(alias = "supportsSync", alias = "supports_sync")]
     pub supports_sync: Option<bool>,
 }
 
@@ -64,41 +74,64 @@ pub struct SessionCapabilitiesQuery {
 #[serde(rename_all = "PascalCase")]
 pub struct ClientCapabilitiesDto {
     #[serde(default)]
+    #[serde(alias = "playableMediaTypes", alias = "playable_media_types")]
     pub playable_media_types: Vec<String>,
     #[serde(default)]
+    #[serde(alias = "supportedCommands", alias = "supported_commands")]
     pub supported_commands: Vec<String>,
     #[serde(default)]
+    #[serde(alias = "supportsMediaControl", alias = "supports_media_control")]
     pub supports_media_control: bool,
+    #[serde(alias = "pushToken", alias = "push_token")]
     pub push_token: Option<String>,
+    #[serde(alias = "pushTokenType", alias = "push_token_type")]
     pub push_token_type: Option<String>,
     #[serde(default)]
+    #[serde(alias = "supportsSync", alias = "supports_sync")]
     pub supports_sync: bool,
+    #[serde(alias = "deviceProfile", alias = "device_profile")]
     pub device_profile: Option<Value>,
+    #[serde(alias = "iconUrl", alias = "icon_url")]
     pub icon_url: Option<String>,
+    #[serde(alias = "appId", alias = "app_id")]
     pub app_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemotePlayQuery {
+    #[serde(alias = "itemIds", alias = "item_ids")]
     pub item_ids: Option<String>,
+    #[serde(alias = "playCommand", alias = "play_command")]
     pub play_command: Option<String>,
+    #[serde(alias = "startPositionTicks", alias = "start_position_ticks")]
     pub start_position_ticks: Option<i64>,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
+    #[serde(alias = "audioStreamIndex", alias = "audio_stream_index")]
     pub audio_stream_index: Option<i32>,
+    #[serde(alias = "subtitleStreamIndex", alias = "subtitle_stream_index")]
     pub subtitle_stream_index: Option<i32>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<i32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemotePlayRequestDto {
+    #[serde(alias = "itemIds", alias = "item_ids")]
     pub item_ids: Option<RemoteItemIdsDto>,
+    #[serde(alias = "playCommand", alias = "play_command")]
     pub play_command: Option<String>,
+    #[serde(alias = "startPositionTicks", alias = "start_position_ticks")]
     pub start_position_ticks: Option<i64>,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
+    #[serde(alias = "audioStreamIndex", alias = "audio_stream_index")]
     pub audio_stream_index: Option<i32>,
+    #[serde(alias = "subtitleStreamIndex", alias = "subtitle_stream_index")]
     pub subtitle_stream_index: Option<i32>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<i32>,
 }
 
@@ -112,30 +145,40 @@ pub enum RemoteItemIdsDto {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemotePlaystateCommandQuery {
+    #[serde(alias = "seekPositionTicks", alias = "seek_position_ticks")]
     pub seek_position_ticks: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteGeneralCommandDto {
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "command")]
     pub command: Option<String>,
+    #[serde(alias = "arguments")]
     pub arguments: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteViewingDto {
+    #[serde(alias = "itemId", alias = "item_id")]
     pub item_id: Option<String>,
+    #[serde(alias = "itemName", alias = "item_name")]
     pub item_name: Option<String>,
+    #[serde(alias = "itemType", alias = "item_type")]
     pub item_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteMessageDto {
+    #[serde(alias = "header")]
     pub header: Option<String>,
+    #[serde(alias = "text")]
     pub text: Option<String>,
+    #[serde(alias = "timeoutMs", alias = "timeout_ms")]
     pub timeout_ms: Option<i64>,
 }
 
@@ -144,6 +187,7 @@ const MAX_CAPABILITY_VALUES: usize = 128;
 const MAX_CAPABILITY_VALUE_LEN: usize = 128;
 const MAX_CAPABILITY_TEXT_LEN: usize = 512;
 const MAX_AUTH_KEY_LIMIT: u32 = 200;
+const MAX_AUTH_KEY_START_INDEX: u32 = 10_000;
 const MAX_AUTH_KEY_TEXT_LEN: usize = 128;
 const MAX_REMOTE_ITEM_IDS: usize = 256;
 const MAX_REMOTE_ID_LEN: usize = 128;
@@ -211,13 +255,18 @@ pub async fn list_sessions(
             "authenticated user does not match query user",
         ));
     }
+    let device_id = normalize_optional_remote_id(query.device_id.as_deref())?;
 
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
 
     let sessions = AuthRepository::new(database.clone())
-        .list_active_sessions_for_user(authenticated.id, MAX_SESSION_LIST_LIMIT)
+        .list_active_sessions_for_user(
+            authenticated.id,
+            MAX_SESSION_LIST_LIMIT,
+            device_id.as_deref(),
+        )
         .await
         .map_err(|err| AppError::internal(format!("failed to list sessions: {err}")))?
         .into_iter()
@@ -415,12 +464,14 @@ pub async fn remote_system_command(
 pub async fn remote_message(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    Query(query): Query<RemoteMessageDto>,
     headers: HeaderMap,
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
-    let _message = parse_optional_emby_body::<RemoteMessageDto>(&headers, &body)?;
+    let request = parse_optional_emby_body::<RemoteMessageDto>(&headers, &body)?;
+    let _message = remote_message_input(request, query);
     normalize_session_id(Some(&session_id))?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -429,12 +480,14 @@ pub async fn remote_message(
 pub async fn remote_viewing(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    Query(query): Query<RemoteViewingDto>,
     headers: HeaderMap,
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
-    let _viewing = parse_optional_emby_body::<RemoteViewingDto>(&headers, &body)?;
+    let request = parse_optional_emby_body::<RemoteViewingDto>(&headers, &body)?;
+    let _viewing = remote_viewing_input(request, query);
     normalize_session_id(Some(&session_id))?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -606,7 +659,7 @@ struct CreateAuthKeyInput {
 
 fn auth_keys_query_input(query: &AuthKeysQuery) -> AuthKeysInput {
     AuthKeysInput {
-        start_index: query.start_index.unwrap_or(0),
+        start_index: query.start_index.unwrap_or(0).min(MAX_AUTH_KEY_START_INDEX),
         limit: query
             .limit
             .unwrap_or(MAX_AUTH_KEY_LIMIT)
@@ -712,6 +765,22 @@ fn remote_general_command_input(
         )?,
         arguments: request.arguments,
     })
+}
+
+fn remote_message_input(body: RemoteMessageDto, query: RemoteMessageDto) -> RemoteMessageDto {
+    RemoteMessageDto {
+        header: body.header.or(query.header),
+        text: body.text.or(query.text),
+        timeout_ms: body.timeout_ms.or(query.timeout_ms),
+    }
+}
+
+fn remote_viewing_input(body: RemoteViewingDto, query: RemoteViewingDto) -> RemoteViewingDto {
+    RemoteViewingDto {
+        item_id: body.item_id.or(query.item_id),
+        item_name: body.item_name.or(query.item_name),
+        item_type: body.item_type.or(query.item_type),
+    }
 }
 
 fn remote_named_session_input(
@@ -938,6 +1007,17 @@ mod tests {
     }
 
     #[test]
+    fn auth_keys_query_clamps_pathologically_large_start_index() {
+        let input = auth_keys_query_input(&AuthKeysQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+        });
+
+        assert_eq!(input.start_index, 10_000);
+        assert_eq!(input.limit, 50);
+    }
+
+    #[test]
     fn auth_key_inputs_require_bounded_safe_text() {
         let input = create_auth_key_input(&CreateAuthKeyQuery {
             app: Some(" Test.Client-1 ".to_owned()),
@@ -978,6 +1058,32 @@ mod tests {
     }
 
     #[test]
+    fn sessions_query_accepts_lower_camel_and_snake_case_user_id() {
+        let uri: http::Uri = "/emby/Sessions?userId=user-1".parse().unwrap();
+        let Query(query) = Query::<SessionsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+
+        let uri: http::Uri = "/emby/Sessions?user_id=user-2".parse().unwrap();
+        let Query(query) = Query::<SessionsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-2"));
+    }
+
+    #[test]
+    fn sessions_query_accepts_lower_camel_and_snake_case_device_id() {
+        let uri: http::Uri = "/emby/Sessions?deviceId=device-1".parse().unwrap();
+        let Query(query) = Query::<SessionsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.device_id.as_deref(), Some("device-1"));
+
+        let uri: http::Uri = "/emby/Sessions?device_id=device-2".parse().unwrap();
+        let Query(query) = Query::<SessionsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.device_id.as_deref(), Some("device-2"));
+    }
+
+    #[test]
     fn capabilities_query_normalizes_lists_and_booleans() {
         let user = AuthenticatedUser {
             id: 42,
@@ -1005,6 +1111,33 @@ mod tests {
         assert_eq!(input.supported_commands, ["Play", "Pause"]);
         assert!(input.supports_media_control);
         assert!(!input.supports_sync);
+    }
+
+    #[test]
+    fn capabilities_query_accepts_lower_camel_client_fields() {
+        let user = AuthenticatedUser {
+            id: 42,
+            public_id: "user-1".to_owned(),
+            username: "alice".to_owned(),
+            role_name: "user".to_owned(),
+            role_name_normalized: "user".to_owned(),
+        };
+        let query = serde_json::from_value::<SessionCapabilitiesQuery>(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "playableMediaTypes": "Audio,Video",
+            "supportedCommands": "Play,Pause",
+            "supportsMediaControl": true,
+            "supportsSync": true
+        }))
+        .unwrap();
+
+        let input = capabilities_input_from_query(&user, query).unwrap();
+
+        assert_eq!(input.session_id, "00000000-0000-0000-0000-000000000001");
+        assert_eq!(input.playable_media_types, ["Audio", "Video"]);
+        assert_eq!(input.supported_commands, ["Play", "Pause"]);
+        assert!(input.supports_media_control);
+        assert!(input.supports_sync);
     }
 
     #[test]
@@ -1046,6 +1179,55 @@ mod tests {
             serde_json::json!("Client")
         );
         assert!(input.supports_sync);
+    }
+
+    #[test]
+    fn capabilities_full_accepts_lower_camel_client_fields() {
+        let user = AuthenticatedUser {
+            id: 42,
+            public_id: "user-1".to_owned(),
+            username: "alice".to_owned(),
+            role_name: "user".to_owned(),
+            role_name_normalized: "user".to_owned(),
+        };
+        let request = serde_json::from_value::<ClientCapabilitiesDto>(serde_json::json!({
+            "playableMediaTypes": ["Audio", "Video"],
+            "supportedCommands": ["Play", "Pause"],
+            "supportsMediaControl": true,
+            "pushToken": " push-token ",
+            "pushTokenType": " fcm ",
+            "supportsSync": true,
+            "deviceProfile": {"Name": "Client"},
+            "iconUrl": " https://example.test/icon.png ",
+            "appId": " app.id "
+        }))
+        .unwrap();
+
+        let input = capabilities_input_from_full(
+            &user,
+            SessionCapabilitiesQuery {
+                id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
+                ..SessionCapabilitiesQuery::default()
+            },
+            request,
+        )
+        .unwrap();
+
+        assert_eq!(input.playable_media_types, ["Audio", "Video"]);
+        assert_eq!(input.supported_commands, ["Play", "Pause"]);
+        assert!(input.supports_media_control);
+        assert!(input.supports_sync);
+        assert_eq!(input.push_token.as_deref(), Some("push-token"));
+        assert_eq!(input.push_token_type.as_deref(), Some("fcm"));
+        assert_eq!(
+            input.icon_url.as_deref(),
+            Some("https://example.test/icon.png")
+        );
+        assert_eq!(input.app_id.as_deref(), Some("app.id"));
+        assert_eq!(
+            input.device_profile.as_ref().unwrap()["Name"],
+            serde_json::json!("Client")
+        );
     }
 
     #[test]
@@ -1116,6 +1298,64 @@ mod tests {
     }
 
     #[test]
+    fn remote_play_query_accepts_lower_camel_client_fields() {
+        let query = serde_json::from_value::<RemotePlayQuery>(serde_json::json!({
+            "itemIds": "song-1,song-2",
+            "playCommand": "PlayNow",
+            "startPositionTicks": 42,
+            "mediaSourceId": "source-1",
+            "audioStreamIndex": 1,
+            "subtitleStreamIndex": -1,
+            "startIndex": 2
+        }))
+        .unwrap();
+
+        let input = remote_play_input(
+            "00000000-0000-0000-0000-000000000001",
+            query,
+            RemotePlayRequestDto::default(),
+        )
+        .unwrap();
+
+        assert_eq!(input.item_ids, ["song-1", "song-2"]);
+        assert_eq!(input.play_command.as_deref(), Some("PlayNow"));
+        assert_eq!(input.start_position_ticks, Some(42));
+        assert_eq!(input.media_source_id.as_deref(), Some("source-1"));
+        assert_eq!(input.audio_stream_index, Some(1));
+        assert_eq!(input.subtitle_stream_index, Some(-1));
+        assert_eq!(input.start_index, Some(2));
+    }
+
+    #[test]
+    fn remote_play_body_accepts_lower_camel_client_fields() {
+        let request = serde_json::from_value::<RemotePlayRequestDto>(serde_json::json!({
+            "itemIds": ["song-1", "song-2"],
+            "playCommand": "PlayNext",
+            "startPositionTicks": 42,
+            "mediaSourceId": "source-1",
+            "audioStreamIndex": 1,
+            "subtitleStreamIndex": -1,
+            "startIndex": 2
+        }))
+        .unwrap();
+
+        let input = remote_play_input(
+            "00000000-0000-0000-0000-000000000001",
+            RemotePlayQuery::default(),
+            request,
+        )
+        .unwrap();
+
+        assert_eq!(input.item_ids, ["song-1", "song-2"]);
+        assert_eq!(input.play_command.as_deref(), Some("PlayNext"));
+        assert_eq!(input.start_position_ticks, Some(42));
+        assert_eq!(input.media_source_id.as_deref(), Some("source-1"));
+        assert_eq!(input.audio_stream_index, Some(1));
+        assert_eq!(input.subtitle_stream_index, Some(-1));
+        assert_eq!(input.start_index, Some(2));
+    }
+
+    #[test]
     fn remote_playstate_command_input_normalizes_seek_ticks() {
         let input = remote_playstate_command_input(
             "00000000-0000-0000-0000-000000000001",
@@ -1129,6 +1369,20 @@ mod tests {
         assert_eq!(input.session_id, "00000000-0000-0000-0000-000000000001");
         assert_eq!(input.command, "Seek");
         assert_eq!(input.seek_position_ticks, Some(0));
+    }
+
+    #[test]
+    fn remote_playstate_query_accepts_lower_camel_seek_position_ticks() {
+        let query = serde_json::from_value::<RemotePlaystateCommandQuery>(serde_json::json!({
+            "seekPositionTicks": 42
+        }))
+        .unwrap();
+
+        let input =
+            remote_playstate_command_input("00000000-0000-0000-0000-000000000001", "Seek", query)
+                .unwrap();
+
+        assert_eq!(input.seek_position_ticks, Some(42));
     }
 
     #[test]
@@ -1149,6 +1403,125 @@ mod tests {
             input.arguments.as_ref().unwrap()["Header"],
             serde_json::json!("Now playing")
         );
+    }
+
+    #[test]
+    fn remote_general_command_body_accepts_lower_camel_client_fields() {
+        let request = serde_json::from_value::<RemoteGeneralCommandDto>(serde_json::json!({
+            "command": "DisplayMessage",
+            "arguments": {"Header": "Now playing"}
+        }))
+        .unwrap();
+
+        let input = remote_general_command_input(None, None, request).unwrap();
+
+        assert_eq!(input.command.as_deref(), Some("DisplayMessage"));
+        assert_eq!(
+            input.arguments.as_ref().unwrap()["Header"],
+            serde_json::json!("Now playing")
+        );
+    }
+
+    #[test]
+    fn remote_message_body_accepts_lower_camel_client_fields() {
+        let message = serde_json::from_value::<RemoteMessageDto>(serde_json::json!({
+            "header": "Playback",
+            "text": "Paused",
+            "timeoutMs": 1500
+        }))
+        .unwrap();
+
+        assert_eq!(message.header.as_deref(), Some("Playback"));
+        assert_eq!(message.text.as_deref(), Some("Paused"));
+        assert_eq!(message.timeout_ms, Some(1500));
+    }
+
+    #[test]
+    fn remote_message_input_accepts_query_only_fields() {
+        let query = serde_json::from_value::<RemoteMessageDto>(serde_json::json!({
+            "header": "Playback",
+            "text": "Paused",
+            "timeoutMs": 1500
+        }))
+        .unwrap();
+
+        let input = remote_message_input(RemoteMessageDto::default(), query);
+
+        assert_eq!(input.header.as_deref(), Some("Playback"));
+        assert_eq!(input.text.as_deref(), Some("Paused"));
+        assert_eq!(input.timeout_ms, Some(1500));
+    }
+
+    #[test]
+    fn remote_message_input_preserves_body_fields_over_query() {
+        let body = serde_json::from_value::<RemoteMessageDto>(serde_json::json!({
+            "header": "Playback",
+            "text": "Paused"
+        }))
+        .unwrap();
+        let query = serde_json::from_value::<RemoteMessageDto>(serde_json::json!({
+            "header": "Other",
+            "text": "Other",
+            "timeoutMs": 1500
+        }))
+        .unwrap();
+
+        let input = remote_message_input(body, query);
+
+        assert_eq!(input.header.as_deref(), Some("Playback"));
+        assert_eq!(input.text.as_deref(), Some("Paused"));
+        assert_eq!(input.timeout_ms, Some(1500));
+    }
+
+    #[test]
+    fn remote_viewing_body_accepts_lower_camel_client_fields() {
+        let viewing = serde_json::from_value::<RemoteViewingDto>(serde_json::json!({
+            "itemId": "item-1",
+            "itemName": "Movie",
+            "itemType": "Movie"
+        }))
+        .unwrap();
+
+        assert_eq!(viewing.item_id.as_deref(), Some("item-1"));
+        assert_eq!(viewing.item_name.as_deref(), Some("Movie"));
+        assert_eq!(viewing.item_type.as_deref(), Some("Movie"));
+    }
+
+    #[test]
+    fn remote_viewing_input_accepts_query_only_fields() {
+        let query = serde_json::from_value::<RemoteViewingDto>(serde_json::json!({
+            "itemId": "item-1",
+            "itemName": "Movie",
+            "itemType": "Movie"
+        }))
+        .unwrap();
+
+        let input = remote_viewing_input(RemoteViewingDto::default(), query);
+
+        assert_eq!(input.item_id.as_deref(), Some("item-1"));
+        assert_eq!(input.item_name.as_deref(), Some("Movie"));
+        assert_eq!(input.item_type.as_deref(), Some("Movie"));
+    }
+
+    #[test]
+    fn remote_viewing_input_preserves_body_fields_over_query() {
+        let body = serde_json::from_value::<RemoteViewingDto>(serde_json::json!({
+            "itemId": "item-1",
+            "itemName": "Movie"
+        }))
+        .unwrap();
+        let query = serde_json::from_value::<RemoteViewingDto>(serde_json::json!({
+            "itemId": "other-item",
+            "itemName": "Other",
+            "itemType": "Movie"
+        }))
+        .unwrap();
+
+        let input = remote_viewing_input(body, query);
+
+        assert_eq!(input.item_id.as_deref(), Some("item-1"));
+        assert_eq!(input.item_name.as_deref(), Some("Movie"));
+        assert_eq!(input.item_type.as_deref(), Some("Movie"));
     }
 
     #[test]
@@ -1173,5 +1546,34 @@ mod tests {
 
         assert_eq!(scope.session_id, None);
         assert_eq!(scope.device_id, None);
+    }
+
+    #[test]
+    fn play_queue_query_accepts_lower_camel_and_snake_case_client_fields() {
+        let uri: http::Uri =
+            "/emby/Sessions/PlayQueue?id=00000000-0000-0000-0000-000000000001&deviceId=device-1"
+                .parse()
+                .unwrap();
+        let Query(query) = Query::<PlayQueueQuery>::try_from_uri(&uri).unwrap();
+        let scope = play_queue_scope_from_query(&query).unwrap();
+
+        assert_eq!(
+            scope.session_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(scope.device_id.as_deref(), Some("device-1"));
+
+        let uri: http::Uri =
+            "/emby/Sessions/PlayQueue?id=00000000-0000-0000-0000-000000000002&device_id=device-2"
+                .parse()
+                .unwrap();
+        let Query(query) = Query::<PlayQueueQuery>::try_from_uri(&uri).unwrap();
+        let scope = play_queue_scope_from_query(&query).unwrap();
+
+        assert_eq!(
+            scope.session_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000002")
+        );
+        assert_eq!(scope.device_id.as_deref(), Some("device-2"));
     }
 }

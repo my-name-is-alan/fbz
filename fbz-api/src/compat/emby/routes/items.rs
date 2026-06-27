@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, Uri},
+    http::{HeaderMap, StatusCode, Uri},
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,10 +31,13 @@ use super::{
 
 const DEFAULT_ITEMS_LIMIT: u32 = 100;
 const MAX_ITEMS_LIMIT: u32 = 200;
+const MAX_ITEMS_START_INDEX: u32 = 10_000;
 const DEFAULT_SEARCH_HINTS_LIMIT: u32 = 20;
 const MAX_SEARCH_HINTS_LIMIT: u32 = 50;
 const DEFAULT_IMAGE_TYPE_LIMIT: usize = 1;
 const MAX_IMAGE_TYPE_LIMIT: usize = 10;
+const MAX_VIDEO_VERSION_IDS: usize = 64;
+const MAX_VIDEO_VERSION_ID_LEN: usize = 128;
 const PRIMARY_IMAGE_TYPES: &[&str] = &["primary", "poster"];
 const POSTER_IMAGE_TYPES: &[&str] = &["poster", "primary"];
 const BACKDROP_IMAGE_TYPES: &[&str] = &["backdrop"];
@@ -47,62 +50,117 @@ const ART_IMAGE_TYPES: &[&str] = &["artist", "album"];
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "imageTypes", alias = "image_types")]
     pub image_types: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
+    #[serde(alias = "anyProviderIdEquals", alias = "any_provider_id_equals")]
     pub any_provider_id_equals: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "filters")]
     pub filters: Option<String>,
+    #[serde(alias = "isPlayed", alias = "is_played")]
     pub is_played: Option<bool>,
+    #[serde(alias = "isFavorite", alias = "is_favorite")]
     pub is_favorite: Option<bool>,
+    #[serde(alias = "isFolder", alias = "is_folder")]
     pub is_folder: Option<bool>,
+    #[serde(alias = "isMovie", alias = "is_movie")]
     pub is_movie: Option<bool>,
+    #[serde(alias = "isSeries", alias = "is_series")]
     pub is_series: Option<bool>,
+    #[serde(alias = "ids")]
     pub ids: Option<String>,
+    #[serde(alias = "excludeItemIds", alias = "exclude_item_ids")]
     pub exclude_item_ids: Option<String>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "years")]
     pub years: Option<String>,
+    #[serde(alias = "nameStartsWith", alias = "name_starts_with")]
     pub name_starts_with: Option<String>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(alias = "nameLessThan", alias = "name_less_than")]
     pub name_less_than: Option<String>,
+    #[serde(alias = "genres")]
     pub genres: Option<String>,
+    #[serde(alias = "genreIds", alias = "genre_ids")]
     pub genre_ids: Option<String>,
+    #[serde(alias = "officialRatings", alias = "official_ratings")]
     pub official_ratings: Option<String>,
+    #[serde(alias = "tags")]
     pub tags: Option<String>,
+    #[serde(alias = "excludeTags", alias = "exclude_tags")]
     pub exclude_tags: Option<String>,
+    #[serde(alias = "studios")]
     pub studios: Option<String>,
+    #[serde(alias = "studioIds", alias = "studio_ids")]
     pub studio_ids: Option<String>,
+    #[serde(alias = "person")]
     pub person: Option<String>,
+    #[serde(alias = "personIds", alias = "person_ids")]
     pub person_ids: Option<String>,
+    #[serde(alias = "personTypes", alias = "person_types")]
     pub person_types: Option<String>,
+    #[serde(alias = "artists")]
     pub artists: Option<String>,
+    #[serde(alias = "artistIds", alias = "artist_ids")]
     pub artist_ids: Option<String>,
+    #[serde(alias = "albums")]
     pub albums: Option<String>,
+    #[serde(alias = "albumIds", alias = "album_ids")]
     pub album_ids: Option<String>,
+    #[serde(alias = "mediaTypes", alias = "media_types")]
     pub media_types: Option<String>,
+    #[serde(alias = "containers")]
     pub containers: Option<String>,
+    #[serde(alias = "audioCodecs", alias = "audio_codecs")]
     pub audio_codecs: Option<String>,
+    #[serde(alias = "videoCodecs", alias = "video_codecs")]
     pub video_codecs: Option<String>,
+    #[serde(alias = "subtitleCodecs", alias = "subtitle_codecs")]
     pub subtitle_codecs: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SearchHintsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "mediaTypes", alias = "media_types")]
     pub media_types: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
 }
 
@@ -135,29 +193,48 @@ pub struct SearchHintDto {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct MusicItemsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "years")]
     pub years: Option<String>,
+    #[serde(alias = "genres")]
     pub genres: Option<String>,
+    #[serde(alias = "genreIds", alias = "genre_ids")]
     pub genre_ids: Option<String>,
+    #[serde(alias = "artists")]
     pub artists: Option<String>,
+    #[serde(alias = "artistIds", alias = "artist_ids")]
     pub artist_ids: Option<String>,
+    #[serde(alias = "albums")]
     pub albums: Option<String>,
+    #[serde(alias = "albumIds", alias = "album_ids")]
     pub album_ids: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemByIdQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
@@ -167,135 +244,246 @@ pub struct ItemByIdQuery {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct InstantMixByIdQuery {
+    #[serde(alias = "id")]
     pub id: Option<String>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
+    pub enable_image_types: Option<String>,
+}
+
+/// Query for the path-seeded instant mix endpoints `Songs/{Id}/InstantMix`,
+/// `Albums/{Id}/InstantMix` and `Items/{Id}/InstantMix`, where the seed is the
+/// path item id. Mirrors the music seed mix query shape (paging + image fields);
+/// client sort/type fields are intentionally not accepted because the mix is a
+/// fixed Audio listing seeded by the item's genres.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ItemInstantMixQuery {
+    #[serde(alias = "userId", alias = "user_id")]
+    pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
+    pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
+    pub limit: Option<u32>,
+    #[serde(alias = "fields")]
+    pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
+    pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
+    pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CriticReviewsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct AdditionalPartsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
+    #[serde(alias = "enableUserData", alias = "enable_user_data")]
     pub enable_user_data: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
+pub struct MergeVersionsQuery {
+    #[serde(alias = "ids")]
+    pub ids: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub struct SpecialFeaturesQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
+    #[serde(alias = "enableUserData", alias = "enable_user_data")]
     pub enable_user_data: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaybackExtrasQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
+    #[serde(alias = "enableUserData", alias = "enable_user_data")]
     pub enable_user_data: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemCountsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub(super) struct MediaListQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SuggestionsQuery {
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "itemLimit", alias = "item_limit")]
     pub item_limit: Option<u32>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "mediaTypes", alias = "media_types")]
     pub media_types: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct MovieRecommendationsQuery {
+    #[serde(alias = "categoryLimit", alias = "category_limit")]
     pub category_limit: Option<u32>,
+    #[serde(alias = "itemLimit", alias = "item_limit")]
     pub item_limit: Option<u32>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "enableUserData", alias = "enable_user_data")]
     pub enable_user_data: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct TrailersQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "mediaTypes", alias = "media_types")]
     pub media_types: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
+    #[serde(alias = "imageTypeLimit", alias = "image_type_limit")]
     pub image_type_limit: Option<u32>,
+    #[serde(alias = "enableImageTypes", alias = "enable_image_types")]
     pub enable_image_types: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SimilarItemsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
 }
 
@@ -355,6 +543,85 @@ pub async fn songs(
     Ok(Json(result))
 }
 
+pub async fn album_songs(
+    State(state): State<AppState>,
+    Path(album_id): Path<String>,
+    Query(query): Query<MusicItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let start_index = clamped_start_index_u32(query.start_index);
+    let Some(items_query) = album_path_songs_query(&album_id, query) else {
+        return Ok(Json(QueryResultDto::new(Vec::new(), 0, start_index)));
+    };
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
+            .await?;
+
+    Ok(Json(result))
+}
+
+pub async fn artist_songs(
+    State(state): State<AppState>,
+    Path(artist_id): Path<String>,
+    Query(query): Query<MusicItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    artist_music_items_response(
+        state,
+        artist_id,
+        query,
+        "Audio",
+        Some("Audio"),
+        headers,
+        uri,
+    )
+    .await
+}
+
+pub async fn artist_albums(
+    State(state): State<AppState>,
+    Path(artist_id): Path<String>,
+    Query(query): Query<MusicItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    artist_music_items_response(state, artist_id, query, "MusicAlbum", None, headers, uri).await
+}
+
+async fn artist_music_items_response(
+    state: AppState,
+    artist_id: String,
+    query: MusicItemsQuery,
+    include_item_types: &'static str,
+    media_types: Option<&'static str>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let start_index = clamped_start_index_u32(query.start_index);
+    let Some(items_query) =
+        artist_path_music_query(&artist_id, query, include_item_types, media_types)
+    else {
+        return Ok(Json(QueryResultDto::new(Vec::new(), 0, start_index)));
+    };
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
+            .await?;
+
+    Ok(Json(result))
+}
+
 pub async fn music_genre_instant_mix(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -368,7 +635,7 @@ pub async fn music_genre_instant_mix(
     let authenticated_user =
         authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
 
-    let start_index = query.start_index.unwrap_or(0);
+    let start_index = clamped_start_index_u32(query.start_index);
     let Some(items_query) = music_genre_instant_mix_query(&name, query) else {
         return Ok(Json(QueryResultDto::new(Vec::new(), 0, start_index)));
     };
@@ -389,6 +656,27 @@ pub async fn artist_instant_mix(
     music_seed_instant_mix(state, MusicSeed::Artist, query, headers, uri).await
 }
 
+pub async fn artist_instant_mix_by_path(
+    State(state): State<AppState>,
+    Path(artist_id): Path<String>,
+    Query(query): Query<InstantMixByIdQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.clone();
+    let start_index = clamped_start_index_u32(query.start_index);
+    let items_query = instant_mix_by_path_id_query(MusicSeed::Artist, &artist_id, query);
+    music_seed_instant_mix_response(
+        state,
+        user_id.as_deref(),
+        start_index,
+        items_query,
+        headers,
+        uri,
+    )
+    .await
+}
+
 pub async fn music_genre_instant_mix_by_id(
     State(state): State<AppState>,
     Query(query): Query<InstantMixByIdQuery>,
@@ -405,14 +693,34 @@ async fn music_seed_instant_mix(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.clone();
+    let start_index = clamped_start_index_u32(query.start_index);
+    let items_query = instant_mix_by_id_query(seed, query);
+    music_seed_instant_mix_response(
+        state,
+        user_id.as_deref(),
+        start_index,
+        items_query,
+        headers,
+        uri,
+    )
+    .await
+}
+
+async fn music_seed_instant_mix_response(
+    state: AppState,
+    user_id: Option<&str>,
+    start_index: u32,
+    items_query: Option<ItemsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let authenticated_user =
-        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let authenticated_user = authenticate_query_user(&state, user_id, &headers, &uri).await?;
 
-    let start_index = query.start_index.unwrap_or(0);
-    let Some(items_query) = instant_mix_by_id_query(seed, query) else {
+    let Some(items_query) = items_query else {
         return Ok(Json(QueryResultDto::new(Vec::new(), 0, start_index)));
     };
 
@@ -421,6 +729,74 @@ async fn music_seed_instant_mix(
             .await?;
 
     Ok(Json(result))
+}
+
+pub async fn item_instant_mix(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    Query(query): Query<ItemInstantMixQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+
+    let start_index = clamped_start_index_u32(query.start_index);
+    let Some(genre_ids) = LibraryRepository::new(database.clone())
+        .list_instant_mix_seed_genre_ids(authenticated_user.id, &item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to resolve instant mix seed: {err}")))?
+    else {
+        return Err(AppError::not_found("item not found"));
+    };
+
+    let Some(items_query) = item_instant_mix_query(&item_id, &genre_ids, query) else {
+        return Ok(Json(QueryResultDto::new(Vec::new(), 0, start_index)));
+    };
+
+    let result =
+        list_items_for_authenticated_user(database.clone(), authenticated_user, items_query)
+            .await?;
+
+    Ok(Json(result))
+}
+
+/// Build the Audio items query for an item-seeded instant mix. Returns `None`
+/// when the seed item carries no genres so the caller answers with an empty mix
+/// instead of an unfiltered Audio listing. The seed's genre ids become the
+/// authoritative `genre_ids` filter, the seed item is excluded from its own mix,
+/// and the query flows through the proven Audio listing path so permission
+/// filtering and DTO mapping stay identical to `/Songs?GenreIds=...`.
+fn item_instant_mix_query(
+    item_id: &str,
+    genre_ids: &[i64],
+    query: ItemInstantMixQuery,
+) -> Option<ItemsQuery> {
+    if genre_ids.is_empty() {
+        return None;
+    }
+    let genre_ids_csv = genre_ids
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(ItemsQuery {
+        start_index: query.start_index,
+        limit: query.limit,
+        recursive: Some(true),
+        include_item_types: Some("Audio".to_owned()),
+        media_types: Some("Audio".to_owned()),
+        genre_ids: Some(genre_ids_csv),
+        exclude_item_ids: Some(item_id.to_owned()),
+        fields: query.fields,
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types,
+        ..ItemsQuery::default()
+    })
 }
 
 pub async fn search_hints(
@@ -588,6 +964,31 @@ fn music_items_query(
     }
 }
 
+fn album_path_songs_query(album_id: &str, mut query: MusicItemsQuery) -> Option<ItemsQuery> {
+    let album_id = album_id.trim();
+    if album_id.is_empty() {
+        return None;
+    }
+    query.albums = None;
+    query.album_ids = Some(album_id.to_owned());
+    Some(music_items_query(query, "Audio", Some("Audio")))
+}
+
+fn artist_path_music_query(
+    artist_id: &str,
+    mut query: MusicItemsQuery,
+    include_item_types: &'static str,
+    media_types: Option<&'static str>,
+) -> Option<ItemsQuery> {
+    let artist_id = artist_id.trim();
+    if artist_id.is_empty() {
+        return None;
+    }
+    query.artists = None;
+    query.artist_ids = Some(artist_id.to_owned());
+    Some(music_items_query(query, include_item_types, media_types))
+}
+
 /// Build the underlying Audio items query for a `MusicGenres/{Name}/InstantMix`
 /// seed. The path genre name is the authoritative seed, so any client-supplied
 /// genre filter is replaced; returns `None` when the seed name is blank so the
@@ -642,6 +1043,19 @@ fn instant_mix_by_id_query(seed: MusicSeed, query: InstantMixByIdQuery) -> Optio
         MusicSeed::Genre => items_query.genre_ids = Some(seed_id),
     }
     Some(items_query)
+}
+
+fn instant_mix_by_path_id_query(
+    seed: MusicSeed,
+    path_id: &str,
+    mut query: InstantMixByIdQuery,
+) -> Option<ItemsQuery> {
+    let seed_id = path_id.trim();
+    if seed_id.is_empty() {
+        return None;
+    }
+    query.id = Some(seed_id.to_owned());
+    instant_mix_by_id_query(seed, query)
 }
 
 fn search_hints_items_query(query: SearchHintsQuery) -> ItemsQuery {
@@ -707,7 +1121,7 @@ struct TrailersWindow {
 impl TrailersWindow {
     fn from_query(query: &TrailersQuery) -> Self {
         Self {
-            start_index: query.start_index.unwrap_or(0) as usize,
+            start_index: clamped_start_index_usize(query.start_index),
             limit: query
                 .limit
                 .unwrap_or(DEFAULT_ITEMS_LIMIT)
@@ -745,6 +1159,18 @@ fn trailers_query_input(query: &TrailersQuery, window: TrailersWindow) -> Traile
         include_item_types: include_item_types_filter(query.include_item_types.as_deref()),
         media_types: media_type_list_filter(query.media_types.as_deref()),
     }
+}
+
+fn clamped_start_index_i64(start_index: Option<u32>) -> i64 {
+    i64::from(start_index.unwrap_or(0).min(MAX_ITEMS_START_INDEX))
+}
+
+fn clamped_start_index_usize(start_index: Option<u32>) -> usize {
+    start_index.unwrap_or(0).min(MAX_ITEMS_START_INDEX) as usize
+}
+
+fn clamped_start_index_u32(start_index: Option<u32>) -> u32 {
+    start_index.unwrap_or(0).min(MAX_ITEMS_START_INDEX)
 }
 
 pub async fn resume_items(
@@ -1029,6 +1455,36 @@ pub async fn additional_video_parts(
     Ok(Json(empty_additional_parts_result()))
 }
 
+pub async fn delete_video_alternate_sources(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    ensure_server_admin(&user)?;
+    let _item_id = video_version_item_id(&item_id)?;
+
+    Err(AppError::conflict(
+        "video alternate source deletion is not configured",
+    ))
+}
+
+pub async fn merge_video_versions(
+    State(state): State<AppState>,
+    Query(query): Query<MergeVersionsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    ensure_server_admin(&user)?;
+    let _input = merge_versions_input(&query)?;
+
+    Err(AppError::conflict(
+        "video version merging is not configured",
+    ))
+}
+
 pub async fn item_delete_info(
     State(state): State<AppState>,
     Path(item_id): Path<String>,
@@ -1288,7 +1744,7 @@ async fn special_features_for_user(
     Ok(Json(QueryResultDto::new(
         Vec::new(),
         0,
-        query.start_index.unwrap_or(0),
+        clamped_start_index_u32(query.start_index),
     )))
 }
 
@@ -1303,7 +1759,7 @@ async fn intros_for_user(
     Ok(Json(QueryResultDto::new(
         Vec::new(),
         0,
-        query.start_index.unwrap_or(0),
+        clamped_start_index_u32(query.start_index),
     )))
 }
 
@@ -1384,7 +1840,7 @@ pub(super) struct ItemWindow {
 impl ItemWindow {
     fn from_query(query: &ItemsQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: clamped_start_index_i64(query.start_index),
             limit: i64::from(
                 query
                     .limit
@@ -1396,7 +1852,7 @@ impl ItemWindow {
 
     pub(super) fn from_media_query(query: &MediaListQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: clamped_start_index_i64(query.start_index),
             limit: i64::from(
                 query
                     .limit
@@ -1408,7 +1864,7 @@ impl ItemWindow {
 
     fn from_similar_query(query: &SimilarItemsQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: clamped_start_index_i64(query.start_index),
             limit: i64::from(
                 query
                     .limit
@@ -1428,7 +1884,7 @@ struct CriticReviewsWindow {
 impl CriticReviewsWindow {
     fn from_query(query: &CriticReviewsQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: clamped_start_index_i64(query.start_index),
             limit: i64::from(
                 query
                     .limit
@@ -1448,7 +1904,7 @@ struct SearchHintsWindow {
 impl SearchHintsWindow {
     fn from_query(query: &SearchHintsQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: clamped_start_index_i64(query.start_index),
             limit: i64::from(
                 query
                     .limit
@@ -1476,6 +1932,64 @@ fn library_views_to_items(
 
 fn empty_additional_parts_result() -> QueryResultDto<BaseItemDto> {
     QueryResultDto::new(Vec::new(), 0, 0)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MergeVersionsInput {
+    ids: Vec<String>,
+}
+
+fn ensure_server_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
+    if !user.can_manage_server() {
+        return Err(AppError::forbidden("server management permission required"));
+    }
+
+    Ok(())
+}
+
+fn video_version_item_id(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::unprocessable("video item id is required"));
+    }
+    if value.len() > MAX_VIDEO_VERSION_ID_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(AppError::unprocessable("video item id is invalid"));
+    }
+
+    Ok(value.to_owned())
+}
+
+fn merge_versions_input(query: &MergeVersionsQuery) -> Result<MergeVersionsInput, AppError> {
+    let Some(raw_ids) = query.ids.as_deref() else {
+        return Err(AppError::unprocessable("Ids is required"));
+    };
+    let mut ids = Vec::new();
+
+    for raw_id in raw_ids.split(',') {
+        let id = raw_id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let id = video_version_item_id(id)?;
+        if ids.iter().all(|existing| existing != &id) {
+            ids.push(id);
+        }
+        if ids.len() > MAX_VIDEO_VERSION_IDS {
+            return Err(AppError::unprocessable("too many video version ids"));
+        }
+    }
+
+    if ids.len() < 2 {
+        return Err(AppError::unprocessable(
+            "at least two video version ids are required",
+        ));
+    }
+
+    Ok(MergeVersionsInput { ids })
 }
 
 pub(super) fn media_query_result(
@@ -2445,6 +2959,7 @@ fn is_folder(item_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use axum::{extract::Query, http::Uri};
     use serde_json::json;
 
     use super::*;
@@ -2501,6 +3016,54 @@ mod tests {
 
         assert_eq!(window.start_index, 20);
         assert_eq!(window.limit, i64::from(MAX_ITEMS_LIMIT));
+    }
+
+    #[test]
+    fn item_related_windows_clamp_pathologically_large_start_index() {
+        let item_window = ItemWindow::from_query(&ItemsQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..ItemsQuery::default()
+        });
+        let media_window = ItemWindow::from_media_query(&MediaListQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..MediaListQuery::default()
+        });
+        let similar_window = ItemWindow::from_similar_query(&SimilarItemsQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..SimilarItemsQuery::default()
+        });
+        let search_window = SearchHintsWindow::from_query(&SearchHintsQuery {
+            start_index: Some(500_000),
+            limit: Some(25),
+            ..SearchHintsQuery::default()
+        });
+        let critic_window = CriticReviewsWindow::from_query(&CriticReviewsQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..CriticReviewsQuery::default()
+        });
+        let trailers_window = TrailersWindow::from_query(&TrailersQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..TrailersQuery::default()
+        });
+
+        assert_eq!(item_window.start_index, 10_000);
+        assert_eq!(media_window.start_index, 10_000);
+        assert_eq!(similar_window.start_index, 10_000);
+        assert_eq!(search_window.start_index, 10_000);
+        assert_eq!(critic_window.start_index, 10_000);
+        assert_eq!(trailers_window.start_index, 10_000);
+    }
+
+    #[test]
+    fn item_empty_result_windows_clamp_pathologically_large_start_index() {
+        assert_eq!(clamped_start_index_u32(Some(500_000)), 10_000);
+        assert_eq!(clamped_start_index_u32(Some(25)), 25);
+        assert_eq!(clamped_start_index_u32(None), 0);
     }
 
     #[test]
@@ -2610,6 +3173,80 @@ mod tests {
     }
 
     #[test]
+    fn album_path_songs_query_uses_path_album_id_over_query_filters() {
+        let query = MusicItemsQuery {
+            start_index: Some(5),
+            limit: Some(25),
+            albums: Some("Client Album".to_owned()),
+            album_ids: Some("query-album-id".to_owned()),
+            artists: Some("Artist A".to_owned()),
+            ..MusicItemsQuery::default()
+        };
+
+        let items_query = album_path_songs_query(" path-album-id ", query)
+            .expect("non-empty album path id yields a songs query");
+
+        assert_eq!(items_query.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.media_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.recursive, Some(true));
+        assert_eq!(items_query.album_ids.as_deref(), Some("path-album-id"));
+        assert_eq!(items_query.albums, None);
+        assert_eq!(items_query.artists.as_deref(), Some("Artist A"));
+        assert_eq!(items_query.start_index, Some(5));
+        assert_eq!(items_query.limit, Some(25));
+    }
+
+    #[test]
+    fn artist_path_songs_query_uses_path_artist_id_over_query_filters() {
+        let query = MusicItemsQuery {
+            start_index: Some(5),
+            limit: Some(25),
+            artists: Some("Client Artist".to_owned()),
+            artist_ids: Some("query-artist-id".to_owned()),
+            albums: Some("Album A".to_owned()),
+            ..MusicItemsQuery::default()
+        };
+
+        let items_query =
+            artist_path_music_query(" path-artist-id ", query, "Audio", Some("Audio"))
+                .expect("non-empty artist path id yields a songs query");
+
+        assert_eq!(items_query.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.media_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.recursive, Some(true));
+        assert_eq!(items_query.artist_ids.as_deref(), Some("path-artist-id"));
+        assert_eq!(items_query.artists, None);
+        assert_eq!(items_query.albums.as_deref(), Some("Album A"));
+        assert_eq!(items_query.start_index, Some(5));
+        assert_eq!(items_query.limit, Some(25));
+    }
+
+    #[test]
+    fn artist_path_albums_query_uses_path_artist_id_over_query_filters() {
+        let query = MusicItemsQuery {
+            limit: Some(25),
+            artists: Some("Client Artist".to_owned()),
+            artist_ids: Some("query-artist-id".to_owned()),
+            genres: Some("Jazz".to_owned()),
+            ..MusicItemsQuery::default()
+        };
+
+        let items_query = artist_path_music_query(" path-artist-id ", query, "MusicAlbum", None)
+            .expect("non-empty artist path id yields an albums query");
+
+        assert_eq!(
+            items_query.include_item_types.as_deref(),
+            Some("MusicAlbum")
+        );
+        assert_eq!(items_query.media_types, None);
+        assert_eq!(items_query.recursive, Some(true));
+        assert_eq!(items_query.artist_ids.as_deref(), Some("path-artist-id"));
+        assert_eq!(items_query.artists, None);
+        assert_eq!(items_query.genres.as_deref(), Some("Jazz"));
+        assert_eq!(items_query.limit, Some(25));
+    }
+
+    #[test]
     fn music_genre_instant_mix_seeds_audio_query_from_path_genre() {
         let query = MusicItemsQuery {
             user_id: Some("user-1".to_owned()),
@@ -2658,6 +3295,28 @@ mod tests {
     }
 
     #[test]
+    fn artist_path_seed_instant_mix_uses_path_id_over_query_id() {
+        let query = InstantMixByIdQuery {
+            id: Some("query-artist-id".to_owned()),
+            start_index: Some(10),
+            limit: Some(30),
+            ..InstantMixByIdQuery::default()
+        };
+
+        let items_query =
+            instant_mix_by_path_id_query(MusicSeed::Artist, " path-artist-id ", query)
+                .expect("artist path seed yields a query");
+
+        assert_eq!(items_query.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.media_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.recursive, Some(true));
+        assert_eq!(items_query.artist_ids.as_deref(), Some("path-artist-id"));
+        assert_eq!(items_query.genre_ids, None);
+        assert_eq!(items_query.start_index, Some(10));
+        assert_eq!(items_query.limit, Some(30));
+    }
+
+    #[test]
     fn genre_id_seed_instant_mix_filters_audio_by_genre_id() {
         let query = InstantMixByIdQuery {
             id: Some("  42  ".to_owned()),
@@ -2683,6 +3342,45 @@ mod tests {
                     id: Some("   ".to_owned()),
                     ..InstantMixByIdQuery::default()
                 }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn item_seed_instant_mix_filters_audio_by_seed_genres_and_excludes_seed() {
+        let query = ItemInstantMixQuery {
+            user_id: Some("user-1".to_owned()),
+            start_index: Some(5),
+            limit: Some(40),
+            ..ItemInstantMixQuery::default()
+        };
+
+        let items_query =
+            item_instant_mix_query("11111111-2222-3333-4444-555555555555", &[7, 42], query)
+                .expect("seed with genres yields a query");
+        assert_eq!(items_query.include_item_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.media_types.as_deref(), Some("Audio"));
+        assert_eq!(items_query.recursive, Some(true));
+        // Seed genre ids become the authoritative genre filter (comma-joined so
+        // id_list_filter splits them back into a numeric id set).
+        assert_eq!(items_query.genre_ids.as_deref(), Some("7,42"));
+        // The seed item is excluded from its own mix.
+        assert_eq!(
+            items_query.exclude_item_ids.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(items_query.start_index, Some(5));
+        assert_eq!(items_query.limit, Some(40));
+    }
+
+    #[test]
+    fn item_seed_instant_mix_returns_no_query_when_seed_has_no_genres() {
+        assert!(
+            item_instant_mix_query(
+                "11111111-2222-3333-4444-555555555555",
+                &[],
+                ItemInstantMixQuery::default(),
             )
             .is_none()
         );
@@ -2847,6 +3545,480 @@ mod tests {
             query.enable_image_types.as_deref(),
             Some("Primary,Backdrop")
         );
+    }
+
+    #[test]
+    fn item_helper_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Artists/InstantMix?",
+            "id=artist-1&userId=user-1&startIndex=1&limit=20",
+            "&fields=MediaSources&enableImages=true&imageTypeLimit=2",
+            "&enableImageTypes=Primary,Backdrop"
+        )
+        .parse()
+        .unwrap();
+        let Query(instant_mix) = Query::<InstantMixByIdQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(instant_mix.id.as_deref(), Some("artist-1"));
+        assert_eq!(instant_mix.user_id.as_deref(), Some("user-1"));
+        assert_eq!(instant_mix.start_index, Some(1));
+        assert_eq!(instant_mix.limit, Some(20));
+        assert_eq!(instant_mix.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(instant_mix.enable_images, Some(true));
+        assert_eq!(instant_mix.image_type_limit, Some(2));
+        assert_eq!(
+            instant_mix.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/InstantMix?",
+            "userId=user-1&startIndex=2&limit=30&fields=MediaSources",
+            "&enableImages=true&imageTypeLimit=3&enableImageTypes=Primary"
+        )
+        .parse()
+        .unwrap();
+        let Query(item_mix) = Query::<ItemInstantMixQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(item_mix.user_id.as_deref(), Some("user-1"));
+        assert_eq!(item_mix.start_index, Some(2));
+        assert_eq!(item_mix.limit, Some(30));
+        assert_eq!(item_mix.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(item_mix.enable_images, Some(true));
+        assert_eq!(item_mix.image_type_limit, Some(3));
+        assert_eq!(item_mix.enable_image_types.as_deref(), Some("Primary"));
+
+        let uri: Uri = "/emby/Items/item-1/CriticReviews?userId=user-1&startIndex=4&limit=8"
+            .parse()
+            .unwrap();
+        let Query(reviews) = Query::<CriticReviewsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(reviews.user_id.as_deref(), Some("user-1"));
+        assert_eq!(reviews.start_index, Some(4));
+        assert_eq!(reviews.limit, Some(8));
+
+        let uri: Uri = concat!(
+            "/emby/Videos/item-1/AdditionalParts?",
+            "userId=user-1&fields=MediaSources&enableImages=true",
+            "&imageTypeLimit=2&enableImageTypes=Primary&enableUserData=false"
+        )
+        .parse()
+        .unwrap();
+        let Query(parts) = Query::<AdditionalPartsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(parts.user_id.as_deref(), Some("user-1"));
+        assert_eq!(parts.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(parts.enable_images, Some(true));
+        assert_eq!(parts.image_type_limit, Some(2));
+        assert_eq!(parts.enable_image_types.as_deref(), Some("Primary"));
+        assert_eq!(parts.enable_user_data, Some(false));
+
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/SpecialFeatures?",
+            "userId=user-1&startIndex=5&limit=9&fields=Overview",
+            "&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
+            "&enableUserData=true"
+        )
+        .parse()
+        .unwrap();
+        let Query(features) = Query::<SpecialFeaturesQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(features.user_id.as_deref(), Some("user-1"));
+        assert_eq!(features.start_index, Some(5));
+        assert_eq!(features.limit, Some(9));
+        assert_eq!(features.fields.as_deref(), Some("Overview"));
+        assert_eq!(features.enable_images, Some(true));
+        assert_eq!(features.image_type_limit, Some(2));
+        assert_eq!(features.enable_image_types.as_deref(), Some("Primary"));
+        assert_eq!(features.enable_user_data, Some(true));
+
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/Intros?",
+            "userId=user-1&startIndex=6&limit=10&fields=MediaSources",
+            "&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary",
+            "&enableUserData=false"
+        )
+        .parse()
+        .unwrap();
+        let Query(extras) = Query::<PlaybackExtrasQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(extras.user_id.as_deref(), Some("user-1"));
+        assert_eq!(extras.start_index, Some(6));
+        assert_eq!(extras.limit, Some(10));
+        assert_eq!(extras.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(extras.enable_images, Some(true));
+        assert_eq!(extras.image_type_limit, Some(2));
+        assert_eq!(extras.enable_image_types.as_deref(), Some("Primary"));
+        assert_eq!(extras.enable_user_data, Some(false));
+
+        let uri: Uri = "/emby/Items/Counts?userId=user-1".parse().unwrap();
+        let Query(counts) = Query::<ItemCountsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(counts.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn item_helper_queries_accept_snake_case_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/InstantMix?",
+            "user_id=user-1&start_index=2&limit=30&fields=MediaSources",
+            "&enable_images=true&image_type_limit=3&enable_image_types=Primary"
+        )
+        .parse()
+        .unwrap();
+        let Query(item_mix) = Query::<ItemInstantMixQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(item_mix.user_id.as_deref(), Some("user-1"));
+        assert_eq!(item_mix.start_index, Some(2));
+        assert_eq!(item_mix.limit, Some(30));
+        assert_eq!(item_mix.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(item_mix.enable_images, Some(true));
+        assert_eq!(item_mix.image_type_limit, Some(3));
+        assert_eq!(item_mix.enable_image_types.as_deref(), Some("Primary"));
+
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/SpecialFeatures?",
+            "user_id=user-1&start_index=5&limit=9&fields=Overview",
+            "&enable_images=true&image_type_limit=2&enable_image_types=Primary",
+            "&enable_user_data=true"
+        )
+        .parse()
+        .unwrap();
+        let Query(features) = Query::<SpecialFeaturesQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(features.user_id.as_deref(), Some("user-1"));
+        assert_eq!(features.start_index, Some(5));
+        assert_eq!(features.limit, Some(9));
+        assert_eq!(features.fields.as_deref(), Some("Overview"));
+        assert_eq!(features.enable_images, Some(true));
+        assert_eq!(features.image_type_limit, Some(2));
+        assert_eq!(features.enable_image_types.as_deref(), Some("Primary"));
+        assert_eq!(features.enable_user_data, Some(true));
+
+        let uri: Uri = "/emby/Items/Counts?user_id=user-1".parse().unwrap();
+        let Query(counts) = Query::<ItemCountsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(counts.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn recommendation_and_similarity_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Users/user-1/Suggestions?",
+            "parentId=library-1&startIndex=1&limit=20&itemLimit=12",
+            "&includeItemTypes=Movie,Episode&mediaTypes=Video",
+            "&sortBy=DateCreated&sortOrder=Descending&fields=MediaSources"
+        )
+        .parse()
+        .unwrap();
+        let Query(suggestions) = Query::<SuggestionsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(suggestions.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(suggestions.start_index, Some(1));
+        assert_eq!(suggestions.limit, Some(20));
+        assert_eq!(suggestions.item_limit, Some(12));
+        assert_eq!(
+            suggestions.include_item_types.as_deref(),
+            Some("Movie,Episode")
+        );
+        assert_eq!(suggestions.media_types.as_deref(), Some("Video"));
+        assert_eq!(suggestions.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(suggestions.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(suggestions.fields.as_deref(), Some("MediaSources"));
+
+        let uri: Uri = concat!(
+            "/emby/Movies/Recommendations?",
+            "categoryLimit=2&itemLimit=8&userId=user-1&parentId=movies",
+            "&enableImages=true&enableUserData=false&imageTypeLimit=2",
+            "&enableImageTypes=Primary,Backdrop"
+        )
+        .parse()
+        .unwrap();
+        let Query(recommendations) =
+            Query::<MovieRecommendationsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(recommendations.category_limit, Some(2));
+        assert_eq!(recommendations.item_limit, Some(8));
+        assert_eq!(recommendations.user_id.as_deref(), Some("user-1"));
+        assert_eq!(recommendations.parent_id.as_deref(), Some("movies"));
+        assert_eq!(recommendations.enable_images, Some(true));
+        assert_eq!(recommendations.enable_user_data, Some(false));
+        assert_eq!(recommendations.image_type_limit, Some(2));
+        assert_eq!(
+            recommendations.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+
+        let uri: Uri = concat!(
+            "/emby/Trailers?",
+            "userId=user-1&parentId=library-1&startIndex=3&limit=11",
+            "&recursive=false&searchTerm=signal&sortBy=DateCreated",
+            "&sortOrder=Descending&fields=MediaSources",
+            "&includeItemTypes=Trailer&mediaTypes=Video",
+            "&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary"
+        )
+        .parse()
+        .unwrap();
+        let Query(trailers) = Query::<TrailersQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(trailers.user_id.as_deref(), Some("user-1"));
+        assert_eq!(trailers.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(trailers.start_index, Some(3));
+        assert_eq!(trailers.limit, Some(11));
+        assert_eq!(trailers.recursive, Some(false));
+        assert_eq!(trailers.search_term.as_deref(), Some("signal"));
+        assert_eq!(trailers.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(trailers.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(trailers.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(trailers.include_item_types.as_deref(), Some("Trailer"));
+        assert_eq!(trailers.media_types.as_deref(), Some("Video"));
+        assert_eq!(trailers.enable_images, Some(true));
+        assert_eq!(trailers.image_type_limit, Some(2));
+        assert_eq!(trailers.enable_image_types.as_deref(), Some("Primary"));
+
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/Similar?",
+            "userId=user-1&startIndex=4&limit=12&includeItemTypes=Movie",
+            "&sortBy=SortName&sortOrder=Ascending&fields=MediaSources"
+        )
+        .parse()
+        .unwrap();
+        let Query(similar) = Query::<SimilarItemsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(similar.user_id.as_deref(), Some("user-1"));
+        assert_eq!(similar.start_index, Some(4));
+        assert_eq!(similar.limit, Some(12));
+        assert_eq!(similar.include_item_types.as_deref(), Some("Movie"));
+        assert_eq!(similar.sort_by.as_deref(), Some("SortName"));
+        assert_eq!(similar.sort_order.as_deref(), Some("Ascending"));
+        assert_eq!(similar.fields.as_deref(), Some("MediaSources"));
+    }
+
+    #[test]
+    fn recommendation_and_similarity_queries_accept_snake_case_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Users/user-1/Suggestions?",
+            "parent_id=library-1&start_index=1&limit=20&item_limit=12",
+            "&include_item_types=Movie,Episode&media_types=Video",
+            "&sort_by=DateCreated&sort_order=Descending&fields=MediaSources"
+        )
+        .parse()
+        .unwrap();
+        let Query(suggestions) = Query::<SuggestionsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(suggestions.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(suggestions.start_index, Some(1));
+        assert_eq!(suggestions.limit, Some(20));
+        assert_eq!(suggestions.item_limit, Some(12));
+        assert_eq!(
+            suggestions.include_item_types.as_deref(),
+            Some("Movie,Episode")
+        );
+        assert_eq!(suggestions.media_types.as_deref(), Some("Video"));
+        assert_eq!(suggestions.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(suggestions.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(suggestions.fields.as_deref(), Some("MediaSources"));
+
+        let uri: Uri = concat!(
+            "/emby/Movies/Recommendations?",
+            "category_limit=2&item_limit=8&user_id=user-1&parent_id=movies",
+            "&enable_images=true&enable_user_data=false&image_type_limit=2",
+            "&enable_image_types=Primary,Backdrop"
+        )
+        .parse()
+        .unwrap();
+        let Query(recommendations) =
+            Query::<MovieRecommendationsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(recommendations.category_limit, Some(2));
+        assert_eq!(recommendations.item_limit, Some(8));
+        assert_eq!(recommendations.user_id.as_deref(), Some("user-1"));
+        assert_eq!(recommendations.parent_id.as_deref(), Some("movies"));
+        assert_eq!(recommendations.enable_images, Some(true));
+        assert_eq!(recommendations.enable_user_data, Some(false));
+        assert_eq!(recommendations.image_type_limit, Some(2));
+        assert_eq!(
+            recommendations.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+
+        let uri: Uri = concat!(
+            "/emby/Trailers?",
+            "user_id=user-1&parent_id=library-1&start_index=3&limit=11",
+            "&recursive=false&search_term=signal&sort_by=DateCreated",
+            "&sort_order=Descending&fields=MediaSources",
+            "&include_item_types=Trailer&media_types=Video",
+            "&enable_images=true&image_type_limit=2&enable_image_types=Primary"
+        )
+        .parse()
+        .unwrap();
+        let Query(trailers) = Query::<TrailersQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(trailers.user_id.as_deref(), Some("user-1"));
+        assert_eq!(trailers.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(trailers.start_index, Some(3));
+        assert_eq!(trailers.limit, Some(11));
+        assert_eq!(trailers.recursive, Some(false));
+        assert_eq!(trailers.search_term.as_deref(), Some("signal"));
+        assert_eq!(trailers.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(trailers.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(trailers.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(trailers.include_item_types.as_deref(), Some("Trailer"));
+        assert_eq!(trailers.media_types.as_deref(), Some("Video"));
+        assert_eq!(trailers.enable_images, Some(true));
+        assert_eq!(trailers.image_type_limit, Some(2));
+        assert_eq!(trailers.enable_image_types.as_deref(), Some("Primary"));
+
+        let uri: Uri = concat!(
+            "/emby/Items/item-1/Similar?",
+            "user_id=user-1&start_index=4&limit=12&include_item_types=Movie",
+            "&sort_by=SortName&sort_order=Ascending&fields=MediaSources"
+        )
+        .parse()
+        .unwrap();
+        let Query(similar) = Query::<SimilarItemsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(similar.user_id.as_deref(), Some("user-1"));
+        assert_eq!(similar.start_index, Some(4));
+        assert_eq!(similar.limit, Some(12));
+        assert_eq!(similar.include_item_types.as_deref(), Some("Movie"));
+        assert_eq!(similar.sort_by.as_deref(), Some("SortName"));
+        assert_eq!(similar.sort_order.as_deref(), Some("Ascending"));
+        assert_eq!(similar.fields.as_deref(), Some("MediaSources"));
+    }
+
+    #[test]
+    fn item_list_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Users/user-1/Items?",
+            "parentId=library-1&startIndex=3&limit=12&recursive=true",
+            "&includeItemTypes=Movie,Episode&imageTypes=Primary,Backdrop",
+            "&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary,Logo",
+            "&anyProviderIdEquals=tmdb.42&sortBy=DateCreated&sortOrder=Descending",
+            "&fields=MediaSources&filters=IsPlayed&isPlayed=true&isFavorite=false",
+            "&isFolder=false&isMovie=true&isSeries=false&ids=item-1,item-2",
+            "&excludeItemIds=item-3&searchTerm=signal&nameStartsWith=A",
+            "&nameStartsWithOrGreater=B&nameLessThan=Z&genreIds=1,2",
+            "&officialRatings=PG-13&excludeTags=Hidden&studioIds=3",
+            "&personIds=4&personTypes=Actor&artistIds=5&albumIds=6",
+            "&mediaTypes=Video&audioCodecs=aac&videoCodecs=h264&subtitleCodecs=srt"
+        )
+        .parse()
+        .unwrap();
+        let Query(query) = Query::<ItemsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.start_index, Some(3));
+        assert_eq!(query.limit, Some(12));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(query.include_item_types.as_deref(), Some("Movie,Episode"));
+        assert_eq!(query.image_types.as_deref(), Some("Primary,Backdrop"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(query.image_type_limit, Some(2));
+        assert_eq!(query.enable_image_types.as_deref(), Some("Primary,Logo"));
+        assert_eq!(query.any_provider_id_equals.as_deref(), Some("tmdb.42"));
+        assert_eq!(query.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(query.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(query.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(query.filters.as_deref(), Some("IsPlayed"));
+        assert_eq!(query.is_played, Some(true));
+        assert_eq!(query.is_favorite, Some(false));
+        assert_eq!(query.is_folder, Some(false));
+        assert_eq!(query.is_movie, Some(true));
+        assert_eq!(query.is_series, Some(false));
+        assert_eq!(query.ids.as_deref(), Some("item-1,item-2"));
+        assert_eq!(query.exclude_item_ids.as_deref(), Some("item-3"));
+        assert_eq!(query.search_term.as_deref(), Some("signal"));
+        assert_eq!(query.name_starts_with.as_deref(), Some("A"));
+        assert_eq!(query.name_starts_with_or_greater.as_deref(), Some("B"));
+        assert_eq!(query.name_less_than.as_deref(), Some("Z"));
+        assert_eq!(query.genre_ids.as_deref(), Some("1,2"));
+        assert_eq!(query.official_ratings.as_deref(), Some("PG-13"));
+        assert_eq!(query.exclude_tags.as_deref(), Some("Hidden"));
+        assert_eq!(query.studio_ids.as_deref(), Some("3"));
+        assert_eq!(query.person_ids.as_deref(), Some("4"));
+        assert_eq!(query.person_types.as_deref(), Some("Actor"));
+        assert_eq!(query.artist_ids.as_deref(), Some("5"));
+        assert_eq!(query.album_ids.as_deref(), Some("6"));
+        assert_eq!(query.media_types.as_deref(), Some("Video"));
+        assert_eq!(query.audio_codecs.as_deref(), Some("aac"));
+        assert_eq!(query.video_codecs.as_deref(), Some("h264"));
+        assert_eq!(query.subtitle_codecs.as_deref(), Some("srt"));
+    }
+
+    #[test]
+    fn music_and_home_item_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Songs?",
+            "userId=user-1&parentId=library-1&startIndex=2&limit=20",
+            "&sortBy=SortName&sortOrder=Ascending&fields=MediaSources",
+            "&searchTerm=blue&genreIds=1&artistIds=2&albumIds=3",
+            "&enableImages=true&imageTypeLimit=2&enableImageTypes=Primary,Backdrop"
+        )
+        .parse()
+        .unwrap();
+        let Query(music) = Query::<MusicItemsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(music.user_id.as_deref(), Some("user-1"));
+        assert_eq!(music.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(music.start_index, Some(2));
+        assert_eq!(music.limit, Some(20));
+        assert_eq!(music.sort_by.as_deref(), Some("SortName"));
+        assert_eq!(music.sort_order.as_deref(), Some("Ascending"));
+        assert_eq!(music.fields.as_deref(), Some("MediaSources"));
+        assert_eq!(music.search_term.as_deref(), Some("blue"));
+        assert_eq!(music.genre_ids.as_deref(), Some("1"));
+        assert_eq!(music.artist_ids.as_deref(), Some("2"));
+        assert_eq!(music.album_ids.as_deref(), Some("3"));
+        assert_eq!(music.enable_images, Some(true));
+        assert_eq!(music.image_type_limit, Some(2));
+        assert_eq!(
+            music.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+
+        let uri: Uri = concat!(
+            "/emby/Items/Latest?",
+            "userId=user-1&parentId=library-1&startIndex=4&limit=10",
+            "&includeItemTypes=Movie&sortBy=DateCreated&sortOrder=Descending&fields=MediaSources"
+        )
+        .parse()
+        .unwrap();
+        let Query(media) = Query::<MediaListQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(media.user_id.as_deref(), Some("user-1"));
+        assert_eq!(media.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(media.start_index, Some(4));
+        assert_eq!(media.limit, Some(10));
+        assert_eq!(media.include_item_types.as_deref(), Some("Movie"));
+        assert_eq!(media.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(media.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(media.fields.as_deref(), Some("MediaSources"));
+    }
+
+    #[test]
+    fn search_and_item_detail_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = concat!(
+            "/emby/Search/Hints?",
+            "userId=user-1&parentId=library-1&searchTerm=signal",
+            "&includeItemTypes=Movie&mediaTypes=Video&startIndex=1&limit=5"
+        )
+        .parse()
+        .unwrap();
+        let Query(search) = Query::<SearchHintsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(search.user_id.as_deref(), Some("user-1"));
+        assert_eq!(search.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(search.search_term.as_deref(), Some("signal"));
+        assert_eq!(search.include_item_types.as_deref(), Some("Movie"));
+        assert_eq!(search.media_types.as_deref(), Some("Video"));
+        assert_eq!(search.start_index, Some(1));
+        assert_eq!(search.limit, Some(5));
+
+        let uri: Uri = "/emby/Items/item-1?userId=user-1".parse().unwrap();
+        let Query(item) = Query::<ItemByIdQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(item.user_id.as_deref(), Some("user-1"));
     }
 
     #[test]
@@ -3448,6 +4620,29 @@ mod tests {
         assert!(result.items.is_empty());
         assert_eq!(result.total_record_count, 0);
         assert_eq!(result.start_index, 0);
+    }
+
+    #[test]
+    fn video_version_inputs_normalize_item_ids() {
+        assert_eq!(
+            video_version_item_id(" movie-1 ").unwrap().as_str(),
+            "movie-1"
+        );
+        assert_eq!(
+            merge_versions_input(&MergeVersionsQuery {
+                ids: Some(" movie-1,movie-2,,movie-1 ".to_owned()),
+            })
+            .unwrap()
+            .ids,
+            ["movie-1", "movie-2"]
+        );
+        assert!(video_version_item_id("bad/id").is_err());
+        assert!(
+            merge_versions_input(&MergeVersionsQuery {
+                ids: Some("movie-1".to_owned()),
+            })
+            .is_err()
+        );
     }
 
     #[test]

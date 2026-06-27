@@ -3,6 +3,57 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 
+pub(crate) fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StringListVisitor;
+
+    impl<'de> de::Visitor<'de> for StringListVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string or list of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(split_string_list(value))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(split_string_list(&value))
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut values = Vec::new();
+            while let Some(value) = sequence.next_element::<String>()? {
+                values.extend(split_string_list(&value));
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_any(StringListVisitor)
+}
+
+fn split_string_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerInfoSource {
     pub id: String,
@@ -516,10 +567,20 @@ pub struct UserDto {
     pub id: String,
     pub name: String,
     pub server_id: String,
+    pub server_name: String,
     pub has_password: bool,
     pub has_configured_password: bool,
     pub has_configured_easy_password: bool,
     pub enable_auto_login: bool,
+    pub connect_user_name: Option<String>,
+    pub connect_link_type: String,
+    pub primary_image_tag: Option<String>,
+    pub primary_image_aspect_ratio: Option<String>,
+    pub last_login_date: Option<String>,
+    pub last_activity_date: Option<String>,
+    pub date_created: Option<String>,
+    pub user_item_share_level: String,
+    pub prefix: Option<String>,
     pub policy: UserPolicyDto,
     pub configuration: UserConfigurationDto,
 }
@@ -530,22 +591,43 @@ impl From<UserDetailSource> for UserDto {
             id: source.id,
             name: source.name,
             server_id: "fbz-api".to_owned(),
+            server_name: "FBZ API".to_owned(),
             has_password: source.has_password,
             has_configured_password: source.has_password,
             has_configured_easy_password: false,
             enable_auto_login: false,
+            connect_user_name: None,
+            connect_link_type: "LinkedUser".to_owned(),
+            primary_image_tag: None,
+            primary_image_aspect_ratio: None,
+            last_login_date: None,
+            last_activity_date: None,
+            date_created: None,
+            user_item_share_level: "None".to_owned(),
+            prefix: None,
             policy: UserPolicyDto {
                 is_administrator: source.is_administrator,
                 is_disabled: source.is_disabled,
+                is_hidden: false,
+                is_hidden_remotely: false,
+                is_hidden_from_unused_devices: false,
+                locked_out_date: 0,
                 enable_media_playback: true,
                 enable_audio_playback_transcoding: source.enable_playback_transcoding,
                 enable_video_playback_transcoding: source.enable_playback_transcoding,
                 enable_playback_remuxing: source.enable_playback_transcoding,
+                force_remote_source_transcoding: source.enable_playback_transcoding,
                 enable_content_deletion: false,
                 enable_content_deletion_from_folders: Vec::new(),
                 enable_content_downloading: source.enable_content_downloading,
                 enable_subtitle_downloading: false,
                 enable_subtitle_management: false,
+                max_parental_rating: None,
+                allow_tag_or_rating: false,
+                is_tag_blocking_mode_inclusive: false,
+                include_tags: Vec::new(),
+                access_schedules: Vec::new(),
+                block_unrated_items: Vec::new(),
                 enable_sync_transcoding: source.enable_playback_transcoding,
                 enable_media_conversion: source.enable_playback_transcoding,
                 enable_remote_control_of_other_users: source.is_administrator,
@@ -560,7 +642,10 @@ impl From<UserDetailSource> for UserDto {
                 enable_next_episode_auto_play: true,
                 enable_all_devices: source.allow_new_device_login,
                 enabled_devices: Vec::new(),
+                enabled_channels: Vec::new(),
+                blocked_channels: Vec::new(),
                 enabled_folders: source.enabled_folders,
+                blocked_media_folders: Vec::new(),
                 blocked_tags: Vec::new(),
                 allowed_tags: Vec::new(),
                 invalid_login_attempt_count: 0,
@@ -568,6 +653,12 @@ impl From<UserDetailSource> for UserDto {
                 remote_client_bitrate_limit: 0,
                 simultaneous_stream_limit: 0,
                 max_active_sessions: 0,
+                auto_remote_quality: 0,
+                restricted_features: Vec::new(),
+                authentication_provider_id: None,
+                excluded_sub_folders: Vec::new(),
+                allow_camera_upload: false,
+                allow_sharing_personal_items: false,
             },
             configuration: UserConfigurationDto::default(),
         }
@@ -579,15 +670,26 @@ impl From<UserDetailSource> for UserDto {
 pub struct UserPolicyDto {
     pub is_administrator: bool,
     pub is_disabled: bool,
+    pub is_hidden: bool,
+    pub is_hidden_remotely: bool,
+    pub is_hidden_from_unused_devices: bool,
+    pub locked_out_date: i64,
     pub enable_media_playback: bool,
     pub enable_audio_playback_transcoding: bool,
     pub enable_video_playback_transcoding: bool,
     pub enable_playback_remuxing: bool,
+    pub force_remote_source_transcoding: bool,
     pub enable_content_deletion: bool,
     pub enable_content_deletion_from_folders: Vec<String>,
     pub enable_content_downloading: bool,
     pub enable_subtitle_downloading: bool,
     pub enable_subtitle_management: bool,
+    pub max_parental_rating: Option<i32>,
+    pub allow_tag_or_rating: bool,
+    pub is_tag_blocking_mode_inclusive: bool,
+    pub include_tags: Vec<String>,
+    pub access_schedules: Vec<Value>,
+    pub block_unrated_items: Vec<String>,
     pub enable_sync_transcoding: bool,
     pub enable_media_conversion: bool,
     pub enable_remote_control_of_other_users: bool,
@@ -602,7 +704,10 @@ pub struct UserPolicyDto {
     pub enable_next_episode_auto_play: bool,
     pub enable_all_devices: bool,
     pub enabled_devices: Vec<String>,
+    pub enabled_channels: Vec<String>,
+    pub blocked_channels: Vec<String>,
     pub enabled_folders: Vec<String>,
+    pub blocked_media_folders: Vec<String>,
     pub blocked_tags: Vec<String>,
     pub allowed_tags: Vec<String>,
     pub invalid_login_attempt_count: i32,
@@ -610,6 +715,12 @@ pub struct UserPolicyDto {
     pub remote_client_bitrate_limit: i32,
     pub simultaneous_stream_limit: i32,
     pub max_active_sessions: i32,
+    pub auto_remote_quality: i32,
+    pub restricted_features: Vec<String>,
+    pub authentication_provider_id: Option<String>,
+    pub excluded_sub_folders: Vec<String>,
+    pub allow_camera_upload: bool,
+    pub allow_sharing_personal_items: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -625,8 +736,13 @@ pub struct UserConfigurationDto {
     pub latest_items_excludes: Vec<String>,
     pub my_media_excludes: Vec<String>,
     pub hide_played_in_latest: bool,
+    pub hide_played_in_more_like_this: bool,
+    pub hide_played_in_suggestions: bool,
+    pub intro_skip_mode: String,
+    pub profile_pin: Option<String>,
     pub remember_audio_selections: bool,
     pub remember_subtitle_selections: bool,
+    pub resume_rewind_seconds: i32,
     pub enable_next_episode_auto_play: bool,
 }
 
@@ -643,8 +759,13 @@ impl Default for UserConfigurationDto {
             latest_items_excludes: Vec::new(),
             my_media_excludes: Vec::new(),
             hide_played_in_latest: false,
+            hide_played_in_more_like_this: false,
+            hide_played_in_suggestions: false,
+            intro_skip_mode: "None".to_owned(),
+            profile_pin: None,
             remember_audio_selections: true,
             remember_subtitle_selections: true,
+            resume_rewind_seconds: 0,
             enable_next_episode_auto_play: true,
         }
     }
@@ -1342,10 +1463,15 @@ pub struct UserItemDataDto {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaybackInfoRequestDto {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "maxStreamingBitrate", alias = "max_streaming_bitrate")]
     pub max_streaming_bitrate: Option<i64>,
+    #[serde(alias = "startTimeTicks", alias = "start_time_ticks")]
     pub start_time_ticks: Option<i64>,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     pub media_source_id: Option<String>,
+    #[serde(alias = "deviceProfile", alias = "device_profile")]
     pub device_profile: Option<Value>,
 }
 
@@ -1470,47 +1596,86 @@ pub struct PlaybackProgressDto {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct PlaybackProgressRawDto {
+    #[serde(alias = "itemId", alias = "item_id")]
     item_id: Option<String>,
+    #[serde(alias = "item")]
     item: Option<PlaybackProgressItemDto>,
+    #[serde(alias = "userId", alias = "user_id")]
     user_id: Option<String>,
+    #[serde(alias = "sessionId", alias = "session_id")]
     session_id: Option<String>,
+    #[serde(alias = "playSessionId", alias = "play_session_id")]
     play_session_id: Option<String>,
+    #[serde(alias = "mediaSourceId", alias = "media_source_id")]
     media_source_id: Option<String>,
+    #[serde(alias = "playMethod", alias = "play_method")]
     play_method: Option<String>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_string_list")]
+    #[serde(alias = "queueableMediaTypes", alias = "queueable_media_types")]
     queueable_media_types: Vec<String>,
+    #[serde(alias = "canSeek", alias = "can_seek")]
     can_seek: Option<bool>,
+    #[serde(alias = "eventName", alias = "event_name")]
     event_name: Option<String>,
+    #[serde(alias = "audioStreamIndex", alias = "audio_stream_index")]
     audio_stream_index: Option<i32>,
+    #[serde(alias = "subtitleStreamIndex", alias = "subtitle_stream_index")]
     subtitle_stream_index: Option<i32>,
+    #[serde(alias = "positionTicks", alias = "position_ticks")]
     position_ticks: Option<i64>,
+    #[serde(alias = "isPaused", alias = "is_paused")]
     is_paused: Option<bool>,
+    #[serde(alias = "isMuted", alias = "is_muted")]
     is_muted: Option<bool>,
+    #[serde(alias = "volumeLevel", alias = "volume_level")]
     volume_level: Option<i32>,
+    #[serde(alias = "liveStreamId", alias = "live_stream_id")]
     live_stream_id: Option<String>,
+    #[serde(alias = "playlistIndex", alias = "playlist_index")]
     playlist_index: Option<i32>,
+    #[serde(alias = "playlistLength", alias = "playlist_length")]
     playlist_length: Option<i32>,
+    #[serde(alias = "subtitleOffset", alias = "subtitle_offset")]
     subtitle_offset: Option<f64>,
+    #[serde(alias = "playbackRate", alias = "playback_rate")]
     playback_rate: Option<f64>,
     #[serde(default)]
+    #[serde(alias = "nowPlayingQueue", alias = "now_playing_queue")]
     now_playing_queue: Vec<Value>,
+    #[serde(alias = "playlistItemId", alias = "playlist_item_id")]
     playlist_item_id: Option<String>,
     #[serde(default)]
+    #[serde(deserialize_with = "deserialize_string_list")]
+    #[serde(alias = "playlistItemIds", alias = "playlist_item_ids")]
     playlist_item_ids: Vec<String>,
     #[serde(rename = "RunTimeTicks")]
+    #[serde(
+        alias = "runTimeTicks",
+        alias = "runtimeTicks",
+        alias = "runtime_ticks"
+    )]
     runtime_ticks: Option<i64>,
+    #[serde(alias = "playbackStartTimeTicks", alias = "playback_start_time_ticks")]
     playback_start_time_ticks: Option<i64>,
+    #[serde(alias = "brightness")]
     brightness: Option<i32>,
+    #[serde(alias = "aspectRatio", alias = "aspect_ratio")]
     aspect_ratio: Option<String>,
+    #[serde(alias = "repeatMode", alias = "repeat_mode")]
     repeat_mode: Option<String>,
+    #[serde(alias = "sleepTimerMode", alias = "sleep_timer_mode")]
     sleep_timer_mode: Option<String>,
+    #[serde(alias = "sleepTimerEndTime", alias = "sleep_timer_end_time")]
     sleep_timer_end_time: Option<String>,
+    #[serde(alias = "shuffle")]
     shuffle: Option<bool>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct PlaybackProgressItemDto {
+    #[serde(alias = "id")]
     id: Option<String>,
 }
 
@@ -2006,20 +2171,85 @@ mod tests {
 
         assert_eq!(value["Id"], "user-1");
         assert_eq!(value["ServerId"], "fbz-api");
+        assert_eq!(value["ServerName"], "FBZ API");
         assert_eq!(value["HasConfiguredPassword"], true);
+        assert_eq!(value["ConnectUserName"], Value::Null);
+        assert_eq!(value["ConnectLinkType"], "LinkedUser");
+        assert_eq!(value["PrimaryImageTag"], Value::Null);
+        assert_eq!(value["PrimaryImageAspectRatio"], Value::Null);
+        assert_eq!(value["LastLoginDate"], Value::Null);
+        assert_eq!(value["LastActivityDate"], Value::Null);
+        assert_eq!(value["DateCreated"], Value::Null);
+        assert_eq!(value["UserItemShareLevel"], "None");
+        assert_eq!(value["Prefix"], Value::Null);
         assert_eq!(value["Policy"]["IsAdministrator"], false);
         assert_eq!(value["Policy"]["EnableContentDownloading"], true);
         assert_eq!(value["Policy"]["EnableVideoPlaybackTranscoding"], false);
+        assert_eq!(value["Policy"]["EnableAudioPlaybackTranscoding"], false);
+        assert_eq!(value["Policy"]["EnablePlaybackRemuxing"], false);
+        assert_eq!(value["Policy"]["ForceRemoteSourceTranscoding"], false);
+        assert_eq!(value["Policy"]["EnableRemoteControlOfOtherUsers"], false);
+        assert_eq!(value["Policy"]["EnableLiveTvManagement"], false);
+        assert_eq!(value["Policy"]["EnableLiveTvAccess"], false);
+        assert_eq!(value["Policy"]["EnableSharedDeviceControl"], false);
         assert_eq!(value["Policy"]["EnableMediaConversion"], false);
         assert_eq!(value["Policy"]["RemoteClientBitrateLimit"], 0);
         assert_eq!(value["Policy"]["SimultaneousStreamLimit"], 0);
+        assert_eq!(value["Policy"]["MaxActiveSessions"], 0);
+        assert_eq!(value["Policy"]["EnabledChannels"], json!([]));
+        assert_eq!(value["Policy"]["BlockedChannels"], json!([]));
         assert_eq!(value["Policy"]["EnableAllDevices"], true);
         assert_eq!(value["Policy"]["EnableAllFolders"], false);
         assert_eq!(
             value["Policy"]["EnabledFolders"],
             json!(["library-1", "library-2"])
         );
+        assert_eq!(value["Policy"]["BlockedMediaFolders"], json!([]));
+        assert_eq!(value["Policy"]["AllowedTags"], json!([]));
+        assert_eq!(value["Policy"]["BlockedTags"], json!([]));
         assert_eq!(value["Configuration"]["SubtitleMode"], "Default");
+        assert_eq!(value["Configuration"]["HidePlayedInMoreLikeThis"], false);
+        assert_eq!(value["Configuration"]["HidePlayedInSuggestions"], false);
+        assert_eq!(value["Configuration"]["IntroSkipMode"], "None");
+        assert_eq!(value["Configuration"]["ProfilePin"], Value::Null);
+        assert_eq!(value["Configuration"]["ResumeRewindSeconds"], 0);
+    }
+
+    #[test]
+    fn user_detail_serializes_policy_restriction_defaults_for_emby_clients() {
+        let dto = UserDto::from(UserDetailSource {
+            id: "user-1".to_owned(),
+            name: "alice".to_owned(),
+            has_password: true,
+            is_administrator: true,
+            is_disabled: false,
+            allow_download: true,
+            allow_transcode: true,
+            allow_new_device_login: true,
+            enable_content_downloading: true,
+            enable_playback_transcoding: true,
+            enable_all_folders: true,
+            enabled_folders: Vec::new(),
+        });
+
+        let value = serde_json::to_value(dto).unwrap();
+
+        assert_eq!(value["Policy"]["IsHidden"], false);
+        assert_eq!(value["Policy"]["IsHiddenRemotely"], false);
+        assert_eq!(value["Policy"]["IsHiddenFromUnusedDevices"], false);
+        assert_eq!(value["Policy"]["LockedOutDate"], 0);
+        assert_eq!(value["Policy"]["MaxParentalRating"], Value::Null);
+        assert_eq!(value["Policy"]["AllowTagOrRating"], false);
+        assert_eq!(value["Policy"]["IsTagBlockingModeInclusive"], false);
+        assert_eq!(value["Policy"]["IncludeTags"], json!([]));
+        assert_eq!(value["Policy"]["AccessSchedules"], json!([]));
+        assert_eq!(value["Policy"]["BlockUnratedItems"], json!([]));
+        assert_eq!(value["Policy"]["AutoRemoteQuality"], 0);
+        assert_eq!(value["Policy"]["RestrictedFeatures"], json!([]));
+        assert_eq!(value["Policy"]["AuthenticationProviderId"], Value::Null);
+        assert_eq!(value["Policy"]["ExcludedSubFolders"], json!([]));
+        assert_eq!(value["Policy"]["AllowCameraUpload"], false);
+        assert_eq!(value["Policy"]["AllowSharingPersonalItems"], false);
     }
 
     #[test]
@@ -2038,6 +2268,27 @@ mod tests {
         assert_eq!(
             payload.device_profile,
             Some(json!({ "Name": "client-profile" }))
+        );
+    }
+
+    #[test]
+    fn playback_info_request_accepts_lower_camel_payload() {
+        let payload: PlaybackInfoRequestDto = serde_json::from_value(json!({
+            "userId": "user-1",
+            "maxStreamingBitrate": 12000000,
+            "startTimeTicks": 42,
+            "mediaSourceId": "source-1",
+            "deviceProfile": { "name": "client-profile" }
+        }))
+        .unwrap();
+
+        assert_eq!(payload.user_id.as_deref(), Some("user-1"));
+        assert_eq!(payload.max_streaming_bitrate, Some(12_000_000));
+        assert_eq!(payload.start_time_ticks, Some(42));
+        assert_eq!(payload.media_source_id.as_deref(), Some("source-1"));
+        assert_eq!(
+            payload.device_profile,
+            Some(json!({ "name": "client-profile" }))
         );
     }
 
@@ -2121,6 +2372,104 @@ mod tests {
     }
 
     #[test]
+    fn playback_progress_accepts_lower_camel_client_payload() {
+        let payload: PlaybackProgressDto = serde_json::from_value(json!({
+            "itemId": "item-1",
+            "userId": "user-1",
+            "sessionId": "session-1",
+            "playSessionId": "play-1",
+            "mediaSourceId": "source-1",
+            "playMethod": "DirectPlay",
+            "queueableMediaTypes": ["Audio", "Video"],
+            "canSeek": true,
+            "eventName": "TimeUpdate",
+            "audioStreamIndex": 1,
+            "subtitleStreamIndex": -1,
+            "positionTicks": 42,
+            "isPaused": true,
+            "isMuted": false,
+            "volumeLevel": 85,
+            "liveStreamId": "live-1",
+            "playlistIndex": 2,
+            "playlistLength": 4,
+            "subtitleOffset": 0,
+            "playbackRate": 1.25,
+            "nowPlayingQueue": [{ "id": "queue-1" }],
+            "playlistItemId": "playlist-item-1",
+            "playlistItemIds": ["playlist-item-1", "playlist-item-2"],
+            "runTimeTicks": 9000,
+            "playbackStartTimeTicks": 100,
+            "brightness": 40,
+            "aspectRatio": "16:9",
+            "repeatMode": "RepeatAll",
+            "sleepTimerMode": "EndOfEpisode",
+            "sleepTimerEndTime": "2026-06-24T12:00:00Z",
+            "shuffle": true
+        }))
+        .unwrap();
+
+        assert_eq!(payload.item_id, "item-1");
+        assert_eq!(payload.user_id.as_deref(), Some("user-1"));
+        assert_eq!(payload.session_id.as_deref(), Some("session-1"));
+        assert_eq!(payload.play_session_id.as_deref(), Some("play-1"));
+        assert_eq!(payload.media_source_id.as_deref(), Some("source-1"));
+        assert_eq!(payload.play_method.as_deref(), Some("DirectPlay"));
+        assert_eq!(
+            payload.queueable_media_types,
+            vec!["Audio".to_owned(), "Video".to_owned()]
+        );
+        assert_eq!(payload.can_seek, Some(true));
+        assert_eq!(payload.event_name.as_deref(), Some("TimeUpdate"));
+        assert_eq!(payload.audio_stream_index, Some(1));
+        assert_eq!(payload.subtitle_stream_index, Some(-1));
+        assert_eq!(payload.position_ticks, Some(42));
+        assert_eq!(payload.is_paused, Some(true));
+        assert_eq!(payload.is_muted, Some(false));
+        assert_eq!(payload.volume_level, Some(85));
+        assert_eq!(payload.live_stream_id.as_deref(), Some("live-1"));
+        assert_eq!(payload.playlist_index, Some(2));
+        assert_eq!(payload.playlist_length, Some(4));
+        assert_eq!(payload.subtitle_offset, Some(0.0));
+        assert_eq!(payload.playback_rate, Some(1.25));
+        assert_eq!(payload.now_playing_queue.len(), 1);
+        assert_eq!(payload.playlist_item_id.as_deref(), Some("playlist-item-1"));
+        assert_eq!(
+            payload.playlist_item_ids,
+            vec!["playlist-item-1".to_owned(), "playlist-item-2".to_owned()]
+        );
+        assert_eq!(payload.runtime_ticks, Some(9000));
+        assert_eq!(payload.playback_start_time_ticks, Some(100));
+        assert_eq!(payload.brightness, Some(40));
+        assert_eq!(payload.aspect_ratio.as_deref(), Some("16:9"));
+        assert_eq!(payload.repeat_mode.as_deref(), Some("RepeatAll"));
+        assert_eq!(payload.sleep_timer_mode.as_deref(), Some("EndOfEpisode"));
+        assert_eq!(
+            payload.sleep_timer_end_time.as_deref(),
+            Some("2026-06-24T12:00:00Z")
+        );
+        assert_eq!(payload.shuffle, Some(true));
+    }
+
+    #[test]
+    fn playback_progress_accepts_csv_string_lists() {
+        let payload: PlaybackProgressDto = serde_json::from_value(json!({
+            "ItemId": "item-1",
+            "QueueableMediaTypes": "Audio, Video",
+            "PlaylistItemIds": "playlist-item-1,playlist-item-2",
+        }))
+        .unwrap();
+
+        assert_eq!(
+            payload.queueable_media_types,
+            vec!["Audio".to_owned(), "Video".to_owned()]
+        );
+        assert_eq!(
+            payload.playlist_item_ids,
+            vec!["playlist-item-1".to_owned(), "playlist-item-2".to_owned()]
+        );
+    }
+
+    #[test]
     fn playback_progress_accepts_item_object_when_item_id_is_missing() {
         let payload: PlaybackProgressDto = serde_json::from_value(json!({
             "Item": {
@@ -2130,6 +2479,24 @@ mod tests {
             },
             "PlaySessionId": "play-1",
             "PositionTicks": 42
+        }))
+        .unwrap();
+
+        assert_eq!(payload.item_id, "item-from-object");
+        assert_eq!(payload.play_session_id.as_deref(), Some("play-1"));
+        assert_eq!(payload.position_ticks, Some(42));
+    }
+
+    #[test]
+    fn playback_progress_accepts_lower_camel_item_object_when_item_id_is_missing() {
+        let payload: PlaybackProgressDto = serde_json::from_value(json!({
+            "item": {
+                "id": "item-from-object",
+                "name": "External item",
+                "mediaType": "Video"
+            },
+            "playSessionId": "play-1",
+            "positionTicks": 42
         }))
         .unwrap();
 

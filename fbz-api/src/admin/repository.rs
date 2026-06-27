@@ -17,6 +17,69 @@ pub struct AdminRepository {
     pool: DbPool,
 }
 
+const SCHEDULED_TASK_ACTIVE_RUN_COUNT_SQL: &str = r#"
+                   (
+                       select count(*)::bigint
+                       from (
+                           select 1
+                           from scheduled_task_runs runs
+                           where runs.task_id = tasks.id
+                             and runs.status = 'running'
+                             and runs.lease_expires_at > now()
+                           order by runs.lease_expires_at asc, runs.id asc
+                           limit tasks.max_concurrency
+                       ) active_run_capacity_probe
+                   ) as active_run_count,
+"#;
+
+const ADMIN_USER_SUMMARY_SAMPLE_LIMIT: i64 = 10_000;
+const ADMIN_USER_SUMMARY_FETCH_LIMIT: i64 = ADMIN_USER_SUMMARY_SAMPLE_LIMIT + 1;
+
+fn push_admin_user_counts_sql(query: &mut QueryBuilder<'_, Postgres>) {
+    query.push(
+        r#"
+                   (
+                       select least(count(*), "#,
+    );
+    query.push_bind(ADMIN_USER_SUMMARY_SAMPLE_LIMIT);
+    query.push(
+        r#")::bigint
+                       from (
+                           select 1
+                           from devices d
+                           where d.user_id = u.id
+                           order by d.last_seen_at desc, d.id desc
+                           limit "#,
+    );
+    query.push_bind(ADMIN_USER_SUMMARY_FETCH_LIMIT);
+    query.push(
+        r#"
+                       ) device_count_probe
+                   ) as device_count,
+                   (
+                       select least(count(*), "#,
+    );
+    query.push_bind(ADMIN_USER_SUMMARY_SAMPLE_LIMIT);
+    query.push(
+        r#")::bigint
+                       from (
+                           select 1
+                           from sessions s
+                           where s.user_id = u.id
+                             and s.revoked_at is null
+                             and s.expires_at > now()
+                           order by s.expires_at asc, s.id asc
+                           limit "#,
+    );
+    query.push_bind(ADMIN_USER_SUMMARY_FETCH_LIMIT);
+    query.push(
+        r#"
+                       ) active_session_count_probe
+                   ) as active_session_count,
+"#,
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateLibraryInput {
     pub name: String,
@@ -127,6 +190,76 @@ const ADMIN_LIBRARY_BY_PUBLIC_ID_SQL: &str = r#"
                 then $1::uuid
                 else null::uuid
             end
+            "#;
+
+const ADMIN_QUEUE_LIBRARY_SCAN_SQL: &str = r#"
+            with target_library as (
+                select public_id::text as public_id
+                from libraries
+                where public_id = case
+                    when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $1::uuid
+                    else null::uuid
+                end
+            ),
+            inserted as (
+                insert into jobs (
+                    job_type,
+                    status,
+                    queue_name,
+                    priority,
+                    payload
+                )
+                select
+                    'library.scan',
+                    'queued',
+                    'scan',
+                    0,
+                    jsonb_build_object(
+                        'libraryId', target_library.public_id,
+                        'requestedByUserId', $2::bigint,
+                        'reason', $3::jsonb
+                    )
+                from target_library
+                where not exists (
+                    select 1
+                    from jobs j
+                    where j.job_type = 'library.scan'
+                      and j.status in ('queued', 'running', 'failed')
+                      and (j.status <> 'failed' or j.attempts < j.max_attempts)
+                      and j.payload->>'libraryId' = target_library.public_id
+                )
+                returning public_id::text as id,
+                          status,
+                          queue_name,
+                          job_type
+            ),
+            existing as (
+                select j.public_id::text as id,
+                       j.status,
+                       j.queue_name,
+                       j.job_type
+                from jobs j
+                join target_library
+                  on j.payload->>'libraryId' = target_library.public_id
+                where j.job_type = 'library.scan'
+                  and j.status in ('queued', 'running', 'failed')
+                  and (j.status <> 'failed' or j.attempts < j.max_attempts)
+                order by j.created_at desc, j.id desc
+                limit 1
+            )
+            select id,
+                   status,
+                   queue_name,
+                   job_type
+            from inserted
+            union all
+            select id,
+                   status,
+                   queue_name,
+                   job_type
+            from existing
+            limit 1
             "#;
 
 const ADMIN_QUEUE_METADATA_REFRESH_ITEM_SQL: &str = r#"
@@ -634,6 +767,8 @@ pub struct EventStreamMirrorStatusRecord {
     pub oldest_unmirrored_created_at: Option<String>,
     pub next_retry_at: Option<String>,
     pub last_error: Option<String>,
+    pub counts_are_exact: bool,
+    pub sample_limit: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -714,46 +849,139 @@ pub enum PluginDispatchReplayError {
 }
 
 const ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL: &str = r#"
-            with unmirrored as (
-                select id,
-                       created_at,
-                       stream_mirror_attempts,
-                       stream_mirror_locked_by,
-                       stream_mirror_locked_until,
-                       stream_mirror_last_error
+            with admin_event_stream_mirror_sample_limit as (
+                select 10000::bigint as lower_bound_count
+            ),
+            event_stream_mirror_sample as (
+                select 'unmirrored'::text as status,
+                       stream_mirror_attempts
+                from (
+                    select stream_mirror_attempts
+                    from event_outbox
+                    where stream_mirrored_at is null
+                    limit 10001
+                ) unmirrored_events
+                union all
+                select 'claimable'::text as status,
+                       stream_mirror_attempts
+                from (
+                    select stream_mirror_attempts
+                    from event_outbox
+                    where stream_mirrored_at is null
+                      and (
+                          stream_mirror_locked_until is null
+                          or stream_mirror_locked_until <= now()
+                      )
+                    limit 10001
+                ) claimable_events
+                union all
+                select 'locked'::text as status,
+                       stream_mirror_attempts
+                from (
+                    select stream_mirror_attempts
+                    from event_outbox
+                    where stream_mirrored_at is null
+                      and stream_mirror_locked_by is not null
+                      and stream_mirror_locked_until > now()
+                    limit 10001
+                ) locked_events
+                union all
+                select 'backoff'::text as status,
+                       stream_mirror_attempts
+                from (
+                    select stream_mirror_attempts
+                    from event_outbox
+                    where stream_mirrored_at is null
+                      and stream_mirror_locked_by is null
+                      and stream_mirror_locked_until > now()
+                    limit 10001
+                ) backoff_events
+                union all
+                select 'failed'::text as status,
+                       stream_mirror_attempts
+                from (
+                    select stream_mirror_attempts
+                    from event_outbox
+                    where stream_mirrored_at is null
+                      and stream_mirror_last_error is not null
+                    limit 10001
+                ) failed_mirror_events
+            ),
+            sampled_counts as (
+                select count(*) filter (where status = 'unmirrored')::bigint as unmirrored_sample,
+                       count(*) filter (where status = 'claimable')::bigint as claimable_sample,
+                       count(*) filter (where status = 'locked')::bigint as locked_sample,
+                       count(*) filter (where status = 'backoff')::bigint as backoff_sample,
+                       count(*) filter (where status = 'failed')::bigint as failed_sample,
+                       coalesce(
+                           max(stream_mirror_attempts) filter (where status = 'unmirrored'),
+                           0
+                       )::integer as max_attempts
+                from event_stream_mirror_sample
+            ),
+            oldest_unmirrored as (
+                select created_at::text as oldest_unmirrored_created_at
                 from event_outbox
                 where stream_mirrored_at is null
+                order by created_at asc, id asc
+                limit 1
             ),
-            newest_error as (
-                select stream_mirror_last_error
-                from unmirrored
-                where stream_mirror_last_error is not null
+            next_retry as (
+                select stream_mirror_locked_until::text as next_retry_at
+                from event_outbox
+                where stream_mirrored_at is null
+                  and stream_mirror_locked_until > now()
+                order by stream_mirror_locked_until asc, id asc
+                limit 1
+            ),
+            last_error as (
+                select stream_mirror_last_error as last_error
+                from event_outbox
+                where stream_mirrored_at is null
+                  and stream_mirror_last_error is not null
                 order by id desc
                 limit 1
             )
-            select count(*)::bigint as unmirrored_count,
-                   count(*) filter (
-                       where stream_mirror_locked_until is null
-                          or stream_mirror_locked_until <= now()
+            select least(
+                       sampled_counts.unmirrored_sample,
+                       (select lower_bound_count from admin_event_stream_mirror_sample_limit)
+                   )::bigint as unmirrored_count,
+                   least(
+                       sampled_counts.claimable_sample,
+                       (select lower_bound_count from admin_event_stream_mirror_sample_limit)
                    )::bigint as claimable_count,
-                   count(*) filter (
-                       where stream_mirror_locked_by is not null
-                         and stream_mirror_locked_until > now()
+                   least(
+                       sampled_counts.locked_sample,
+                       (select lower_bound_count from admin_event_stream_mirror_sample_limit)
                    )::bigint as locked_count,
-                   count(*) filter (
-                       where stream_mirror_locked_by is null
-                         and stream_mirror_locked_until > now()
+                   least(
+                       sampled_counts.backoff_sample,
+                       (select lower_bound_count from admin_event_stream_mirror_sample_limit)
                    )::bigint as backoff_count,
-                   count(*) filter (
-                       where stream_mirror_last_error is not null
+                   least(
+                       sampled_counts.failed_sample,
+                       (select lower_bound_count from admin_event_stream_mirror_sample_limit)
                    )::bigint as failed_count,
-                   coalesce(max(stream_mirror_attempts), 0)::integer as max_attempts,
-                   min(created_at)::text as oldest_unmirrored_created_at,
-                   min(stream_mirror_locked_until) filter (
-                       where stream_mirror_locked_until > now()
-                   )::text as next_retry_at,
-                   (select stream_mirror_last_error from newest_error) as last_error
-            from unmirrored
+                   sampled_counts.max_attempts,
+                   (select oldest_unmirrored_created_at from oldest_unmirrored)
+                       as oldest_unmirrored_created_at,
+                   (select next_retry_at from next_retry) as next_retry_at,
+                   (select last_error from last_error) as last_error,
+                   (
+                       sampled_counts.unmirrored_sample
+                           <= (select lower_bound_count from admin_event_stream_mirror_sample_limit)
+                       and sampled_counts.claimable_sample
+                           <= (select lower_bound_count from admin_event_stream_mirror_sample_limit)
+                       and sampled_counts.locked_sample
+                           <= (select lower_bound_count from admin_event_stream_mirror_sample_limit)
+                       and sampled_counts.backoff_sample
+                           <= (select lower_bound_count from admin_event_stream_mirror_sample_limit)
+                       and sampled_counts.failed_sample
+                           <= (select lower_bound_count from admin_event_stream_mirror_sample_limit)
+                   ) as counts_are_exact,
+                   (select lower_bound_count from admin_event_stream_mirror_sample_limit)
+                       as sample_limit
+            from sampled_counts
             "#;
 
 impl AdminRepository {
@@ -851,44 +1079,15 @@ impl AdminRepository {
         &self,
         input: QueueLibraryScanInput,
     ) -> Result<Option<ScanJobRecord>, sqlx::Error> {
-        let Some(library_row) = sqlx::query(ADMIN_LIBRARY_BY_PUBLIC_ID_SQL)
-            .bind(&input.library_id)
+        let payload_reason = json!(input.reason);
+        let row = sqlx::query(ADMIN_QUEUE_LIBRARY_SCAN_SQL)
+            .bind(input.library_id.trim())
+            .bind(input.requested_by_user_id)
+            .bind(payload_reason)
             .fetch_optional(&self.pool)
-            .await?
-        else {
-            return Ok(None);
-        };
+            .await?;
 
-        let library_row_id = library_row.try_get::<i64, _>("id")?;
-        let library_public_id = library_row.try_get::<String, _>("public_id")?;
-        let payload = json!({
-            "libraryId": library_public_id,
-            "requestedByUserId": input.requested_by_user_id,
-            "reason": input.reason,
-        });
-        let job = sqlx::query(
-            r#"
-            insert into jobs (
-                job_type,
-                status,
-                queue_name,
-                priority,
-                payload
-            )
-            values ('library.scan', 'queued', 'scan', 0, $1)
-            returning
-                public_id::text as id,
-                status,
-                queue_name,
-                job_type
-            "#,
-        )
-        .bind(payload)
-        .fetch_one(&self.pool)
-        .await?;
-
-        let _ = library_row_id;
-        ScanJobRecord::from_row(job).map(Some)
+        row.map(ScanJobRecord::from_row).transpose()
     }
 
     pub async fn queue_metadata_refresh_for_item(
@@ -954,18 +1153,11 @@ impl AdminRepository {
                    u.allow_transcode,
                    u.allow_new_device_login,
                    u.password_hash is not null as has_password,
-                   (
-                       select count(*)::bigint
-                       from devices d
-                       where d.user_id = u.id
-                   ) as device_count,
-                   (
-                       select count(*)::bigint
-                       from sessions s
-                       where s.user_id = u.id
-                         and s.revoked_at is null
-                         and s.expires_at > now()
-                   ) as active_session_count,
+"#,
+        );
+        push_admin_user_counts_sql(&mut query);
+        query.push(
+            r#"
                    u.last_login_at::text as last_login_at,
                    u.created_at::text as created_at,
                    u.updated_at::text as updated_at
@@ -1044,17 +1236,41 @@ impl AdminRepository {
         user_id: &str,
         input: UpdateUserPolicyInput,
     ) -> Result<Option<AdminUserRecord>, sqlx::Error> {
-        let row = sqlx::query(
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
             with updated as (
                 update users
-                set display_name = $2,
-                    is_disabled = $3,
-                    allow_download = $4,
-                    allow_transcode = $5,
-                    allow_new_device_login = $6,
+                set display_name = "#,
+        );
+        query.push_bind(input.display_name.as_deref());
+        query.push(
+            r#",
+                    is_disabled = "#,
+        );
+        query.push_bind(input.is_disabled);
+        query.push(
+            r#",
+                    allow_download = "#,
+        );
+        query.push_bind(input.allow_download);
+        query.push(
+            r#",
+                    allow_transcode = "#,
+        );
+        query.push_bind(input.allow_transcode);
+        query.push(
+            r#",
+                    allow_new_device_login = "#,
+        );
+        query.push_bind(input.allow_new_device_login);
+        query.push(
+            r#",
                     updated_at = now()
-                where public_id = $1::uuid
+                where public_id = "#,
+        );
+        query.push_bind(user_id.trim());
+        query.push(
+            r#"::uuid
                 returning *
             )
             select u.public_id::text as id,
@@ -1066,33 +1282,20 @@ impl AdminRepository {
                    u.allow_transcode,
                    u.allow_new_device_login,
                    u.password_hash is not null as has_password,
-                   (
-                       select count(*)::bigint
-                       from devices d
-                       where d.user_id = u.id
-                   ) as device_count,
-                   (
-                       select count(*)::bigint
-                       from sessions s
-                       where s.user_id = u.id
-                         and s.revoked_at is null
-                         and s.expires_at > now()
-                   ) as active_session_count,
+"#,
+        );
+        push_admin_user_counts_sql(&mut query);
+        query.push(
+            r#"
                    u.last_login_at::text as last_login_at,
                    u.created_at::text as created_at,
                    u.updated_at::text as updated_at
             from updated u
             join roles r on r.id = u.role_id
             "#,
-        )
-        .bind(user_id.trim())
-        .bind(input.display_name.as_deref())
-        .bind(input.is_disabled)
-        .bind(input.allow_download)
-        .bind(input.allow_transcode)
-        .bind(input.allow_new_device_login)
-        .fetch_optional(&self.pool)
-        .await?;
+        );
+
+        let row = query.build().fetch_optional(&self.pool).await?;
 
         row.map(AdminUserRecord::from_row).transpose()
     }
@@ -2380,7 +2583,7 @@ impl AdminRepository {
                 select 1
                 from event_outbox
                 where public_id = case
-                    when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     then $1::uuid
                     else null::uuid
                 end
@@ -2785,13 +2988,11 @@ impl AdminRepository {
                    tasks.last_run_at::text as last_run_at,
                    tasks.timeout_seconds,
                    tasks.max_concurrency,
-                   (
-                       select count(*)::bigint
-                       from scheduled_task_runs runs
-                       where runs.task_id = tasks.id
-                         and runs.status = 'running'
-                         and runs.lease_expires_at > now()
-                   ) as active_run_count,
+"#,
+        );
+        query.push(SCHEDULED_TASK_ACTIVE_RUN_COUNT_SQL);
+        query.push(
+            r#"
                    (
                        select runs.public_id::text
                        from scheduled_task_runs runs
@@ -2914,51 +3115,62 @@ impl AdminRepository {
         id_or_key: &str,
     ) -> Result<Option<ScheduledTaskAdminRecord>, sqlx::Error> {
         let id_or_key = id_or_key.trim();
-        let row = sqlx::query(
+        let mut query = QueryBuilder::<Postgres>::new(
             r#"
-            select public_id::text as id,
-                   task_key,
-                   task_type,
-                   owner_type,
-                   owner_id,
-                   enabled,
-                   schedule_kind,
-                   schedule_value,
-                   next_run_at::text as next_run_at,
-                   last_run_at::text as last_run_at,
-                   timeout_seconds,
-                   max_concurrency,
-                   (
-                       select count(*)::bigint
-                       from scheduled_task_runs runs
-                       where runs.task_id = scheduled_tasks.id
-                         and runs.status = 'running'
-                         and runs.lease_expires_at > now()
-                   ) as active_run_count,
+            select tasks.public_id::text as id,
+                   tasks.task_key,
+                   tasks.task_type,
+                   tasks.owner_type,
+                   tasks.owner_id,
+                   tasks.enabled,
+                   tasks.schedule_kind,
+                   tasks.schedule_value,
+                   tasks.next_run_at::text as next_run_at,
+                   tasks.last_run_at::text as last_run_at,
+                   tasks.timeout_seconds,
+                   tasks.max_concurrency,
+"#,
+        );
+        query.push(SCHEDULED_TASK_ACTIVE_RUN_COUNT_SQL);
+        query.push(
+            r#"
                    (
                        select runs.public_id::text
                        from scheduled_task_runs runs
-                       where runs.task_id = scheduled_tasks.id
+                       where runs.task_id = tasks.id
                        order by runs.started_at desc, runs.id desc
                        limit 1
                    ) as last_run_id,
-                   failure_count,
-                   last_error,
-                   created_at::text as created_at,
-                   updated_at::text as updated_at
-            from scheduled_tasks
-            where public_id = case
-                    when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    then $1::uuid
+                   tasks.failure_count,
+                   tasks.last_error,
+                   tasks.created_at::text as created_at,
+                   tasks.updated_at::text as updated_at
+            from scheduled_tasks tasks
+            where tasks.public_id = case
+                    when
+"#,
+        );
+        query.push_bind(id_or_key);
+        query.push(
+            r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then
+"#,
+        );
+        query.push_bind(id_or_key);
+        query.push(
+            r#"::uuid
                     else null::uuid
                 end
-               or task_key = $1
+               or tasks.task_key = "#,
+        );
+        query.push_bind(id_or_key);
+        query.push(
+            r#"
             limit 1
             "#,
-        )
-        .bind(id_or_key)
-        .fetch_optional(&self.pool)
-        .await?;
+        );
+
+        let row = query.build().fetch_optional(&self.pool).await?;
 
         row.map(ScheduledTaskAdminRecord::from_row).transpose()
     }
@@ -3464,6 +3676,8 @@ impl EventStreamMirrorStatusRecord {
             oldest_unmirrored_created_at: row.try_get("oldest_unmirrored_created_at")?,
             next_retry_at: row.try_get("next_retry_at")?,
             last_error: row.try_get("last_error")?,
+            counts_are_exact: row.try_get("counts_are_exact")?,
+            sample_limit: row.try_get("sample_limit")?,
         })
     }
 }
@@ -3576,6 +3790,289 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_task_run_history_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = [
+            "scheduled_task_run_history_queries",
+            "execute_against_live_schema",
+        ]
+        .join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "scheduled task run history queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin scheduled-task run history keyset query
+    // against the migrated schema. The smoke inserts an isolated task and two
+    // partitioned scheduled_task_runs rows, then exercises status filters,
+    // cursor pagination, missing task keys, and invalid cursors through the
+    // production repository method.
+    //   cargo test -- --ignored scheduled_task_run_history_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn scheduled_task_run_history_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let recent_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_scheduled_task_runs_task_recent'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scheduled task run recent index should exist");
+        let recent_index_def = recent_index_def.to_ascii_lowercase();
+        assert!(recent_index_def.contains("task_id"));
+        assert!(recent_index_def.contains("started_at desc"));
+        assert!(recent_index_def.contains("id desc"));
+        assert!(recent_index_def.contains("public_id"));
+
+        let status_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_scheduled_task_runs_task_status_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scheduled task run task/status keyset index should exist");
+        let status_index_def = status_index_def.to_ascii_lowercase();
+        assert!(status_index_def.contains("task_id"));
+        assert!(status_index_def.contains("status"));
+        assert!(status_index_def.contains("started_at desc"));
+        assert!(status_index_def.contains("id desc"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let task_key = format!("admin.scheduled-run.smoke.{suffix}");
+
+        let task_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into scheduled_tasks (
+                task_key,
+                task_type,
+                owner_type,
+                enabled,
+                schedule_kind,
+                schedule_value,
+                next_run_at,
+                timeout_seconds,
+                max_concurrency,
+                created_at,
+                updated_at
+            )
+            values (
+                $1,
+                'admin.scheduled-run.smoke',
+                'core',
+                true,
+                'interval',
+                '3600',
+                now() + interval '1 hour',
+                300,
+                2,
+                now() - interval '3 minutes',
+                now() - interval '3 minutes'
+            )
+            returning id
+            "#,
+        )
+        .bind(&task_key)
+        .fetch_one(&pool)
+        .await
+        .expect("create scheduled task run history smoke task");
+
+        let older_run_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into scheduled_task_runs (
+                task_id,
+                task_key,
+                trigger_type,
+                worker_id,
+                status,
+                lease_expires_at,
+                queued_jobs,
+                error_message,
+                started_at,
+                finished_at,
+                created_at,
+                updated_at
+            )
+            values (
+                $1,
+                $2,
+                'due',
+                $3,
+                'failed',
+                now() - interval '90 seconds',
+                3,
+                'scheduled task run history smoke failure',
+                now() - interval '2 minutes',
+                now() - interval '119 seconds',
+                now() - interval '2 minutes',
+                now() - interval '119 seconds'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(task_id)
+        .bind(&task_key)
+        .bind(format!("scheduled-run-smoke-worker-old-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("create older scheduled task run smoke row");
+
+        let newer_run_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into scheduled_task_runs (
+                task_id,
+                task_key,
+                trigger_type,
+                worker_id,
+                status,
+                lease_expires_at,
+                queued_jobs,
+                started_at,
+                finished_at,
+                created_at,
+                updated_at
+            )
+            values (
+                $1,
+                $2,
+                'manual',
+                $3,
+                'succeeded',
+                now() + interval '5 minutes',
+                1,
+                now() - interval '1 minute',
+                now() - interval '59 seconds',
+                now() - interval '1 minute',
+                now() - interval '59 seconds'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(task_id)
+        .bind(&task_key)
+        .bind(format!("scheduled-run-smoke-worker-new-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("create newer scheduled task run smoke row");
+
+        let repository = AdminRepository::new(pool.clone());
+        let runs_page = repository
+            .list_scheduled_task_runs_page(
+                &task_key,
+                ScheduledTaskRunFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("scheduled task run history list should execute")
+            .expect("smoke task should exist");
+        assert!(
+            runs_page.records.iter().any(|run| run.id == older_run_id),
+            "older smoke scheduled task run should be listed"
+        );
+        assert!(
+            runs_page.records.iter().any(|run| run.id == newer_run_id),
+            "newer smoke scheduled task run should be listed"
+        );
+
+        let failed_runs_page = repository
+            .list_scheduled_task_runs_page(
+                &task_key,
+                ScheduledTaskRunFilter {
+                    status: Some("failed".to_owned()),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("filtered scheduled task run history list should execute")
+            .expect("smoke task should exist");
+        assert_eq!(failed_runs_page.records.len(), 1);
+        assert_eq!(failed_runs_page.records[0].id, older_run_id);
+        assert_eq!(failed_runs_page.records[0].status, "failed");
+        assert_eq!(failed_runs_page.records[0].queued_jobs, Some(3));
+
+        let cursor_runs_page = repository
+            .list_scheduled_task_runs_page(
+                &task_key,
+                ScheduledTaskRunFilter {
+                    status: None,
+                    cursor: Some(newer_run_id),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("cursor scheduled task run history list should execute")
+            .expect("smoke task should exist");
+        assert!(
+            cursor_runs_page
+                .records
+                .iter()
+                .any(|run| run.id == older_run_id),
+            "older scheduled task run should be returned after newest run cursor"
+        );
+
+        let invalid_cursor_page = repository
+            .list_scheduled_task_runs_page(
+                &task_key,
+                ScheduledTaskRunFilter {
+                    status: None,
+                    cursor: Some("not-a-uuid".to_owned()),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("invalid scheduled task run cursor should execute safely")
+            .expect("smoke task should exist");
+        assert!(invalid_cursor_page.records.is_empty());
+
+        let missing_task_page = repository
+            .list_scheduled_task_runs_page(
+                "admin.scheduled-run.smoke.missing",
+                ScheduledTaskRunFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("missing scheduled task key should be safely handled");
+        assert!(missing_task_page.is_none());
+
+        sqlx::query("delete from scheduled_tasks where id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke scheduled task and cascaded run history");
+    }
+
+    #[test]
     fn admin_job_run_event_keyset_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0050_admin_job_run_event_keyset_indexes.sql");
@@ -3628,6 +4125,404 @@ mod tests {
     }
 
     #[test]
+    fn admin_job_run_event_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = ["admin_job_run_event_queries", "execute_against_live_schema"].join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "Admin job run/event history queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin job run and job event history keyset
+    // queries against the migrated schema. This covers the partitioned
+    // job_runs/job_events parents, their keyset indexes, detail summaries,
+    // status/level filters, cursor joins, and valid-but-missing job ids through
+    // the production repository methods.
+    //   cargo test -- --ignored admin_job_run_event_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn admin_job_run_event_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let run_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_job_runs_job_status_started_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("job run job/status keyset index should exist");
+        let run_index_def = run_index_def.to_ascii_lowercase();
+        assert!(run_index_def.contains("job_id"));
+        assert!(run_index_def.contains("status"));
+        assert!(run_index_def.contains("started_at desc"));
+        assert!(run_index_def.contains("id desc"));
+
+        let event_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_job_events_job_level_created_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("job event job/level keyset index should exist");
+        let event_index_def = event_index_def.to_ascii_lowercase();
+        assert!(event_index_def.contains("job_id"));
+        assert!(event_index_def.contains("event_level"));
+        assert!(event_index_def.contains("created_at desc"));
+        assert!(event_index_def.contains("id desc"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let job_type = format!("admin.history.smoke.{suffix}");
+        let dedupe_key = format!("admin-history-smoke-{suffix}");
+
+        let job_row = sqlx::query(
+            r#"
+            insert into jobs (
+                job_type,
+                status,
+                queue_name,
+                priority,
+                payload,
+                dedupe_key,
+                run_at,
+                attempts,
+                max_attempts,
+                created_at,
+                updated_at,
+                finished_at
+            )
+            values (
+                $1,
+                'succeeded',
+                'admin-smoke',
+                7,
+                jsonb_build_object('smoke', true, 'kind', 'admin-job-history'),
+                $2,
+                now() - interval '3 minutes',
+                1,
+                3,
+                now() - interval '3 minutes',
+                now() - interval '1 minute',
+                now() - interval '1 minute'
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(&job_type)
+        .bind(&dedupe_key)
+        .fetch_one(&pool)
+        .await
+        .expect("create admin job history smoke job");
+        let job_internal_id = job_row
+            .try_get::<i64, _>("id")
+            .expect("job internal id should be returned");
+        let job_id = job_row
+            .try_get::<String, _>("public_id")
+            .expect("job public id should be returned");
+
+        let older_run_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into job_runs (
+                job_id,
+                worker_id,
+                status,
+                started_at,
+                finished_at,
+                error_message,
+                metrics
+            )
+            values (
+                $1,
+                $2,
+                'failed',
+                now() - interval '2 minutes',
+                now() - interval '119 seconds',
+                'admin job history smoke failure',
+                jsonb_build_object('attempt', 1, 'smoke', true)
+            )
+            returning id
+            "#,
+        )
+        .bind(job_internal_id)
+        .bind(format!("admin-history-smoke-worker-old-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("create older admin job run smoke row");
+
+        let newer_run_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into job_runs (
+                job_id,
+                worker_id,
+                status,
+                started_at,
+                finished_at,
+                metrics
+            )
+            values (
+                $1,
+                $2,
+                'succeeded',
+                now() - interval '1 minute',
+                now() - interval '59 seconds',
+                jsonb_build_object('attempt', 2, 'smoke', true)
+            )
+            returning id
+            "#,
+        )
+        .bind(job_internal_id)
+        .bind(format!("admin-history-smoke-worker-new-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("create newer admin job run smoke row");
+
+        let older_event_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into job_events (
+                job_id,
+                job_run_id,
+                event_type,
+                event_level,
+                message,
+                payload,
+                created_at
+            )
+            values (
+                $1,
+                $2,
+                'admin.history.smoke.failed',
+                'warn',
+                'older admin job history smoke event',
+                jsonb_build_object('ordinal', 1, 'smoke', true),
+                now() - interval '40 seconds'
+            )
+            returning id
+            "#,
+        )
+        .bind(job_internal_id)
+        .bind(older_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create older admin job event smoke row");
+
+        let newer_event_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into job_events (
+                job_id,
+                job_run_id,
+                event_type,
+                event_level,
+                message,
+                payload,
+                created_at
+            )
+            values (
+                $1,
+                $2,
+                'admin.history.smoke.succeeded',
+                'info',
+                'newer admin job history smoke event',
+                jsonb_build_object('ordinal', 2, 'smoke', true),
+                now() - interval '20 seconds'
+            )
+            returning id
+            "#,
+        )
+        .bind(job_internal_id)
+        .bind(newer_run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create newer admin job event smoke row");
+
+        let repository = AdminRepository::new(pool.clone());
+        let detail = repository
+            .get_admin_job_detail(&job_id, 10, 10)
+            .await
+            .expect("admin job detail should execute against live schema")
+            .expect("smoke job should exist");
+        assert_eq!(detail.job.id, job_id);
+        assert!(detail.runs.iter().any(|run| run.id == older_run_id));
+        assert!(detail.runs.iter().any(|run| run.id == newer_run_id));
+        assert!(detail.events.iter().any(|event| event.id == older_event_id));
+        assert!(detail.events.iter().any(|event| event.id == newer_event_id));
+
+        let runs_page = repository
+            .list_admin_job_runs_page(
+                &job_id,
+                AdminJobRunFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("admin job run list should execute")
+            .expect("smoke job should exist");
+        assert!(
+            runs_page.records.iter().any(|run| run.id == older_run_id),
+            "older smoke job run should be listed"
+        );
+        assert!(
+            runs_page.records.iter().any(|run| run.id == newer_run_id),
+            "newer smoke job run should be listed"
+        );
+
+        let failed_runs_page = repository
+            .list_admin_job_runs_page(
+                &job_id,
+                AdminJobRunFilter {
+                    status: Some("failed".to_owned()),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("filtered admin job run list should execute")
+            .expect("smoke job should exist");
+        assert_eq!(failed_runs_page.records.len(), 1);
+        assert_eq!(failed_runs_page.records[0].id, older_run_id);
+        assert_eq!(failed_runs_page.records[0].status, "failed");
+
+        let cursor_runs_page = repository
+            .list_admin_job_runs_page(
+                &job_id,
+                AdminJobRunFilter {
+                    status: None,
+                    cursor: Some(newer_run_id),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("cursor admin job run list should execute")
+            .expect("smoke job should exist");
+        assert!(
+            cursor_runs_page
+                .records
+                .iter()
+                .any(|run| run.id == older_run_id),
+            "older job run should be returned after newest run cursor"
+        );
+
+        let events_page = repository
+            .list_admin_job_events_page(
+                &job_id,
+                AdminJobEventFilter {
+                    event_level: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("admin job event list should execute")
+            .expect("smoke job should exist");
+        assert!(
+            events_page
+                .records
+                .iter()
+                .any(|event| event.id == older_event_id),
+            "older smoke job event should be listed"
+        );
+        assert!(
+            events_page
+                .records
+                .iter()
+                .any(|event| event.id == newer_event_id),
+            "newer smoke job event should be listed"
+        );
+
+        let warn_events_page = repository
+            .list_admin_job_events_page(
+                &job_id,
+                AdminJobEventFilter {
+                    event_level: Some("warn".to_owned()),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("filtered admin job event list should execute")
+            .expect("smoke job should exist");
+        assert_eq!(warn_events_page.records.len(), 1);
+        assert_eq!(warn_events_page.records[0].id, older_event_id);
+        assert_eq!(warn_events_page.records[0].event_level, "warn");
+
+        let cursor_events_page = repository
+            .list_admin_job_events_page(
+                &job_id,
+                AdminJobEventFilter {
+                    event_level: None,
+                    cursor: Some(newer_event_id),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("cursor admin job event list should execute")
+            .expect("smoke job should exist");
+        assert!(
+            cursor_events_page
+                .records
+                .iter()
+                .any(|event| event.id == older_event_id),
+            "older job event should be returned after newest event cursor"
+        );
+
+        let missing_job_id = "00000000-0000-0000-0000-000000000000";
+        let missing_runs_page = repository
+            .list_admin_job_runs_page(
+                missing_job_id,
+                AdminJobRunFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("valid missing job id should be safely handled for runs");
+        assert!(missing_runs_page.is_none());
+
+        let missing_events_page = repository
+            .list_admin_job_events_page(
+                missing_job_id,
+                AdminJobEventFilter {
+                    event_level: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("valid missing job id should be safely handled for events");
+        assert!(missing_events_page.is_none());
+
+        sqlx::query("delete from jobs where id = $1")
+            .bind(job_internal_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke job and cascaded run/event history");
+    }
+
+    #[test]
     fn admin_job_list_keyset_indexes_match_query_shape() {
         let migration = include_str!("../../migrations/0054_admin_job_list_keyset_indexes.sql");
         let repository = repository_source();
@@ -3659,6 +4554,238 @@ mod tests {
         assert!(job_query.contains("jobs.queue_name ="));
         assert!(job_query.contains("order by jobs.created_at desc, jobs.id desc"));
         assert!(!job_query.contains("offset "));
+    }
+
+    #[test]
+    fn admin_job_list_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = ["admin_job_list_queries", "execute_against_live_schema"].join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "Admin job list queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin jobs keyset list query against the
+    // migrated schema. The smoke inserts two isolated jobs and exercises
+    // status/type/queue filters, cursor pagination, and an invalid cursor
+    // through the production repository method.
+    //   cargo test -- --ignored admin_job_list_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn admin_job_list_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let status_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_jobs_admin_status_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin job status keyset index should exist");
+        let status_index_def = status_index_def.to_ascii_lowercase();
+        assert!(status_index_def.contains("status"));
+        assert!(status_index_def.contains("created_at desc"));
+        assert!(status_index_def.contains("id desc"));
+
+        let queue_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_jobs_admin_queue_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin job queue keyset index should exist");
+        let queue_index_def = queue_index_def.to_ascii_lowercase();
+        assert!(queue_index_def.contains("queue_name"));
+        assert!(queue_index_def.contains("created_at desc"));
+        assert!(queue_index_def.contains("id desc"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let job_type = format!("admin.job-list.smoke.{suffix}");
+        let queue_name = format!("admin-smoke-{suffix}");
+        let older_dedupe_key = format!("admin-job-list-smoke-older-{suffix}");
+        let newer_dedupe_key = format!("admin-job-list-smoke-newer-{suffix}");
+
+        let older_job_row = sqlx::query(
+            r#"
+            insert into jobs (
+                job_type,
+                status,
+                queue_name,
+                priority,
+                payload,
+                dedupe_key,
+                run_at,
+                attempts,
+                max_attempts,
+                last_error,
+                created_at,
+                updated_at
+            )
+            values (
+                $1,
+                'failed',
+                $2,
+                3,
+                jsonb_build_object('smoke', true, 'ordinal', 1),
+                $3,
+                now() - interval '3 minutes',
+                1,
+                3,
+                'admin job list smoke failure',
+                now() - interval '3 minutes',
+                now() - interval '3 minutes'
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(&job_type)
+        .bind(&queue_name)
+        .bind(&older_dedupe_key)
+        .fetch_one(&pool)
+        .await
+        .expect("create older admin job list smoke row");
+        let older_job_internal_id = older_job_row
+            .try_get::<i64, _>("id")
+            .expect("older job internal id should be returned");
+        let older_job_id = older_job_row
+            .try_get::<String, _>("public_id")
+            .expect("older job public id should be returned");
+
+        let newer_job_row = sqlx::query(
+            r#"
+            insert into jobs (
+                job_type,
+                status,
+                queue_name,
+                priority,
+                payload,
+                dedupe_key,
+                run_at,
+                attempts,
+                max_attempts,
+                created_at,
+                updated_at,
+                finished_at
+            )
+            values (
+                $1,
+                'succeeded',
+                $2,
+                8,
+                jsonb_build_object('smoke', true, 'ordinal', 2),
+                $3,
+                now() - interval '1 minute',
+                1,
+                3,
+                now() - interval '1 minute',
+                now() - interval '1 minute',
+                now() - interval '30 seconds'
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(&job_type)
+        .bind(&queue_name)
+        .bind(&newer_dedupe_key)
+        .fetch_one(&pool)
+        .await
+        .expect("create newer admin job list smoke row");
+        let newer_job_internal_id = newer_job_row
+            .try_get::<i64, _>("id")
+            .expect("newer job internal id should be returned");
+        let newer_job_id = newer_job_row
+            .try_get::<String, _>("public_id")
+            .expect("newer job public id should be returned");
+
+        let repository = AdminRepository::new(pool.clone());
+        let job_page = repository
+            .list_admin_jobs_page(AdminJobFilter {
+                status: None,
+                job_type: Some(job_type.clone()),
+                queue_name: Some(queue_name.clone()),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("admin job list should execute");
+        assert!(
+            job_page.records.iter().any(|job| job.id == older_job_id),
+            "older smoke job should be listed"
+        );
+        assert!(
+            job_page.records.iter().any(|job| job.id == newer_job_id),
+            "newer smoke job should be listed"
+        );
+
+        let failed_page = repository
+            .list_admin_jobs_page(AdminJobFilter {
+                status: Some("failed".to_owned()),
+                job_type: Some(job_type.clone()),
+                queue_name: Some(queue_name.clone()),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("filtered admin job list should execute");
+        assert_eq!(failed_page.records.len(), 1);
+        assert_eq!(failed_page.records[0].id, older_job_id);
+        assert_eq!(failed_page.records[0].status, "failed");
+
+        let cursor_page = repository
+            .list_admin_jobs_page(AdminJobFilter {
+                status: None,
+                job_type: Some(job_type.clone()),
+                queue_name: Some(queue_name.clone()),
+                cursor: Some(newer_job_id),
+                limit: 10,
+            })
+            .await
+            .expect("cursor admin job list should execute");
+        assert!(
+            cursor_page.records.iter().any(|job| job.id == older_job_id),
+            "older job should be returned after newest job cursor"
+        );
+
+        let invalid_cursor_page = repository
+            .list_admin_jobs_page(AdminJobFilter {
+                status: None,
+                job_type: Some(job_type.clone()),
+                queue_name: Some(queue_name.clone()),
+                cursor: Some("not-a-uuid".to_owned()),
+                limit: 10,
+            })
+            .await
+            .expect("invalid cursor admin job list should execute safely");
+        assert!(invalid_cursor_page.records.is_empty());
+
+        sqlx::query("delete from jobs where id = any($1)")
+            .bind(&[older_job_internal_id, newer_job_internal_id][..])
+            .execute(&pool)
+            .await
+            .expect("delete smoke jobs");
     }
 
     #[test]
@@ -3695,6 +4822,533 @@ mod tests {
     }
 
     #[test]
+    fn admin_user_list_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = ["admin_user_list_queries", "execute_against_live_schema"].join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "admin user list keyset queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin user list keyset query against the
+    // migrated schema. The smoke inserts isolated users and exercises role,
+    // disabled, role+disabled, cursor, and invalid cursor behavior through the
+    // repository method.
+    //   cargo test -- --ignored admin_user_list_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn admin_user_list_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let username_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_users_admin_username_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin user username keyset index should exist");
+        let username_index_def = username_index_def.to_ascii_lowercase();
+        assert!(username_index_def.contains("username_normalized"));
+        assert!(username_index_def.contains("id"));
+
+        let role_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_users_admin_role_username_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin user role/username keyset index should exist");
+        let role_index_def = role_index_def.to_ascii_lowercase();
+        assert!(role_index_def.contains("role_id"));
+        assert!(role_index_def.contains("username_normalized"));
+        assert!(role_index_def.contains("id"));
+
+        let disabled_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_users_admin_disabled_username_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin user disabled/username keyset index should exist");
+        let disabled_index_def = disabled_index_def.to_ascii_lowercase();
+        assert!(disabled_index_def.contains("is_disabled"));
+        assert!(disabled_index_def.contains("username_normalized"));
+        assert!(disabled_index_def.contains("id"));
+
+        let role_disabled_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_users_admin_role_disabled_username_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin user role/disabled/username keyset index should exist");
+        let role_disabled_index_def = role_disabled_index_def.to_ascii_lowercase();
+        assert!(role_disabled_index_def.contains("role_id"));
+        assert!(role_disabled_index_def.contains("is_disabled"));
+        assert!(role_disabled_index_def.contains("username_normalized"));
+        assert!(role_disabled_index_def.contains("id"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let role_name = format!("Admin User List Smoke {suffix}");
+        let role_normalized = format!("admin-user-list-smoke-{suffix}");
+        let other_role_name = format!("Admin User List Other Smoke {suffix}");
+        let other_role_normalized = format!("admin-user-list-other-smoke-{suffix}");
+        let first_username = format!("0000_admin_user_list_smoke_a_{suffix}");
+        let second_username = format!("0000_admin_user_list_smoke_b_{suffix}");
+        let disabled_username = format!("0000_admin_user_list_smoke_c_{suffix}");
+        let other_username = format!("0000_admin_user_list_smoke_d_{suffix}");
+
+        let role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description, is_builtin)
+            values ($1, $2, 'admin user list smoke role', false)
+            returning id
+            "#,
+        )
+        .bind(&role_name)
+        .bind(&role_normalized)
+        .fetch_one(&pool)
+        .await
+        .expect("create admin user list smoke role");
+
+        let other_role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description, is_builtin)
+            values ($1, $2, 'admin user list other smoke role', false)
+            returning id
+            "#,
+        )
+        .bind(&other_role_name)
+        .bind(&other_role_normalized)
+        .fetch_one(&pool)
+        .await
+        .expect("create admin user list other smoke role");
+
+        let first_user_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into users (
+                username,
+                username_normalized,
+                display_name,
+                role_id,
+                is_disabled,
+                allow_download,
+                allow_transcode,
+                allow_new_device_login
+            )
+            values ($1, $1, 'Admin user list smoke A', $2, false, true, true, true)
+            returning public_id::text
+            "#,
+        )
+        .bind(&first_username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create first admin user list smoke user");
+
+        let second_user_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into users (
+                username,
+                username_normalized,
+                display_name,
+                role_id,
+                is_disabled,
+                allow_download,
+                allow_transcode,
+                allow_new_device_login
+            )
+            values ($1, $1, 'Admin user list smoke B', $2, false, true, true, true)
+            returning public_id::text
+            "#,
+        )
+        .bind(&second_username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create second admin user list smoke user");
+
+        let disabled_user_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into users (
+                username,
+                username_normalized,
+                display_name,
+                role_id,
+                is_disabled,
+                allow_download,
+                allow_transcode,
+                allow_new_device_login
+            )
+            values ($1, $1, 'Admin user list smoke C', $2, true, false, false, false)
+            returning public_id::text
+            "#,
+        )
+        .bind(&disabled_username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create disabled admin user list smoke user");
+
+        let other_user_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into users (
+                username,
+                username_normalized,
+                display_name,
+                role_id,
+                is_disabled,
+                allow_download,
+                allow_transcode,
+                allow_new_device_login
+            )
+            values ($1, $1, 'Admin user list smoke D', $2, false, true, true, true)
+            returning public_id::text
+            "#,
+        )
+        .bind(&other_username)
+        .bind(other_role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create other-role admin user list smoke user");
+
+        let repository = AdminRepository::new(pool.clone());
+        let role_page = repository
+            .list_admin_users_page(AdminUserFilter {
+                role_name: Some(role_normalized.clone()),
+                is_disabled: None,
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("admin user role filter list should execute");
+        assert!(
+            role_page
+                .records
+                .iter()
+                .any(|user| user.id == first_user_id && user.role_name == role_name)
+        );
+        assert!(
+            role_page
+                .records
+                .iter()
+                .any(|user| user.id == second_user_id && user.role_name == role_name)
+        );
+        assert!(
+            role_page
+                .records
+                .iter()
+                .any(|user| user.id == disabled_user_id && user.is_disabled)
+        );
+        assert!(
+            !role_page
+                .records
+                .iter()
+                .any(|user| user.id == other_user_id),
+            "role filter should exclude users from other roles"
+        );
+        assert!(
+            role_page
+                .records
+                .iter()
+                .all(|user| user.role_name == role_name)
+        );
+
+        let enabled_page = repository
+            .list_admin_users_page(AdminUserFilter {
+                role_name: Some(role_normalized.clone()),
+                is_disabled: Some(false),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("admin user role+enabled filter list should execute");
+        assert!(
+            enabled_page
+                .records
+                .iter()
+                .any(|user| user.id == first_user_id && !user.is_disabled)
+        );
+        assert!(
+            enabled_page
+                .records
+                .iter()
+                .all(|user| user.role_name == role_name && !user.is_disabled)
+        );
+        assert!(
+            !enabled_page
+                .records
+                .iter()
+                .any(|user| user.id == disabled_user_id),
+            "disabled smoke user should be excluded by enabled filter"
+        );
+
+        let disabled_page = repository
+            .list_admin_users_page(AdminUserFilter {
+                role_name: Some(role_normalized.clone()),
+                is_disabled: Some(true),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("admin user role+disabled filter list should execute");
+        assert_eq!(disabled_page.records.len(), 1);
+        assert_eq!(disabled_page.records[0].id, disabled_user_id);
+        assert!(disabled_page.records[0].is_disabled);
+
+        let cursor_page = repository
+            .list_admin_users_page(AdminUserFilter {
+                role_name: Some(role_normalized.clone()),
+                is_disabled: Some(false),
+                cursor: Some(first_user_id.clone()),
+                limit: 10,
+            })
+            .await
+            .expect("admin user cursor list should execute");
+        assert!(
+            cursor_page
+                .records
+                .iter()
+                .any(|user| user.id == second_user_id),
+            "later same-role enabled user should be returned after first user cursor"
+        );
+        assert!(
+            !cursor_page
+                .records
+                .iter()
+                .any(|user| user.id == first_user_id),
+            "cursor page should not include the cursor user"
+        );
+
+        let invalid_cursor_page = repository
+            .list_admin_users_page(AdminUserFilter {
+                role_name: Some(role_normalized),
+                is_disabled: Some(false),
+                cursor: Some("not-a-uuid".to_owned()),
+                limit: 10,
+            })
+            .await
+            .expect("invalid admin user cursor should be safely handled");
+        assert!(invalid_cursor_page.records.is_empty());
+        assert!(!invalid_cursor_page.has_more);
+        assert!(invalid_cursor_page.next_cursor.is_none());
+
+        sqlx::query("delete from users where username_normalized = any($1)")
+            .bind(
+                &[
+                    first_username,
+                    second_username,
+                    disabled_username,
+                    other_username,
+                ][..],
+            )
+            .execute(&pool)
+            .await
+            .expect("delete admin user list smoke users");
+        sqlx::query("delete from roles where id = any($1)")
+            .bind(&[role_id, other_role_id][..])
+            .execute(&pool)
+            .await
+            .expect("delete admin user list smoke roles");
+    }
+
+    #[test]
+    fn admin_user_summaries_use_bounded_probes() {
+        let repository = repository_source();
+        let production_source = repository
+            .split("#[cfg(test)]")
+            .next()
+            .expect("repository source should include production section");
+
+        assert!(production_source.contains("ADMIN_USER_SUMMARY_SAMPLE_LIMIT"));
+        assert!(production_source.contains("ADMIN_USER_SUMMARY_FETCH_LIMIT"));
+        assert!(production_source.contains("push_admin_user_counts_sql"));
+        assert!(production_source.contains("device_count_probe"));
+        assert!(production_source.contains("active_session_count_probe"));
+        assert!(production_source.contains("query.push_bind(ADMIN_USER_SUMMARY_SAMPLE_LIMIT)"));
+        assert!(production_source.contains("query.push_bind(ADMIN_USER_SUMMARY_FETCH_LIMIT)"));
+
+        let normalized = production_source
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !normalized.contains("select count(*)::bigint from devices d where d.user_id = u.id"),
+            "admin user list should not exact-count every device per user"
+        );
+        assert!(
+            !normalized.contains("select count(*)::bigint from sessions s where s.user_id = u.id"),
+            "admin user list should not exact-count every active session per user"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin user list and policy update paths
+    // against the real migrated schema. It creates and removes an isolated
+    // smoke user so the repository methods, QueryBuilder binds, and shared
+    // bounded summary probes are exercised end to end.
+    //   cargo test -- --ignored admin_user_summary_probes_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn admin_user_summary_probes_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let role_name = format!("admin_summary_smoke_{suffix}");
+        let username = format!("admin_summary_user_{suffix}");
+
+        let role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description, is_builtin)
+            values ($1, $1, 'admin user summary smoke role', false)
+            returning id
+            "#,
+        )
+        .bind(&role_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke role");
+
+        let (user_id, user_public_id) = sqlx::query_as::<_, (i64, String)>(
+            r#"
+            insert into users (
+                username,
+                username_normalized,
+                display_name,
+                role_id,
+                allow_download,
+                allow_transcode,
+                allow_new_device_login
+            )
+            values ($1, $1, 'Admin summary smoke user', $2, true, true, true)
+            returning id, public_id::text
+            "#,
+        )
+        .bind(&username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke user");
+
+        for index in 0..2 {
+            sqlx::query(
+                r#"
+                insert into devices (user_id, device_id, device_name, last_seen_at)
+                values ($1, $2, $3, now())
+                "#,
+            )
+            .bind(user_id)
+            .bind(format!("admin-summary-device-{suffix}-{index}"))
+            .bind(format!("Admin summary device {index}"))
+            .execute(&pool)
+            .await
+            .expect("create smoke device");
+
+            sqlx::query(
+                r#"
+                insert into sessions (user_id, access_token_hash, expires_at)
+                values ($1, gen_random_bytes(32), now() + interval '1 hour')
+                "#,
+            )
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("create smoke session");
+        }
+
+        let repository = AdminRepository::new(pool.clone());
+        let page = repository
+            .list_admin_users_page(AdminUserFilter {
+                role_name: Some(role_name.clone()),
+                limit: 5,
+                ..AdminUserFilter::default()
+            })
+            .await
+            .expect("admin user list should execute against live schema");
+        let listed = page
+            .records
+            .iter()
+            .find(|record| record.id == user_public_id)
+            .cloned();
+
+        let updated = repository
+            .update_user_policy(
+                &user_public_id,
+                UpdateUserPolicyInput {
+                    display_name: Some("Updated admin summary smoke user".to_owned()),
+                    is_disabled: false,
+                    allow_download: true,
+                    allow_transcode: true,
+                    allow_new_device_login: true,
+                },
+            )
+            .await
+            .expect("admin user policy update should execute against live schema");
+
+        sqlx::query("delete from users where id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke user");
+        sqlx::query("delete from roles where id = $1")
+            .bind(role_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke role");
+
+        let listed = listed.expect("smoke user should be present in filtered admin list");
+        assert_eq!(listed.device_count, 2);
+        assert_eq!(listed.active_session_count, 2);
+
+        let updated = updated.expect("smoke user should be updated by public id");
+        assert_eq!(updated.device_count, 2);
+        assert_eq!(updated.active_session_count, 2);
+    }
+
+    #[test]
     fn admin_user_library_permission_keyset_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0056_admin_user_library_permission_keyset_indexes.sql");
@@ -3723,6 +5377,398 @@ mod tests {
         assert!(permission_query.contains("lp.id is null"));
         assert!(permission_query.contains("order by l.name asc, l.id asc"));
         assert!(!permission_query.contains("offset "));
+    }
+
+    #[test]
+    fn admin_user_library_permission_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = [
+            "admin_user_library_permission_queries",
+            "execute_against_live_schema",
+        ]
+        .join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "admin user library-permission keyset queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin user library-permission keyset query
+    // against the migrated schema. The smoke inserts an isolated user and
+    // libraries, then exercises type/configured filters, cursor pagination,
+    // hidden-library effective permissions, and missing user behavior through
+    // the repository method.
+    //   cargo test -- --ignored admin_user_library_permission_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn admin_user_library_permission_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let name_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_libraries_admin_name_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin library name keyset index should exist");
+        let name_index_def = name_index_def.to_ascii_lowercase();
+        assert!(name_index_def.contains("name"));
+        assert!(name_index_def.contains("id"));
+
+        let type_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_libraries_admin_type_name_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin library type/name keyset index should exist");
+        let type_index_def = type_index_def.to_ascii_lowercase();
+        assert!(type_index_def.contains("library_type"));
+        assert!(type_index_def.contains("name"));
+        assert!(type_index_def.contains("id"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let role_name = format!("Library permission smoke {suffix}");
+        let role_name_normalized = format!("library-permission-smoke-{suffix}");
+        let username = format!("library-permission-smoke-{suffix}");
+        let first_library_name = format!("0000 admin permission smoke a {suffix}");
+        let second_library_name = format!("0000 admin permission smoke b {suffix}");
+        let hidden_library_name = format!("0000 admin permission smoke c {suffix}");
+        let unconfigured_library_name = format!("0000 admin permission smoke d {suffix}");
+
+        let role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description)
+            values ($1, $2, 'admin user library permission smoke role')
+            returning id
+            "#,
+        )
+        .bind(&role_name)
+        .bind(&role_name_normalized)
+        .fetch_one(&pool)
+        .await
+        .expect("create library permission smoke role");
+
+        let user_row = sqlx::query(
+            r#"
+            insert into users (
+                username,
+                username_normalized,
+                role_id,
+                allow_download,
+                allow_transcode,
+                allow_new_device_login
+            )
+            values ($1, $1, $2, true, true, true)
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(&username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create library permission smoke user");
+        let user_id = user_row
+            .try_get::<i64, _>("id")
+            .expect("smoke user internal id should be returned");
+        let user_public_id = user_row
+            .try_get::<String, _>("public_id")
+            .expect("smoke user public id should be returned");
+
+        let first_library_row = sqlx::query(
+            r#"
+            insert into libraries (name, library_type, is_hidden)
+            values ($1, 'movies', false)
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(&first_library_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create first smoke library");
+        let first_library_internal_id = first_library_row
+            .try_get::<i64, _>("id")
+            .expect("first smoke library internal id should be returned");
+        let first_library_id = first_library_row
+            .try_get::<String, _>("public_id")
+            .expect("first smoke library public id should be returned");
+
+        let second_library_row = sqlx::query(
+            r#"
+            insert into libraries (name, library_type, is_hidden)
+            values ($1, 'movies', false)
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(&second_library_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create second smoke library");
+        let second_library_internal_id = second_library_row
+            .try_get::<i64, _>("id")
+            .expect("second smoke library internal id should be returned");
+        let second_library_id = second_library_row
+            .try_get::<String, _>("public_id")
+            .expect("second smoke library public id should be returned");
+
+        let hidden_library_row = sqlx::query(
+            r#"
+            insert into libraries (name, library_type, is_hidden)
+            values ($1, 'music', true)
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(&hidden_library_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create hidden smoke library");
+        let hidden_library_internal_id = hidden_library_row
+            .try_get::<i64, _>("id")
+            .expect("hidden smoke library internal id should be returned");
+        let hidden_library_id = hidden_library_row
+            .try_get::<String, _>("public_id")
+            .expect("hidden smoke library public id should be returned");
+
+        let unconfigured_library_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into libraries (name, library_type, is_hidden)
+            values ($1, 'movies', false)
+            returning public_id::text
+            "#,
+        )
+        .bind(&unconfigured_library_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create unconfigured smoke library");
+
+        sqlx::query(
+            r#"
+            insert into library_permissions (
+                library_id,
+                user_id,
+                can_view,
+                can_download,
+                can_transcode
+            )
+            values
+                ($1, $4, true, true, false),
+                ($2, $4, true, false, true),
+                ($3, $4, true, true, true)
+            "#,
+        )
+        .bind(first_library_internal_id)
+        .bind(second_library_internal_id)
+        .bind(hidden_library_internal_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("create smoke library permissions");
+
+        let repository = AdminRepository::new(pool.clone());
+        let configured_movies = repository
+            .list_user_library_permissions_page(
+                &user_public_id,
+                AdminUserLibraryPermissionFilter {
+                    library_type: Some("movies".to_owned()),
+                    permission_configured: Some(true),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("configured movie library permission list should execute")
+            .expect("smoke user should exist");
+        assert!(
+            configured_movies
+                .records
+                .iter()
+                .any(|permission| permission.library_id == first_library_id
+                    && permission.permission_configured
+                    && permission.can_download
+                    && !permission.can_transcode
+                    && permission.effective_can_download
+                    && !permission.effective_can_transcode),
+            "first configured movie permission should be listed with effective permissions"
+        );
+        assert!(
+            configured_movies
+                .records
+                .iter()
+                .any(|permission| permission.library_id == second_library_id
+                    && permission.permission_configured
+                    && !permission.can_download
+                    && permission.can_transcode
+                    && !permission.effective_can_download
+                    && permission.effective_can_transcode),
+            "second configured movie permission should be listed with effective permissions"
+        );
+        assert!(
+            configured_movies.records.iter().all(|permission| {
+                permission.library_type == "movies" && permission.permission_configured
+            }),
+            "configured movie filter should only return configured movie permissions"
+        );
+
+        let cursor_page = repository
+            .list_user_library_permissions_page(
+                &user_public_id,
+                AdminUserLibraryPermissionFilter {
+                    library_type: Some("movies".to_owned()),
+                    permission_configured: Some(true),
+                    cursor: Some(first_library_id.clone()),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("cursor library permission list should execute")
+            .expect("smoke user should exist");
+        assert!(
+            cursor_page
+                .records
+                .iter()
+                .any(|permission| permission.library_id == second_library_id),
+            "later configured library should be returned after first library cursor"
+        );
+        assert!(
+            !cursor_page
+                .records
+                .iter()
+                .any(|permission| permission.library_id == first_library_id),
+            "cursor page should not include the cursor library"
+        );
+
+        let hidden_music = repository
+            .list_user_library_permissions_page(
+                &user_public_id,
+                AdminUserLibraryPermissionFilter {
+                    library_type: Some("music".to_owned()),
+                    permission_configured: Some(true),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("hidden library permission list should execute")
+            .expect("smoke user should exist");
+        let hidden_permission = hidden_music
+            .records
+            .iter()
+            .find(|permission| permission.library_id == hidden_library_id)
+            .expect("hidden configured library should be listed");
+        assert!(hidden_permission.is_hidden);
+        assert!(hidden_permission.can_view);
+        assert!(hidden_permission.can_download);
+        assert!(hidden_permission.can_transcode);
+        assert!(!hidden_permission.effective_can_view);
+        assert!(!hidden_permission.effective_can_download);
+        assert!(!hidden_permission.effective_can_transcode);
+
+        let unconfigured_movies = repository
+            .list_user_library_permissions_page(
+                &user_public_id,
+                AdminUserLibraryPermissionFilter {
+                    library_type: Some("movies".to_owned()),
+                    permission_configured: Some(false),
+                    cursor: None,
+                    limit: 50,
+                },
+            )
+            .await
+            .expect("unconfigured movie library permission list should execute")
+            .expect("smoke user should exist");
+        assert!(
+            unconfigured_movies
+                .records
+                .iter()
+                .any(
+                    |permission| permission.library_id == unconfigured_library_id
+                        && !permission.permission_configured
+                        && !permission.can_view
+                        && !permission.effective_can_view
+                ),
+            "unconfigured smoke movie library should be listed as unconfigured"
+        );
+
+        let invalid_cursor_page = repository
+            .list_user_library_permissions_page(
+                &user_public_id,
+                AdminUserLibraryPermissionFilter {
+                    library_type: Some("movies".to_owned()),
+                    permission_configured: Some(true),
+                    cursor: Some("not-a-uuid".to_owned()),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("invalid library cursor should be safely handled")
+            .expect("smoke user should exist");
+        assert!(invalid_cursor_page.records.is_empty());
+        assert!(!invalid_cursor_page.has_more);
+        assert!(invalid_cursor_page.next_cursor.is_none());
+
+        let missing_user_id = sqlx::query_scalar::<_, String>("select gen_random_uuid()::text")
+            .fetch_one(&pool)
+            .await
+            .expect("generate missing user public id");
+        let missing_user_page = repository
+            .list_user_library_permissions_page(
+                &missing_user_id,
+                AdminUserLibraryPermissionFilter {
+                    library_type: Some("movies".to_owned()),
+                    permission_configured: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("valid missing user id should be safely handled");
+        assert!(missing_user_page.is_none());
+
+        sqlx::query("delete from users where id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke user");
+        sqlx::query(
+            r#"
+            delete from libraries
+            where name in ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(&first_library_name)
+        .bind(&second_library_name)
+        .bind(&hidden_library_name)
+        .bind(&unconfigured_library_name)
+        .execute(&pool)
+        .await
+        .expect("delete smoke libraries");
+        sqlx::query("delete from roles where id = $1")
+            .bind(role_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke role");
     }
 
     #[test]
@@ -3776,6 +5822,383 @@ mod tests {
                 .contains("order by targets.target_type asc, targets.name asc, targets.id asc")
         );
         assert!(!target_query.contains("offset "));
+    }
+
+    #[test]
+    fn notification_target_admin_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = [
+            "notification_target_admin_queries",
+            "execute_against_live_schema",
+        ]
+        .join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "notification target admin keyset queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes notification target Admin keyset queries against
+    // the migrated schema. The smoke inserts isolated targets and exercises
+    // type/channel/enabled filters, cursor pagination, and invalid cursor
+    // handling through the repository methods.
+    //   cargo test -- --ignored notification_target_admin_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn notification_target_admin_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let recent_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_notification_targets_admin_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("notification target recent keyset index should exist");
+        let recent_index_def = recent_index_def.to_ascii_lowercase();
+        assert!(recent_index_def.contains("target_type"));
+        assert!(recent_index_def.contains("name"));
+        assert!(recent_index_def.contains("id"));
+
+        let enabled_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_notification_targets_admin_enabled_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("notification target enabled keyset index should exist");
+        let enabled_index_def = enabled_index_def.to_ascii_lowercase();
+        assert!(enabled_index_def.contains("is_enabled"));
+        assert!(enabled_index_def.contains("target_type"));
+        assert!(enabled_index_def.contains("name"));
+        assert!(enabled_index_def.contains("id"));
+
+        let channel_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_notification_targets_admin_channel_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("notification target channel keyset index should exist");
+        let channel_index_def = channel_index_def.to_ascii_lowercase();
+        assert!(channel_index_def.contains("channel"));
+        assert!(channel_index_def.contains("target_type"));
+        assert!(channel_index_def.contains("name"));
+        assert!(channel_index_def.contains("id"));
+        assert!(channel_index_def.contains("where (channel is not null)"));
+
+        let channel_enabled_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_notification_targets_admin_channel_enabled_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("notification target channel/enabled keyset index should exist");
+        let channel_enabled_index_def = channel_enabled_index_def.to_ascii_lowercase();
+        assert!(channel_enabled_index_def.contains("channel"));
+        assert!(channel_enabled_index_def.contains("is_enabled"));
+        assert!(channel_enabled_index_def.contains("target_type"));
+        assert!(channel_enabled_index_def.contains("name"));
+        assert!(channel_enabled_index_def.contains("id"));
+        assert!(channel_enabled_index_def.contains("where (channel is not null)"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let channel = format!("smoke-{suffix}");
+        let first_name = format!("aa notification target smoke {suffix}");
+        let second_name = format!("bb notification target smoke {suffix}");
+        let disabled_name = format!("cc notification target smoke {suffix}");
+        let email_name = format!("dd notification target smoke {suffix}");
+
+        let first_target_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into notification_targets (
+                name,
+                target_type,
+                channel,
+                config,
+                is_enabled,
+                delivery_count,
+                failure_count,
+                last_error
+            )
+            values (
+                $1,
+                'webhook',
+                $2,
+                jsonb_build_object('smoke', true, 'ordinal', 1),
+                true,
+                3,
+                0,
+                null
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&first_name)
+        .bind(&channel)
+        .fetch_one(&pool)
+        .await
+        .expect("create first notification target smoke fixture");
+
+        let second_target_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into notification_targets (
+                name,
+                target_type,
+                channel,
+                config,
+                is_enabled,
+                delivery_count,
+                failure_count,
+                last_error
+            )
+            values (
+                $1,
+                'webhook',
+                $2,
+                jsonb_build_object('smoke', true, 'ordinal', 2),
+                true,
+                5,
+                1,
+                'previous smoke failure'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&second_name)
+        .bind(&channel)
+        .fetch_one(&pool)
+        .await
+        .expect("create second notification target smoke fixture");
+
+        let disabled_target_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into notification_targets (
+                name,
+                target_type,
+                channel,
+                config,
+                is_enabled,
+                delivery_count,
+                failure_count,
+                last_error
+            )
+            values (
+                $1,
+                'webhook',
+                $2,
+                jsonb_build_object('smoke', true, 'ordinal', 3),
+                false,
+                0,
+                2,
+                'disabled smoke target'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&disabled_name)
+        .bind(&channel)
+        .fetch_one(&pool)
+        .await
+        .expect("create disabled notification target smoke fixture");
+
+        let email_target_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into notification_targets (
+                name,
+                target_type,
+                channel,
+                config,
+                is_enabled,
+                delivery_count,
+                failure_count,
+                last_error
+            )
+            values (
+                $1,
+                'telegram',
+                $2,
+                jsonb_build_object('smoke', true, 'ordinal', 4),
+                true,
+                1,
+                0,
+                null
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&email_name)
+        .bind(&channel)
+        .fetch_one(&pool)
+        .await
+        .expect("create typed notification target smoke fixture");
+
+        let repository = AdminRepository::new(pool.clone());
+        let webhook_page = repository
+            .list_notification_targets_page(NotificationTargetFilter {
+                target_type: Some("webhook".to_owned()),
+                channel: Some(channel.clone()),
+                is_enabled: None,
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("notification target type/channel list should execute");
+        assert!(
+            webhook_page
+                .records
+                .iter()
+                .any(|target| target.id == first_target_id),
+            "first smoke notification target should be listed"
+        );
+        assert!(
+            webhook_page
+                .records
+                .iter()
+                .any(|target| target.id == second_target_id),
+            "second smoke notification target should be listed"
+        );
+        assert!(
+            webhook_page
+                .records
+                .iter()
+                .any(|target| target.id == disabled_target_id),
+            "disabled smoke notification target should be listed without enabled filter"
+        );
+        assert!(
+            webhook_page
+                .records
+                .iter()
+                .all(|target| target.target_type == "webhook"
+                    && target.channel.as_deref() == Some(channel.as_str()))
+        );
+
+        let enabled_page = repository
+            .list_notification_targets_page(NotificationTargetFilter {
+                target_type: Some("webhook".to_owned()),
+                channel: Some(channel.clone()),
+                is_enabled: Some(true),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("notification target type/channel/enabled list should execute");
+        assert!(
+            enabled_page
+                .records
+                .iter()
+                .any(|target| target.id == first_target_id && target.is_enabled)
+        );
+        assert!(enabled_page.records.iter().all(|target| target.is_enabled
+            && target.target_type == "webhook"
+            && target.channel.as_deref() == Some(channel.as_str())));
+        assert!(
+            !enabled_page
+                .records
+                .iter()
+                .any(|target| target.id == disabled_target_id),
+            "enabled filter should exclude disabled smoke target"
+        );
+
+        let telegram_page = repository
+            .list_notification_targets_page(NotificationTargetFilter {
+                target_type: Some("telegram".to_owned()),
+                channel: Some(channel.clone()),
+                is_enabled: Some(true),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("notification target alternate type list should execute");
+        assert_eq!(telegram_page.records.len(), 1);
+        assert_eq!(telegram_page.records[0].id, email_target_id);
+        assert_eq!(telegram_page.records[0].target_type, "telegram");
+
+        let cursor_page = repository
+            .list_notification_targets_page(NotificationTargetFilter {
+                target_type: Some("webhook".to_owned()),
+                channel: Some(channel.clone()),
+                is_enabled: Some(true),
+                cursor: Some(first_target_id.clone()),
+                limit: 10,
+            })
+            .await
+            .expect("notification target cursor list should execute");
+        assert!(
+            cursor_page
+                .records
+                .iter()
+                .any(|target| target.id == second_target_id),
+            "later target should be returned after first target cursor"
+        );
+        assert!(
+            cursor_page
+                .records
+                .iter()
+                .all(|target| target.target_type == "webhook"
+                    && target.channel.as_deref() == Some(channel.as_str())
+                    && target.is_enabled)
+        );
+
+        let invalid_cursor_page = repository
+            .list_notification_targets_page(NotificationTargetFilter {
+                target_type: Some("webhook".to_owned()),
+                channel: Some(channel.clone()),
+                is_enabled: Some(true),
+                cursor: Some("not-a-uuid".to_owned()),
+                limit: 10,
+            })
+            .await
+            .expect("invalid notification target cursor should be safely handled");
+        assert!(invalid_cursor_page.records.is_empty());
+        assert!(!invalid_cursor_page.has_more);
+        assert!(invalid_cursor_page.next_cursor.is_none());
+
+        sqlx::query(
+            r#"
+            delete from notification_targets
+            where channel = $1
+              and name in ($2, $3, $4, $5)
+            "#,
+        )
+        .bind(&channel)
+        .bind(&first_name)
+        .bind(&second_name)
+        .bind(&disabled_name)
+        .bind(&email_name)
+        .execute(&pool)
+        .await
+        .expect("delete smoke notification targets");
     }
 
     #[test]
@@ -3833,6 +6256,448 @@ mod tests {
     }
 
     #[test]
+    fn notification_admin_audit_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = [
+            "notification_admin_audit_queries",
+            "execute_against_live_schema",
+        ]
+        .join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "notification request and delivery-attempt admin queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin notification request and delivery
+    // attempt keyset queries against the migrated schema. The smoke inserts
+    // an isolated plugin/request/attempt set and exercises filters, cursors,
+    // and invalid public-id handling through the repository methods.
+    //   cargo test -- --ignored notification_admin_audit_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn notification_admin_audit_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let recent_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_plugin_notification_requests_recent'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("notification request recent index should exist");
+        let recent_index_def = recent_index_def.to_ascii_lowercase();
+        assert!(recent_index_def.contains("created_at desc"));
+        assert!(recent_index_def.contains("id desc"));
+
+        let attempt_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_notification_delivery_attempts_request_status_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("notification attempt request/status keyset index should exist");
+        let attempt_index_def = attempt_index_def.to_ascii_lowercase();
+        assert!(attempt_index_def.contains("notification_request_id"));
+        assert!(attempt_index_def.contains("status"));
+        assert!(attempt_index_def.contains("created_at desc"));
+        assert!(attempt_index_def.contains("id desc"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let plugin_id = format!("dev.fbz.notification.smoke.{suffix}");
+        let package_version = format!("0.0.{suffix}");
+        let package_path = format!("H:/fbz-smoke/plugins/{suffix}.zip");
+        let notification_channel = format!("smoke-{suffix}");
+
+        let package_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into plugin_packages (
+                plugin_id,
+                package_version,
+                api_version,
+                runtime,
+                name,
+                entrypoint,
+                package_path,
+                manifest,
+                manifest_hash,
+                permission_fingerprint,
+                checksum_sha256,
+                package_status
+            )
+            values (
+                $1,
+                $2,
+                '1',
+                'http',
+                'Notification audit smoke',
+                'http://127.0.0.1:19999/fbz-plugin',
+                $3,
+                jsonb_build_object('id', $1::text, 'version', $2::text),
+                gen_random_bytes(32),
+                gen_random_bytes(32),
+                gen_random_bytes(32),
+                'approved'
+            )
+            returning id
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(&package_path)
+        .fetch_one(&pool)
+        .await
+        .expect("create notification audit smoke plugin package");
+
+        sqlx::query(
+            r#"
+            insert into plugin_installations (
+                plugin_id,
+                active_package_id,
+                enabled,
+                approval_status,
+                permission_fingerprint,
+                approved_at
+            )
+            values ($1, $2, true, 'approved', gen_random_bytes(32), now())
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(package_id)
+        .execute(&pool)
+        .await
+        .expect("create notification audit smoke plugin installation");
+
+        let first_request_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into plugin_notification_requests (
+                plugin_id,
+                package_id,
+                title,
+                message,
+                level,
+                channel,
+                metadata,
+                status,
+                created_at,
+                updated_at
+            )
+            values (
+                $1,
+                $2,
+                'Notification audit smoke first',
+                'first smoke request',
+                'warning',
+                $3,
+                jsonb_build_object('smoke', true, 'ordinal', 1),
+                'failed',
+                now() - interval '2 minutes',
+                now() - interval '2 minutes'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(&notification_channel)
+        .fetch_one(&pool)
+        .await
+        .expect("create first notification request");
+
+        let second_request_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into plugin_notification_requests (
+                plugin_id,
+                package_id,
+                title,
+                message,
+                level,
+                channel,
+                metadata,
+                status,
+                created_at,
+                updated_at
+            )
+            values (
+                $1,
+                $2,
+                'Notification audit smoke second',
+                'second smoke request',
+                'info',
+                $3,
+                jsonb_build_object('smoke', true, 'ordinal', 2),
+                'delivered',
+                now() - interval '1 minute',
+                now() - interval '1 minute'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(&notification_channel)
+        .fetch_one(&pool)
+        .await
+        .expect("create second notification request");
+
+        let request_row = sqlx::query(
+            r#"
+            select id, public_id::text as public_id
+            from plugin_notification_requests
+            where public_id = $1::uuid
+            "#,
+        )
+        .bind(&second_request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read second notification request");
+        let second_request_internal_id = request_row
+            .try_get::<i64, _>("id")
+            .expect("request id should be returned");
+
+        let first_attempt_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into notification_delivery_attempts (
+                notification_request_id,
+                target_public_id,
+                target_type,
+                target_name,
+                attempt,
+                status,
+                response_status,
+                duration_ms,
+                created_at,
+                finished_at
+            )
+            values (
+                $1,
+                gen_random_uuid(),
+                'webhook',
+                'Notification smoke target A',
+                1,
+                'failed',
+                500,
+                25,
+                now() - interval '30 seconds',
+                now() - interval '29 seconds'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(second_request_internal_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create failed notification attempt");
+
+        let second_attempt_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into notification_delivery_attempts (
+                notification_request_id,
+                target_public_id,
+                target_type,
+                target_name,
+                attempt,
+                status,
+                response_status,
+                duration_ms,
+                created_at,
+                finished_at
+            )
+            values (
+                $1,
+                gen_random_uuid(),
+                'webhook',
+                'Notification smoke target B',
+                2,
+                'succeeded',
+                200,
+                10,
+                now() - interval '10 seconds',
+                now() - interval '9 seconds'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(second_request_internal_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create succeeded notification attempt");
+
+        let repository = AdminRepository::new(pool.clone());
+        let request_page = repository
+            .list_notification_requests_page(NotificationRequestFilter {
+                status: None,
+                channel: Some(notification_channel.clone()),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("notification request list should execute");
+        assert!(
+            request_page
+                .records
+                .iter()
+                .any(|request| request.id == first_request_id),
+            "first smoke notification request should be listed"
+        );
+        assert!(
+            request_page
+                .records
+                .iter()
+                .any(|request| request.id == second_request_id),
+            "second smoke notification request should be listed"
+        );
+
+        let delivered_page = repository
+            .list_notification_requests_page(NotificationRequestFilter {
+                status: Some("delivered".to_owned()),
+                channel: Some(notification_channel.clone()),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("filtered notification request list should execute");
+        assert!(
+            delivered_page
+                .records
+                .iter()
+                .any(|request| request.id == second_request_id && request.status == "delivered")
+        );
+        assert!(
+            delivered_page
+                .records
+                .iter()
+                .all(|request| request.status == "delivered")
+        );
+
+        let cursor_page = repository
+            .list_notification_requests_page(NotificationRequestFilter {
+                status: None,
+                channel: Some(notification_channel.clone()),
+                cursor: Some(second_request_id.clone()),
+                limit: 10,
+            })
+            .await
+            .expect("cursor notification request list should execute");
+        assert!(
+            cursor_page
+                .records
+                .iter()
+                .any(|request| request.id == first_request_id),
+            "older request should be returned after newest request cursor"
+        );
+
+        let attempts_page = repository
+            .list_notification_delivery_attempts_page(
+                &second_request_id,
+                NotificationDeliveryAttemptFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("notification delivery attempt list should execute")
+            .expect("second request should exist");
+        assert!(
+            attempts_page
+                .records
+                .iter()
+                .any(|attempt| attempt.id == first_attempt_id),
+            "first smoke delivery attempt should be listed"
+        );
+        assert!(
+            attempts_page
+                .records
+                .iter()
+                .any(|attempt| attempt.id == second_attempt_id),
+            "second smoke delivery attempt should be listed"
+        );
+
+        let failed_attempts_page = repository
+            .list_notification_delivery_attempts_page(
+                &second_request_id,
+                NotificationDeliveryAttemptFilter {
+                    status: Some("failed".to_owned()),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("filtered notification delivery attempt list should execute")
+            .expect("second request should exist");
+        assert_eq!(failed_attempts_page.records.len(), 1);
+        assert_eq!(failed_attempts_page.records[0].id, first_attempt_id);
+        assert_eq!(failed_attempts_page.records[0].status, "failed");
+
+        let attempt_cursor_page = repository
+            .list_notification_delivery_attempts_page(
+                &second_request_id,
+                NotificationDeliveryAttemptFilter {
+                    status: None,
+                    cursor: Some(second_attempt_id),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("cursor notification delivery attempt list should execute")
+            .expect("second request should exist");
+        assert!(
+            attempt_cursor_page
+                .records
+                .iter()
+                .any(|attempt| attempt.id == first_attempt_id),
+            "older delivery attempt should be returned after newest attempt cursor"
+        );
+
+        let missing_attempts = repository
+            .list_notification_delivery_attempts_page(
+                "not-a-uuid",
+                NotificationDeliveryAttemptFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("invalid notification request id should be safely handled");
+        assert!(missing_attempts.is_none());
+
+        sqlx::query("delete from plugin_installations where plugin_id = $1")
+            .bind(&plugin_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke plugin installation");
+        sqlx::query("delete from plugin_packages where plugin_id = $1")
+            .bind(&plugin_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke plugin package");
+    }
+
+    #[test]
     fn scheduled_task_admin_keyset_indexes_match_query_shape() {
         let migration =
             include_str!("../../migrations/0058_scheduled_task_admin_keyset_indexes.sql");
@@ -3873,6 +6738,433 @@ mod tests {
         assert!(task_query.contains("order by tasks.enabled desc"));
         assert!(task_query.contains("tasks.next_run_at asc nulls last"));
         assert!(!task_query.contains("offset "));
+    }
+
+    #[test]
+    fn scheduled_task_admin_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = [
+            "scheduled_task_admin_queries",
+            "execute_against_live_schema",
+        ]
+        .join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "scheduled-task admin keyset queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin scheduled-task keyset list query
+    // against the migrated schema. The smoke inserts isolated tasks and
+    // exercises task_type, owner_type, enabled, cursor, and invalid cursor
+    // behavior through the repository method.
+    //   cargo test -- --ignored scheduled_task_admin_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn scheduled_task_admin_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let admin_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_scheduled_tasks_admin_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scheduled task admin keyset index should exist");
+        let admin_index_def = admin_index_def.to_ascii_lowercase();
+        assert!(admin_index_def.contains("enabled desc"));
+        assert!(admin_index_def.contains("next_run_at"));
+        assert!(admin_index_def.contains("updated_at desc"));
+        assert!(admin_index_def.contains("id desc"));
+
+        let task_type_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_scheduled_tasks_task_type_admin_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scheduled task type keyset index should exist");
+        let task_type_index_def = task_type_index_def.to_ascii_lowercase();
+        assert!(task_type_index_def.contains("task_type"));
+        assert!(task_type_index_def.contains("enabled desc"));
+        assert!(task_type_index_def.contains("next_run_at"));
+        assert!(task_type_index_def.contains("updated_at desc"));
+        assert!(task_type_index_def.contains("id desc"));
+
+        let owner_type_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_scheduled_tasks_owner_type_admin_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scheduled task owner-type keyset index should exist");
+        let owner_type_index_def = owner_type_index_def.to_ascii_lowercase();
+        assert!(owner_type_index_def.contains("owner_type"));
+        assert!(owner_type_index_def.contains("enabled desc"));
+        assert!(owner_type_index_def.contains("next_run_at"));
+        assert!(owner_type_index_def.contains("updated_at desc"));
+        assert!(owner_type_index_def.contains("id desc"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let first_task_key = format!("core.admin-list-smoke-a.{suffix}");
+        let second_task_key = format!("core.admin-list-smoke-b.{suffix}");
+        let disabled_task_key = format!("core.admin-list-smoke-c.{suffix}");
+        let plugin_task_key = format!("plugin.admin-list-smoke-d.{suffix}");
+        let plugin_owner_id = format!("dev.fbz.admin-list-smoke.{suffix}");
+
+        let first_task_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into scheduled_tasks (
+                task_key,
+                task_type,
+                owner_type,
+                enabled,
+                schedule_kind,
+                schedule_value,
+                next_run_at,
+                timeout_seconds,
+                max_concurrency,
+                updated_at
+            )
+            values (
+                $1,
+                'admin.list.smoke',
+                'core',
+                true,
+                'interval',
+                'PT10M',
+                now() + interval '10 minutes',
+                300,
+                2,
+                now() - interval '1 minute'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&first_task_key)
+        .fetch_one(&pool)
+        .await
+        .expect("create first scheduled task smoke fixture");
+
+        let second_task_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into scheduled_tasks (
+                task_key,
+                task_type,
+                owner_type,
+                enabled,
+                schedule_kind,
+                schedule_value,
+                next_run_at,
+                timeout_seconds,
+                max_concurrency,
+                updated_at
+            )
+            values (
+                $1,
+                'admin.list.smoke',
+                'core',
+                true,
+                'interval',
+                'PT10M',
+                now() + interval '20 minutes',
+                300,
+                1,
+                now() - interval '2 minutes'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&second_task_key)
+        .fetch_one(&pool)
+        .await
+        .expect("create second scheduled task smoke fixture");
+
+        let disabled_task_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into scheduled_tasks (
+                task_key,
+                task_type,
+                owner_type,
+                enabled,
+                schedule_kind,
+                schedule_value,
+                next_run_at,
+                timeout_seconds,
+                max_concurrency,
+                updated_at
+            )
+            values (
+                $1,
+                'admin.list.smoke',
+                'core',
+                false,
+                'interval',
+                'PT10M',
+                now() + interval '30 minutes',
+                300,
+                1,
+                now() - interval '3 minutes'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&disabled_task_key)
+        .fetch_one(&pool)
+        .await
+        .expect("create disabled scheduled task smoke fixture");
+
+        let plugin_task_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into scheduled_tasks (
+                task_key,
+                task_type,
+                owner_type,
+                owner_id,
+                enabled,
+                schedule_kind,
+                schedule_value,
+                next_run_at,
+                timeout_seconds,
+                max_concurrency,
+                updated_at
+            )
+            values (
+                $1,
+                'plugin.admin.list.smoke',
+                'plugin',
+                $2,
+                true,
+                'interval',
+                'PT10M',
+                now() + interval '5 minutes',
+                300,
+                1,
+                now() - interval '4 minutes'
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&plugin_task_key)
+        .bind(&plugin_owner_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create plugin scheduled task smoke fixture");
+
+        let repository = AdminRepository::new(pool.clone());
+        let core_enabled_page = repository
+            .list_scheduled_tasks_page(ScheduledTaskFilter {
+                task_type: Some("admin.list.smoke".to_owned()),
+                owner_type: Some("core".to_owned()),
+                enabled: Some(true),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("scheduled task type/owner/enabled list should execute");
+        assert!(
+            core_enabled_page
+                .records
+                .iter()
+                .any(|task| task.id == first_task_id && task.enabled)
+        );
+        assert!(
+            core_enabled_page
+                .records
+                .iter()
+                .any(|task| task.id == second_task_id && task.enabled)
+        );
+        assert!(
+            core_enabled_page.records.iter().all(|task| {
+                task.task_type == "admin.list.smoke" && task.owner_type == "core" && task.enabled
+            }),
+            "type/owner/enabled filter should only return enabled core smoke tasks"
+        );
+        assert!(
+            !core_enabled_page
+                .records
+                .iter()
+                .any(|task| task.id == disabled_task_id),
+            "enabled filter should exclude disabled smoke task"
+        );
+
+        let disabled_page = repository
+            .list_scheduled_tasks_page(ScheduledTaskFilter {
+                task_type: Some("admin.list.smoke".to_owned()),
+                owner_type: Some("core".to_owned()),
+                enabled: Some(false),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("disabled scheduled task list should execute");
+        assert_eq!(disabled_page.records.len(), 1);
+        assert_eq!(disabled_page.records[0].id, disabled_task_id);
+        assert!(!disabled_page.records[0].enabled);
+
+        let plugin_page = repository
+            .list_scheduled_tasks_page(ScheduledTaskFilter {
+                task_type: Some("plugin.admin.list.smoke".to_owned()),
+                owner_type: Some("plugin".to_owned()),
+                enabled: Some(true),
+                cursor: None,
+                limit: 10,
+            })
+            .await
+            .expect("plugin scheduled task list should execute");
+        assert_eq!(plugin_page.records.len(), 1);
+        assert_eq!(plugin_page.records[0].id, plugin_task_id);
+        assert_eq!(
+            plugin_page.records[0].owner_id.as_deref(),
+            Some(plugin_owner_id.as_str())
+        );
+
+        let cursor_page = repository
+            .list_scheduled_tasks_page(ScheduledTaskFilter {
+                task_type: Some("admin.list.smoke".to_owned()),
+                owner_type: Some("core".to_owned()),
+                enabled: Some(true),
+                cursor: Some(first_task_id.clone()),
+                limit: 10,
+            })
+            .await
+            .expect("scheduled task cursor list should execute");
+        assert!(
+            cursor_page
+                .records
+                .iter()
+                .any(|task| task.id == second_task_id),
+            "later enabled core task should be returned after first task cursor"
+        );
+        assert!(
+            !cursor_page
+                .records
+                .iter()
+                .any(|task| task.id == first_task_id),
+            "cursor page should not include the cursor scheduled task"
+        );
+
+        let invalid_cursor_page = repository
+            .list_scheduled_tasks_page(ScheduledTaskFilter {
+                task_type: Some("admin.list.smoke".to_owned()),
+                owner_type: Some("core".to_owned()),
+                enabled: Some(true),
+                cursor: Some("not-a-uuid".to_owned()),
+                limit: 10,
+            })
+            .await
+            .expect("invalid scheduled task cursor should be safely handled");
+        assert!(invalid_cursor_page.records.is_empty());
+        assert!(!invalid_cursor_page.has_more);
+        assert!(invalid_cursor_page.next_cursor.is_none());
+
+        sqlx::query("delete from scheduled_tasks where task_key = any($1)")
+            .bind(
+                &[
+                    first_task_key,
+                    second_task_key,
+                    disabled_task_key,
+                    plugin_task_key,
+                ][..],
+            )
+            .execute(&pool)
+            .await
+            .expect("delete scheduled task smoke fixtures");
+    }
+
+    #[test]
+    fn scheduled_task_admin_active_run_counts_are_bounded() {
+        let repository = repository_source();
+        let production_source = repository
+            .split("#[cfg(test)]")
+            .next()
+            .expect("repository source should include production section");
+
+        assert!(production_source.contains("SCHEDULED_TASK_ACTIVE_RUN_COUNT_SQL"));
+        assert!(production_source.contains("active_run_capacity_probe"));
+        assert!(production_source.contains("limit tasks.max_concurrency"));
+
+        let normalized = production_source
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !normalized.contains(
+                "select count(*)::bigint from scheduled_task_runs runs where runs.task_id = tasks.id"
+            ),
+            "scheduled task list should not exact-count every active run per task"
+        );
+        assert!(
+            !normalized.contains(
+                "select count(*)::bigint from scheduled_task_runs runs where runs.task_id = scheduled_tasks.id"
+            ),
+            "scheduled task detail should not exact-count every active run for the task"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin scheduled-task list/detail queries
+    // against the real migrated schema. This covers the QueryBuilder wiring
+    // for the shared bounded active-run count snippet.
+    //   cargo test -- --ignored scheduled_task_admin_active_run_counts_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn scheduled_task_admin_active_run_counts_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let repository = AdminRepository::new(pool);
+        let page = repository
+            .list_scheduled_tasks_page(ScheduledTaskFilter {
+                limit: 2,
+                ..ScheduledTaskFilter::default()
+            })
+            .await
+            .expect("scheduled task list should execute against live schema");
+
+        if let Some(task) = page.records.first() {
+            let detail = repository
+                .find_scheduled_task(&task.id)
+                .await
+                .expect("scheduled task detail by id should execute against live schema");
+            assert!(
+                detail.is_some(),
+                "listed scheduled task should be readable by public id"
+            );
+        }
     }
 
     #[test]
@@ -3926,6 +7218,517 @@ mod tests {
         assert!(!host_api_call_query.contains("offset "));
         assert!(repository.contains("pub async fn list_plugin_host_api_calls_for_run_page"));
         assert!(repository.contains("list_plugin_host_api_calls(PluginHostApiCallFilter"));
+    }
+
+    #[test]
+    fn plugin_host_api_admin_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = [
+            "plugin_host_api_admin_queries",
+            "execute_against_live_schema",
+        ]
+        .join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "plugin Host API admin queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin Host API call audit keyset queries
+    // against the migrated schema. The smoke inserts an isolated approved
+    // plugin, execution run, host token, and two Host API call rows, then
+    // exercises plugin/status filters, run-scoped filters, cursors, and
+    // invalid execution-run ids through the repository methods.
+    //   cargo test -- --ignored plugin_host_api_admin_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn plugin_host_api_admin_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let recent_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_plugin_host_api_calls_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("host API call recent keyset index should exist");
+        let recent_index_def = recent_index_def.to_ascii_lowercase();
+        assert!(recent_index_def.contains("finished_at desc"));
+        assert!(recent_index_def.contains("id desc"));
+
+        let plugin_status_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_plugin_host_api_calls_plugin_status_finished_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("host API call plugin/status keyset index should exist");
+        let plugin_status_index_def = plugin_status_index_def.to_ascii_lowercase();
+        assert!(plugin_status_index_def.contains("plugin_id"));
+        assert!(plugin_status_index_def.contains("status_code"));
+        assert!(plugin_status_index_def.contains("finished_at desc"));
+        assert!(plugin_status_index_def.contains("id desc"));
+
+        let run_status_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_plugin_host_api_calls_execution_status_finished_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("host API call execution/status keyset index should exist");
+        let run_status_index_def = run_status_index_def.to_ascii_lowercase();
+        assert!(run_status_index_def.contains("execution_run_id"));
+        assert!(run_status_index_def.contains("status_code"));
+        assert!(run_status_index_def.contains("finished_at desc"));
+        assert!(run_status_index_def.contains("id desc"));
+        assert!(run_status_index_def.contains("execution_run_id is not null"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let plugin_id = format!("dev.fbz.host-api.smoke.{suffix}");
+        let package_version = format!("0.0.{suffix}");
+        let package_path = format!("H:/fbz-smoke/plugins/{suffix}.zip");
+
+        let package_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into plugin_packages (
+                plugin_id,
+                package_version,
+                api_version,
+                runtime,
+                name,
+                entrypoint,
+                package_path,
+                manifest,
+                manifest_hash,
+                permission_fingerprint,
+                checksum_sha256,
+                package_status
+            )
+            values (
+                $1,
+                $2,
+                '1',
+                'http',
+                'Host API audit smoke',
+                'http://127.0.0.1:19997/fbz-plugin',
+                $3,
+                jsonb_build_object('id', $1::text, 'version', $2::text),
+                gen_random_bytes(32),
+                gen_random_bytes(32),
+                gen_random_bytes(32),
+                'approved'
+            )
+            returning id
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(&package_path)
+        .fetch_one(&pool)
+        .await
+        .expect("create host API audit smoke package");
+
+        sqlx::query(
+            r#"
+            insert into plugin_installations (
+                plugin_id,
+                active_package_id,
+                enabled,
+                approval_status,
+                permission_fingerprint,
+                approved_at
+            )
+            values ($1, $2, true, 'approved', gen_random_bytes(32), now())
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(package_id)
+        .execute(&pool)
+        .await
+        .expect("create host API audit smoke installation");
+
+        let dispatch_row = sqlx::query(
+            r#"
+            insert into event_outbox (
+                event_type,
+                aggregate_type,
+                aggregate_id,
+                payload,
+                status,
+                attempts,
+                max_attempts,
+                created_at,
+                available_at
+            )
+            values (
+                $1,
+                'plugin',
+                $2,
+                jsonb_build_object(
+                    'pluginId', $2::text,
+                    'packageId', $3::text,
+                    'hookId', null,
+                    'handler', 'hooks.onHostApiSmoke',
+                    'hookEvent', 'library.scan.completed'
+                ),
+                'delivered',
+                1,
+                5,
+                now() - interval '2 minutes',
+                now() - interval '2 minutes'
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(PLUGIN_HOOK_DISPATCH_EVENT)
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .fetch_one(&pool)
+        .await
+        .expect("create host API audit smoke dispatch row");
+        let dispatch_internal_id = dispatch_row
+            .try_get::<i64, _>("id")
+            .expect("dispatch internal id should be returned");
+        let dispatch_id = dispatch_row
+            .try_get::<String, _>("public_id")
+            .expect("dispatch public id should be returned");
+
+        let run_row = sqlx::query(
+            r#"
+            insert into plugin_execution_runs (
+                outbox_event_id,
+                outbox_event_public_id,
+                attempt,
+                plugin_id,
+                package_id,
+                handler,
+                event_key,
+                runtime,
+                entrypoint,
+                status,
+                request_payload,
+                response_status,
+                response_body,
+                started_at,
+                finished_at,
+                duration_ms
+            )
+            values (
+                $1,
+                $2,
+                1,
+                $3,
+                $4,
+                'hooks.onHostApiSmoke',
+                'library.scan.completed',
+                'http',
+                'http://127.0.0.1:19997/fbz-plugin',
+                'succeeded',
+                jsonb_build_object('smoke', true),
+                200,
+                'ok',
+                now() - interval '90 seconds',
+                now() - interval '89 seconds',
+                10
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(dispatch_internal_id)
+        .bind(&dispatch_id)
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .fetch_one(&pool)
+        .await
+        .expect("create host API audit smoke execution run");
+        let run_internal_id = run_row
+            .try_get::<i64, _>("id")
+            .expect("execution run internal id should be returned");
+        let run_id = run_row
+            .try_get::<String, _>("public_id")
+            .expect("execution run public id should be returned");
+
+        let token_row = sqlx::query(
+            r#"
+            insert into plugin_host_tokens (
+                token_hash,
+                token_prefix,
+                plugin_id,
+                package_id,
+                execution_run_id,
+                permission_snapshot,
+                expires_at
+            )
+            values (
+                gen_random_bytes(32),
+                $1,
+                $2,
+                $3,
+                $4,
+                jsonb_build_array(jsonb_build_object('key', 'library.read')),
+                now() + interval '1 hour'
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(format!("smoke-{suffix}"))
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(run_internal_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create host API audit smoke host token");
+        let token_internal_id = token_row
+            .try_get::<i64, _>("id")
+            .expect("host token internal id should be returned");
+        let token_id = token_row
+            .try_get::<String, _>("public_id")
+            .expect("host token public id should be returned");
+
+        let older_call_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into plugin_host_api_calls (
+                plugin_id,
+                package_id,
+                host_token_id,
+                execution_run_id,
+                method,
+                path,
+                required_permission,
+                status_code,
+                error_code,
+                error_message,
+                started_at,
+                finished_at,
+                duration_ms
+            )
+            values (
+                $1,
+                $2,
+                $3,
+                $4,
+                'GET',
+                '/library/items',
+                'library.read',
+                500,
+                'host_api_smoke_failed',
+                'host API smoke failure',
+                now() - interval '40 seconds',
+                now() - interval '39 seconds',
+                31
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(token_internal_id)
+        .bind(run_internal_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create older host API audit smoke call");
+
+        let newer_call_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into plugin_host_api_calls (
+                plugin_id,
+                package_id,
+                host_token_id,
+                execution_run_id,
+                method,
+                path,
+                required_permission,
+                status_code,
+                started_at,
+                finished_at,
+                duration_ms
+            )
+            values (
+                $1,
+                $2,
+                $3,
+                $4,
+                'POST',
+                '/notifications/send',
+                'notification.send',
+                202,
+                now() - interval '20 seconds',
+                now() - interval '19 seconds',
+                12
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(token_internal_id)
+        .bind(run_internal_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create newer host API audit smoke call");
+
+        let repository = AdminRepository::new(pool.clone());
+        let plugin_page = repository
+            .list_plugin_host_api_calls_page(PluginHostApiCallFilter {
+                plugin_id: Some(plugin_id.clone()),
+                execution_run_id: None,
+                status_code: None,
+                cursor: None,
+                limit: 25,
+            })
+            .await
+            .expect("plugin Host API call list should execute");
+        assert!(
+            plugin_page.records.iter().any(|call| {
+                call.id == older_call_id
+                    && call.execution_run_id.as_deref() == Some(run_id.as_str())
+                    && call.host_token_id.as_deref() == Some(token_id.as_str())
+            }),
+            "older smoke Host API call should be listed with joined run/token ids"
+        );
+        assert!(
+            plugin_page
+                .records
+                .iter()
+                .any(|call| call.id == newer_call_id),
+            "newer smoke Host API call should be listed"
+        );
+
+        let failed_plugin_page = repository
+            .list_plugin_host_api_calls_page(PluginHostApiCallFilter {
+                plugin_id: Some(plugin_id.clone()),
+                execution_run_id: None,
+                status_code: Some(500),
+                cursor: None,
+                limit: 25,
+            })
+            .await
+            .expect("plugin/status Host API call list should execute");
+        assert_eq!(failed_plugin_page.records.len(), 1);
+        assert_eq!(failed_plugin_page.records[0].id, older_call_id);
+        assert_eq!(failed_plugin_page.records[0].status_code, 500);
+
+        let cursor_plugin_page = repository
+            .list_plugin_host_api_calls_page(PluginHostApiCallFilter {
+                plugin_id: Some(plugin_id.clone()),
+                execution_run_id: None,
+                status_code: None,
+                cursor: Some(newer_call_id.clone()),
+                limit: 25,
+            })
+            .await
+            .expect("cursor Host API call list should execute");
+        assert!(
+            cursor_plugin_page
+                .records
+                .iter()
+                .any(|call| call.id == older_call_id),
+            "older Host API call should be returned after newest call cursor"
+        );
+
+        let run_status_page = repository
+            .list_plugin_host_api_calls_page(PluginHostApiCallFilter {
+                plugin_id: None,
+                execution_run_id: Some(run_id.clone()),
+                status_code: Some(202),
+                cursor: None,
+                limit: 25,
+            })
+            .await
+            .expect("execution/status Host API call list should execute");
+        assert_eq!(run_status_page.records.len(), 1);
+        assert_eq!(run_status_page.records[0].id, newer_call_id);
+        assert_eq!(
+            run_status_page.records[0].execution_run_id.as_deref(),
+            Some(run_id.as_str())
+        );
+
+        let run_page = repository
+            .list_plugin_host_api_calls_for_run_page(&run_id, None, 25)
+            .await
+            .expect("run-scoped Host API call list should execute")
+            .expect("execution run should exist");
+        assert!(
+            run_page.records.iter().any(|call| call.id == older_call_id),
+            "older run-scoped Host API call should be listed"
+        );
+        assert!(
+            run_page.records.iter().any(|call| call.id == newer_call_id),
+            "newer run-scoped Host API call should be listed"
+        );
+
+        let run_cursor_page = repository
+            .list_plugin_host_api_calls_for_run_page(&run_id, Some(newer_call_id), 25)
+            .await
+            .expect("cursor run-scoped Host API call list should execute")
+            .expect("execution run should exist");
+        assert!(
+            run_cursor_page
+                .records
+                .iter()
+                .any(|call| call.id == older_call_id),
+            "older run-scoped Host API call should be returned after newest call cursor"
+        );
+
+        let invalid_run_page = repository
+            .list_plugin_host_api_calls_for_run_page("not-a-uuid", None, 25)
+            .await
+            .expect("invalid execution run id should be safely handled");
+        assert!(invalid_run_page.is_none());
+
+        let invalid_global_page = repository
+            .list_plugin_host_api_calls_page(PluginHostApiCallFilter {
+                plugin_id: None,
+                execution_run_id: Some("not-a-uuid".to_owned()),
+                status_code: None,
+                cursor: None,
+                limit: 25,
+            })
+            .await
+            .expect("invalid global execution run filter should execute safely");
+        assert!(invalid_global_page.records.is_empty());
+
+        sqlx::query("delete from event_outbox where id = $1")
+            .bind(dispatch_internal_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke dispatch outbox row");
+        sqlx::query("delete from plugin_installations where plugin_id = $1")
+            .bind(&plugin_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke plugin installation");
+        sqlx::query("delete from plugin_packages where plugin_id = $1")
+            .bind(&plugin_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke plugin package");
     }
 
     #[test]
@@ -3987,6 +7790,478 @@ mod tests {
     }
 
     #[test]
+    fn plugin_dispatch_admin_queries_have_live_schema_smoke() {
+        let repository = repository_source();
+        let smoke_name = [
+            "plugin_dispatch_admin_queries",
+            "execute_against_live_schema",
+        ]
+        .join("_");
+
+        assert!(
+            repository.contains(&format!("async fn {smoke_name}")),
+            "plugin dispatch and execution-run admin queries should have an ignored live-DB smoke"
+        );
+    }
+
+    // Live-DB smoke: executes the Admin plugin dispatch and execution-run
+    // keyset queries against the migrated schema. The smoke inserts an
+    // isolated approved plugin, two dispatch outbox rows, and two execution
+    // runs, then exercises status filters, cursor pagination, and invalid
+    // dispatch ids through the repository methods.
+    //   cargo test -- --ignored plugin_dispatch_admin_queries_execute_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn plugin_dispatch_admin_queries_execute_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let dispatch_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_event_outbox_plugin_dispatch_status_recent_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("plugin dispatch status keyset index should exist");
+        let dispatch_index_def = dispatch_index_def.to_ascii_lowercase();
+        assert!(dispatch_index_def.contains("status"));
+        assert!(dispatch_index_def.contains("created_at desc"));
+        assert!(dispatch_index_def.contains("id desc"));
+        assert!(dispatch_index_def.contains("plugin.hook.dispatch"));
+
+        let run_index_def = sqlx::query_scalar::<_, String>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_plugin_execution_runs_dispatch_status_started_keyset'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("plugin execution run dispatch/status keyset index should exist");
+        let run_index_def = run_index_def.to_ascii_lowercase();
+        assert!(run_index_def.contains("outbox_event_public_id"));
+        assert!(run_index_def.contains("status"));
+        assert!(run_index_def.contains("started_at desc"));
+        assert!(run_index_def.contains("id desc"));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let plugin_id = format!("dev.fbz.dispatch.smoke.{suffix}");
+        let package_version = format!("0.0.{suffix}");
+        let package_path = format!("H:/fbz-smoke/plugins/{suffix}.zip");
+
+        let package_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into plugin_packages (
+                plugin_id,
+                package_version,
+                api_version,
+                runtime,
+                name,
+                entrypoint,
+                package_path,
+                manifest,
+                manifest_hash,
+                permission_fingerprint,
+                checksum_sha256,
+                package_status
+            )
+            values (
+                $1,
+                $2,
+                '1',
+                'http',
+                'Plugin dispatch audit smoke',
+                'http://127.0.0.1:19998/fbz-plugin',
+                $3,
+                jsonb_build_object('id', $1::text, 'version', $2::text),
+                gen_random_bytes(32),
+                gen_random_bytes(32),
+                gen_random_bytes(32),
+                'approved'
+            )
+            returning id
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .bind(&package_path)
+        .fetch_one(&pool)
+        .await
+        .expect("create plugin dispatch smoke package");
+
+        sqlx::query(
+            r#"
+            insert into plugin_installations (
+                plugin_id,
+                active_package_id,
+                enabled,
+                approval_status,
+                permission_fingerprint,
+                approved_at
+            )
+            values ($1, $2, true, 'approved', gen_random_bytes(32), now())
+            "#,
+        )
+        .bind(&plugin_id)
+        .bind(package_id)
+        .execute(&pool)
+        .await
+        .expect("create plugin dispatch smoke installation");
+
+        let older_dispatch_row = sqlx::query(
+            r#"
+            insert into event_outbox (
+                event_type,
+                aggregate_type,
+                aggregate_id,
+                payload,
+                status,
+                attempts,
+                max_attempts,
+                created_at,
+                available_at,
+                last_error
+            )
+            values (
+                $1,
+                'plugin',
+                $2,
+                jsonb_build_object(
+                    'pluginId', $2::text,
+                    'packageId', $3::text,
+                    'hookId', null,
+                    'handler', 'hooks.onSmokeOlder',
+                    'hookEvent', 'library.scan.completed'
+                ),
+                'failed',
+                2,
+                5,
+                now() - interval '2 minutes',
+                now() - interval '2 minutes',
+                'plugin dispatch smoke failure'
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(PLUGIN_HOOK_DISPATCH_EVENT)
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .fetch_one(&pool)
+        .await
+        .expect("create older plugin dispatch smoke row");
+        let older_dispatch_internal_id = older_dispatch_row
+            .try_get::<i64, _>("id")
+            .expect("older dispatch internal id should be returned");
+        let older_dispatch_id = older_dispatch_row
+            .try_get::<String, _>("public_id")
+            .expect("older dispatch public id should be returned");
+
+        let newer_dispatch_row = sqlx::query(
+            r#"
+            insert into event_outbox (
+                event_type,
+                aggregate_type,
+                aggregate_id,
+                payload,
+                status,
+                attempts,
+                max_attempts,
+                created_at,
+                available_at
+            )
+            values (
+                $1,
+                'plugin',
+                $2,
+                jsonb_build_object(
+                    'pluginId', $2::text,
+                    'packageId', $3::text,
+                    'hookId', null,
+                    'handler', 'hooks.onSmokeNewer',
+                    'hookEvent', 'library.scan.completed'
+                ),
+                'delivered',
+                1,
+                5,
+                now() - interval '1 minute',
+                now() - interval '1 minute'
+            )
+            returning id, public_id::text as public_id
+            "#,
+        )
+        .bind(PLUGIN_HOOK_DISPATCH_EVENT)
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .fetch_one(&pool)
+        .await
+        .expect("create newer plugin dispatch smoke row");
+        let newer_dispatch_internal_id = newer_dispatch_row
+            .try_get::<i64, _>("id")
+            .expect("newer dispatch internal id should be returned");
+        let newer_dispatch_id = newer_dispatch_row
+            .try_get::<String, _>("public_id")
+            .expect("newer dispatch public id should be returned");
+
+        let older_run_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into plugin_execution_runs (
+                outbox_event_id,
+                outbox_event_public_id,
+                attempt,
+                plugin_id,
+                package_id,
+                handler,
+                event_key,
+                runtime,
+                entrypoint,
+                status,
+                request_payload,
+                response_status,
+                response_body,
+                started_at,
+                finished_at,
+                duration_ms
+            )
+            values (
+                $1,
+                $2,
+                1,
+                $3,
+                $4,
+                'hooks.onSmokeNewer',
+                'library.scan.completed',
+                'http',
+                'http://127.0.0.1:19998/fbz-plugin',
+                'failed',
+                jsonb_build_object('smoke', true, 'attempt', 1),
+                500,
+                'failure',
+                now() - interval '40 seconds',
+                now() - interval '39 seconds',
+                20
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(newer_dispatch_internal_id)
+        .bind(&newer_dispatch_id)
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .fetch_one(&pool)
+        .await
+        .expect("create older plugin execution run smoke row");
+
+        let newer_run_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into plugin_execution_runs (
+                outbox_event_id,
+                outbox_event_public_id,
+                attempt,
+                plugin_id,
+                package_id,
+                handler,
+                event_key,
+                runtime,
+                entrypoint,
+                status,
+                request_payload,
+                response_status,
+                response_body,
+                started_at,
+                finished_at,
+                duration_ms
+            )
+            values (
+                $1,
+                $2,
+                2,
+                $3,
+                $4,
+                'hooks.onSmokeNewer',
+                'library.scan.completed',
+                'http',
+                'http://127.0.0.1:19998/fbz-plugin',
+                'succeeded',
+                jsonb_build_object('smoke', true, 'attempt', 2),
+                200,
+                'ok',
+                now() - interval '20 seconds',
+                now() - interval '19 seconds',
+                10
+            )
+            returning public_id::text
+            "#,
+        )
+        .bind(newer_dispatch_internal_id)
+        .bind(&newer_dispatch_id)
+        .bind(&plugin_id)
+        .bind(&package_version)
+        .fetch_one(&pool)
+        .await
+        .expect("create newer plugin execution run smoke row");
+
+        let repository = AdminRepository::new(pool.clone());
+        let dispatch_page = repository
+            .list_plugin_dispatches_page(PluginDispatchFilter {
+                status: None,
+                cursor: None,
+                limit: 25,
+            })
+            .await
+            .expect("plugin dispatch list should execute");
+        assert!(
+            dispatch_page
+                .records
+                .iter()
+                .any(|dispatch| dispatch.id == older_dispatch_id),
+            "older smoke dispatch should be listed"
+        );
+        assert!(
+            dispatch_page
+                .records
+                .iter()
+                .any(|dispatch| dispatch.id == newer_dispatch_id),
+            "newer smoke dispatch should be listed"
+        );
+
+        let failed_dispatch_page = repository
+            .list_plugin_dispatches_page(PluginDispatchFilter {
+                status: Some("failed".to_owned()),
+                cursor: None,
+                limit: 25,
+            })
+            .await
+            .expect("filtered plugin dispatch list should execute");
+        assert!(
+            failed_dispatch_page
+                .records
+                .iter()
+                .any(|dispatch| dispatch.id == older_dispatch_id && dispatch.status == "failed"),
+            "failed smoke dispatch should be returned by status filter"
+        );
+
+        let cursor_dispatch_page = repository
+            .list_plugin_dispatches_page(PluginDispatchFilter {
+                status: None,
+                cursor: Some(newer_dispatch_id.clone()),
+                limit: 25,
+            })
+            .await
+            .expect("cursor plugin dispatch list should execute");
+        assert!(
+            cursor_dispatch_page
+                .records
+                .iter()
+                .any(|dispatch| dispatch.id == older_dispatch_id),
+            "older dispatch should be returned after newest dispatch cursor"
+        );
+
+        let runs_page = repository
+            .list_plugin_execution_runs_page(
+                &newer_dispatch_id,
+                PluginExecutionRunFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("plugin execution run list should execute")
+            .expect("newer dispatch should exist");
+        assert!(
+            runs_page.records.iter().any(|run| run.id == older_run_id),
+            "older smoke execution run should be listed"
+        );
+        assert!(
+            runs_page.records.iter().any(|run| run.id == newer_run_id),
+            "newer smoke execution run should be listed"
+        );
+
+        let failed_runs_page = repository
+            .list_plugin_execution_runs_page(
+                &newer_dispatch_id,
+                PluginExecutionRunFilter {
+                    status: Some("failed".to_owned()),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("filtered plugin execution run list should execute")
+            .expect("newer dispatch should exist");
+        assert_eq!(failed_runs_page.records.len(), 1);
+        assert_eq!(failed_runs_page.records[0].id, older_run_id);
+        assert_eq!(failed_runs_page.records[0].status, "failed");
+
+        let cursor_runs_page = repository
+            .list_plugin_execution_runs_page(
+                &newer_dispatch_id,
+                PluginExecutionRunFilter {
+                    status: None,
+                    cursor: Some(newer_run_id),
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("cursor plugin execution run list should execute")
+            .expect("newer dispatch should exist");
+        assert!(
+            cursor_runs_page
+                .records
+                .iter()
+                .any(|run| run.id == older_run_id),
+            "older execution run should be returned after newest run cursor"
+        );
+
+        let missing_runs_page = repository
+            .list_plugin_execution_runs_page(
+                "not-a-uuid",
+                PluginExecutionRunFilter {
+                    status: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("invalid plugin dispatch id should be safely handled");
+        assert!(missing_runs_page.is_none());
+
+        sqlx::query("delete from event_outbox where id = any($1)")
+            .bind(&[older_dispatch_internal_id, newer_dispatch_internal_id][..])
+            .execute(&pool)
+            .await
+            .expect("delete smoke dispatch outbox rows");
+        sqlx::query("delete from plugin_installations where plugin_id = $1")
+            .bind(&plugin_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke plugin installation");
+        sqlx::query("delete from plugin_packages where plugin_id = $1")
+            .bind(&plugin_id)
+            .execute(&pool)
+            .await
+            .expect("delete smoke plugin package");
+    }
+
+    #[test]
     fn admin_public_id_entrypoints_keep_uuid_index_shape() {
         let repository = repository_source();
         let bad_public_id_filter = format!("{}{}", "where public_id::text = ", "$1");
@@ -4004,14 +8279,35 @@ mod tests {
                 .contains("from plugin_execution_runs\n                    where public_id = case")
         );
         assert!(repository.contains("cursor_call.public_id = case"));
-        assert!(repository.contains("from scheduled_tasks\n            where public_id = case"));
+        assert!(
+            repository
+                .contains("from scheduled_tasks tasks\n            where tasks.public_id = case")
+        );
     }
 
     #[test]
     fn admin_queue_public_id_inputs_use_uuid_comparisons() {
+        const UUID_REGEX: &str = "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'";
+
         assert!(ADMIN_LIBRARY_BY_PUBLIC_ID_SQL.contains("where public_id = case"));
         assert!(ADMIN_LIBRARY_BY_PUBLIC_ID_SQL.contains("$1::uuid"));
+        assert!(ADMIN_LIBRARY_BY_PUBLIC_ID_SQL.contains(UUID_REGEX));
         assert!(!ADMIN_LIBRARY_BY_PUBLIC_ID_SQL.contains("public_id::text = $1"));
+
+        assert!(ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains("target_library as"));
+        assert!(ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains("where public_id = case"));
+        assert!(ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains("$1::uuid"));
+        assert!(ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains(UUID_REGEX));
+        assert!(ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains("existing as"));
+        assert!(
+            ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains("j.status in ('queued', 'running', 'failed')")
+        );
+        assert!(ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains("j.attempts < j.max_attempts"));
+        assert!(
+            ADMIN_QUEUE_LIBRARY_SCAN_SQL
+                .contains("j.payload->>'libraryId' = target_library.public_id")
+        );
+        assert!(!ADMIN_QUEUE_LIBRARY_SCAN_SQL.contains("values ('library.scan'"));
 
         assert!(ADMIN_QUEUE_METADATA_REFRESH_ITEM_SQL.contains("where public_id = case"));
         assert!(ADMIN_QUEUE_METADATA_REFRESH_ITEM_SQL.contains("$1::uuid"));
@@ -4038,6 +8334,65 @@ mod tests {
         );
         assert!(!ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("stream_mirrored_at is not null"));
         assert!(!ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("count(stream_mirrored_at"));
-        assert!(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("from unmirrored"));
+        assert!(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("event_stream_mirror_sample"));
+    }
+
+    #[test]
+    fn event_stream_mirror_status_uses_bounded_lower_bound_counts() {
+        let migration =
+            include_str!("../../migrations/0071_admin_event_stream_mirror_status_indexes.sql");
+        let normalized = ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+
+        assert!(
+            ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("admin_event_stream_mirror_sample_limit")
+        );
+        assert!(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("event_stream_mirror_sample as"));
+        assert!(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("limit 10001"));
+        assert!(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("counts_are_exact"));
+        assert!(ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL.contains("sample_limit"));
+        assert!(migration.contains("idx_event_outbox_stream_mirror_created"));
+        assert!(migration.contains("on event_outbox (created_at asc, id asc)"));
+        assert!(migration.contains("where stream_mirrored_at is null"));
+
+        assert!(
+            !normalized.contains("select count(*)::bigint as unmirrored_count"),
+            "admin mirror status should not exact-count the full unmirrored backlog"
+        );
+        assert!(
+            !normalized.contains("from unmirrored"),
+            "admin mirror status should aggregate from a bounded sample"
+        );
+    }
+
+    // Live-DB smoke: validates the admin mirror status SQL parses and plans
+    // against the real migrated schema via EXPLAIN. Plain EXPLAIN does not
+    // execute the SELECT, so it is non-mutating.
+    //   cargo test -- --ignored admin_event_stream_mirror_status_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn admin_event_stream_mirror_status_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let plan_rows = sqlx::query(&format!("explain {ADMIN_EVENT_STREAM_MIRROR_STATUS_SQL}"))
+            .fetch_all(&pool)
+            .await
+            .expect("admin mirror status SQL should parse and plan against the live schema");
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a query plan for the admin mirror status summary"
+        );
     }
 }

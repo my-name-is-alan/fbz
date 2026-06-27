@@ -17,7 +17,9 @@ const MAX_ENCODING_WRITE_BODY_BYTES: usize = 64 * 1024;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CodecParameterQuery {
+    #[serde(alias = "codecId", alias = "codec_id")]
     pub codec_id: Option<String>,
+    #[serde(alias = "parameterContext", alias = "parameter_context")]
     pub parameter_context: Option<String>,
 }
 
@@ -343,6 +345,9 @@ fn current_operating_system() -> OperatingSystemDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
+
     use super::*;
 
     #[test]
@@ -400,6 +405,18 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn codec_parameter_query_accepts_lower_camel_client_fields() {
+        let uri = "/Encoding/CodecParameters?codecId=h264&parameterContext=Encoding"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<CodecParameterQuery>::try_from_uri(&uri).unwrap();
+        let input = codec_parameter_input(&query).unwrap();
+
+        assert_eq!(input.codec_id, "h264");
+        assert_eq!(input.parameter_context, "Encoding");
     }
 
     #[test]

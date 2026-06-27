@@ -18,27 +18,44 @@ use super::{access::authenticate_query_user, items::normalized_parent_id};
 
 const DEFAULT_PERSONS_LIMIT: u32 = 100;
 const MAX_PERSONS_LIMIT: u32 = 200;
+const MAX_PERSONS_START_INDEX: u32 = 10_000;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PersonsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "personTypes", alias = "person_types")]
     pub person_types: Option<String>,
+    #[serde(alias = "nameStartsWith", alias = "name_starts_with")]
     pub name_starts_with: Option<String>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PersonByNameQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
@@ -112,7 +129,7 @@ struct PersonWindow {
 impl PersonWindow {
     fn from_query(query: &PersonsQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: i64::from(query.start_index.unwrap_or(0).min(MAX_PERSONS_START_INDEX)),
             limit: i64::from(
                 query
                     .limit
@@ -193,6 +210,8 @@ fn person_to_base_item(record: PersonRecord) -> BaseItemDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -233,6 +252,37 @@ mod tests {
     }
 
     #[test]
+    fn person_queries_accept_lower_camel_client_fields() {
+        let uri = "/Persons?userId=user-1&parentId=library-1&recursive=true&startIndex=10&limit=500&searchTerm=tom&sortOrder=Descending&personTypes=Actor,Director,Guest%20Star&nameStartsWith=T&nameStartsWithOrGreater=M&fields=PrimaryImageAspectRatio&enableImages=true"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<PersonsQuery>::try_from_uri(&uri).unwrap();
+
+        let window = PersonWindow::from_query(&query);
+        let role_filter = role_filter_from_query(query.person_types.as_deref());
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_PERSONS_LIMIT));
+        assert_eq!(query.search_term.as_deref(), Some("tom"));
+        assert_eq!(query.name_starts_with.as_deref(), Some("T"));
+        assert_eq!(query.name_starts_with_or_greater.as_deref(), Some("M"));
+        assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(
+            sort_direction_from_query(query.sort_order.as_deref()),
+            SortDirection::Desc
+        );
+        assert!(role_filter.enabled);
+        assert_eq!(role_filter.role_types, ["actor", "director", "guest_star"]);
+
+        let uri = "/Persons/Tom%20Hanks?userId=user-1".parse::<Uri>().unwrap();
+        let Query(query) = Query::<PersonByNameQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
     fn unknown_person_type_becomes_empty_enabled_filter() {
         let role_filter = role_filter_from_query(Some("Conductor"));
 
@@ -246,6 +296,18 @@ mod tests {
 
         assert!(!role_filter.enabled);
         assert!(role_filter.role_types.is_empty());
+    }
+
+    #[test]
+    fn person_window_clamps_pathologically_large_start_index() {
+        let window = PersonWindow::from_query(&PersonsQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..PersonsQuery::default()
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
     }
 
     #[test]

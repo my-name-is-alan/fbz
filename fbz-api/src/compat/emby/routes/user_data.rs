@@ -24,39 +24,53 @@ const MAX_LIBRARY_ACCESS_ID_LEN: usize = 128;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RatingQuery {
+    #[serde(alias = "likes")]
     pub likes: Option<bool>,
+    #[serde(alias = "rating")]
     pub rating: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct HideFromResumeQuery {
+    #[serde(alias = "hide")]
     pub hide: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserItemDataUpdateDto {
+    #[serde(alias = "playbackPositionTicks", alias = "playback_position_ticks")]
     pub playback_position_ticks: Option<i64>,
+    #[serde(alias = "playCount", alias = "play_count")]
     pub play_count: Option<i32>,
+    #[serde(alias = "played")]
     pub played: Option<bool>,
+    #[serde(alias = "isFavorite", alias = "is_favorite")]
     pub is_favorite: Option<bool>,
+    #[serde(alias = "rating")]
     pub rating: Option<f64>,
+    #[serde(alias = "lastPlayedDate", alias = "last_played_date")]
     pub last_played_date: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UpdateUserItemAccessDto {
+    #[serde(alias = "itemIds", alias = "item_ids")]
     pub item_ids: Vec<String>,
+    #[serde(alias = "userIds", alias = "user_ids")]
     pub user_ids: Vec<String>,
+    #[serde(alias = "itemAccess", alias = "item_access")]
     pub item_access: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct LeaveSharedItemsDto {
+    #[serde(alias = "itemIds", alias = "item_ids")]
     pub item_ids: Vec<String>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
@@ -123,11 +137,13 @@ pub async fn item_user_data(
 pub async fn update_item_user_data(
     State(state): State<AppState>,
     Path((user_id, item_id)): Path<(String, String)>,
+    Query(query): Query<UserItemDataUpdateDto>,
     headers: HeaderMap,
     uri: Uri,
     body: Bytes,
 ) -> Result<Json<UserItemDataDto>, AppError> {
-    let payload: UserItemDataUpdateDto = parse_emby_body(&headers, &body)?;
+    let body_payload = parse_optional_user_item_data_update_body(&headers, &body)?;
+    let payload = merged_user_item_data_update_input(body_payload, query)?;
     let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
@@ -349,6 +365,37 @@ fn user_item_data_update_input(
     })
 }
 
+fn parse_optional_user_item_data_update_body(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<Option<UserItemDataUpdateDto>, AppError> {
+    if body.is_empty() {
+        return Ok(None);
+    }
+
+    parse_emby_body(headers, body).map(Some)
+}
+
+fn merged_user_item_data_update_input(
+    body: Option<UserItemDataUpdateDto>,
+    query: UserItemDataUpdateDto,
+) -> Result<UserItemDataUpdateDto, AppError> {
+    let Some(body) = body else {
+        return Ok(query);
+    };
+
+    Ok(UserItemDataUpdateDto {
+        playback_position_ticks: body
+            .playback_position_ticks
+            .or(query.playback_position_ticks),
+        play_count: body.play_count.or(query.play_count),
+        played: body.played.or(query.played),
+        is_favorite: body.is_favorite.or(query.is_favorite),
+        rating: body.rating.or(query.rating),
+        last_played_date: body.last_played_date.or(query.last_played_date),
+    })
+}
+
 fn hide_from_resume_update_input(
     user_id: i64,
     item_id: &str,
@@ -473,6 +520,9 @@ fn user_item_data_to_dto(record: UserItemDataRecord) -> UserItemDataDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::{extract::Query, http::Uri};
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -501,6 +551,130 @@ mod tests {
             .unwrap(),
             8.46
         );
+    }
+
+    #[test]
+    fn user_data_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = "/emby/Users/user-1/Items/item-1/Rating?likes=true"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<RatingQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(rating_from_query(&query).unwrap(), 10.0);
+
+        let uri: Uri = "/emby/Users/user-1/Items/item-1/HideFromResume?hide=true"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<HideFromResumeQuery>::try_from_uri(&uri).unwrap();
+        let input = hide_from_resume_update_input(42, "item-1", query).unwrap();
+
+        assert_eq!(input.playback_position_ticks, Some(0));
+    }
+
+    #[test]
+    fn user_data_update_query_accepts_lower_camel_and_snake_case_fields() {
+        let uri: Uri = "/emby/Users/user-1/Items/item-1/UserData?playbackPositionTicks=120000&play_count=3&played=true&isFavorite=false&rating=8.5&last_played_date=2026-01-01T00%3A00%3A00Z"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<UserItemDataUpdateDto>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.playback_position_ticks, Some(120000));
+        assert_eq!(query.play_count, Some(3));
+        assert_eq!(query.played, Some(true));
+        assert_eq!(query.is_favorite, Some(false));
+        assert_eq!(query.rating, Some(8.5));
+        assert_eq!(
+            query.last_played_date.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn user_data_bodies_accept_lower_camel_client_fields() {
+        let payload = serde_json::from_value::<UserItemDataUpdateDto>(json!({
+            "playbackPositionTicks": 120000,
+            "playCount": 3,
+            "played": false,
+            "isFavorite": true,
+            "rating": 8.5,
+            "lastPlayedDate": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let input = user_item_data_update_input(42, "item-1", payload).unwrap();
+
+        assert_eq!(input.playback_position_ticks, Some(120000));
+        assert_eq!(input.play_count, Some(3));
+        assert_eq!(input.played, Some(false));
+        assert_eq!(input.is_favorite, Some(true));
+        assert_eq!(input.rating, Some(8.5));
+
+        let payload = serde_json::from_value::<UpdateUserItemAccessDto>(json!({
+            "itemIds": [" item-1 ", "item-2"],
+            "userIds": [" user-1 "],
+            "itemAccess": "Read"
+        }))
+        .unwrap();
+        let input = user_item_access_update_input(payload).unwrap();
+
+        assert_eq!(input.item_ids, ["item-1", "item-2"]);
+        assert_eq!(input.user_ids, ["user-1"]);
+        assert_eq!(input.item_access.as_deref(), Some("Read"));
+
+        let payload = serde_json::from_value::<LeaveSharedItemsDto>(json!({
+            "itemIds": [" item-1 "],
+            "userId": " user-1 "
+        }))
+        .unwrap();
+        let input = leave_shared_items_input(payload).unwrap();
+
+        assert_eq!(input.item_ids, ["item-1"]);
+        assert_eq!(input.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn user_data_update_input_accepts_query_only_fields() {
+        let query = UserItemDataUpdateDto {
+            playback_position_ticks: Some(120000),
+            play_count: Some(3),
+            played: Some(true),
+            is_favorite: Some(false),
+            rating: Some(8.5),
+            last_played_date: None,
+        };
+        let input = merged_user_item_data_update_input(None, query).unwrap();
+
+        assert_eq!(input.playback_position_ticks, Some(120000));
+        assert_eq!(input.play_count, Some(3));
+        assert_eq!(input.played, Some(true));
+        assert_eq!(input.is_favorite, Some(false));
+        assert_eq!(input.rating, Some(8.5));
+    }
+
+    #[test]
+    fn user_data_update_input_preserves_body_fields_over_query() {
+        let body = UserItemDataUpdateDto {
+            playback_position_ticks: Some(42),
+            play_count: Some(1),
+            played: Some(false),
+            is_favorite: Some(true),
+            rating: Some(9.0),
+            last_played_date: None,
+        };
+        let query = UserItemDataUpdateDto {
+            playback_position_ticks: Some(120000),
+            play_count: Some(3),
+            played: Some(true),
+            is_favorite: Some(false),
+            rating: Some(8.5),
+            last_played_date: None,
+        };
+        let input = merged_user_item_data_update_input(Some(body), query).unwrap();
+
+        assert_eq!(input.playback_position_ticks, Some(42));
+        assert_eq!(input.play_count, Some(1));
+        assert_eq!(input.played, Some(false));
+        assert_eq!(input.is_favorite, Some(true));
+        assert_eq!(input.rating, Some(9.0));
     }
 
     #[test]

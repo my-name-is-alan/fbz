@@ -10,13 +10,17 @@ use crate::{compat::emby::dto::QueryResultDto, error::AppError, state::AppState}
 use super::access::authenticate_request_user;
 
 const MAX_ACTIVITY_LOG_LIMIT: u32 = 100;
+const MAX_ACTIVITY_LOG_START_INDEX: u32 = 10_000;
 const MAX_ACTIVITY_LOG_MIN_DATE_LEN: usize = 64;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ActivityLogQuery {
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "minDate", alias = "min_date")]
     pub min_date: Option<String>,
 }
 
@@ -71,7 +75,10 @@ pub async fn activity_log_entries(
 
 fn activity_log_input(query: &ActivityLogQuery) -> Result<ActivityLogInput, AppError> {
     Ok(ActivityLogInput {
-        start_index: query.start_index.unwrap_or(0),
+        start_index: query
+            .start_index
+            .unwrap_or(0)
+            .min(MAX_ACTIVITY_LOG_START_INDEX),
         limit: query
             .limit
             .unwrap_or(MAX_ACTIVITY_LOG_LIMIT)
@@ -114,6 +121,8 @@ fn normalize_min_date(value: Option<&str>) -> Result<Option<String>, AppError> {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -126,6 +135,33 @@ mod tests {
             min_date: Some(" 2024-01-01T00:00:00Z ".to_owned()),
         })
         .expect("activity log query should normalize");
+
+        assert_eq!(input.start_index, 25);
+        assert_eq!(input.limit, MAX_ACTIVITY_LOG_LIMIT);
+        assert_eq!(input.min_date.as_deref(), Some("2024-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn activity_log_query_clamps_pathologically_large_start_index() {
+        let input = activity_log_input(&ActivityLogQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            min_date: None,
+        })
+        .expect("activity log query should normalize");
+
+        assert_eq!(input.start_index, 10_000);
+        assert_eq!(input.limit, 50);
+    }
+
+    #[test]
+    fn activity_log_query_accepts_lower_camel_client_fields() {
+        let uri =
+            "/System/ActivityLog/Entries?startIndex=25&limit=10000&minDate=2024-01-01T00:00:00Z"
+                .parse::<Uri>()
+                .unwrap();
+        let Query(query) = Query::<ActivityLogQuery>::try_from_uri(&uri).unwrap();
+        let input = activity_log_input(&query).unwrap();
 
         assert_eq!(input.start_index, 25);
         assert_eq!(input.limit, MAX_ACTIVITY_LOG_LIMIT);

@@ -17,10 +17,15 @@ use super::access::authenticate_request_user;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ThemeMediaQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "inheritFromParent", alias = "inherit_from_parent")]
     pub inherit_from_parent: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
 }
 
@@ -94,6 +99,8 @@ async fn ensure_theme_media_owner_visible(
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -108,6 +115,20 @@ mod tests {
             "Fields": "MediaSources"
         }))
         .unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.inherit_from_parent, Some(true));
+        assert_eq!(query.start_index, Some(2));
+        assert_eq!(query.limit, Some(10));
+        assert_eq!(query.fields.as_deref(), Some("MediaSources"));
+    }
+
+    #[test]
+    fn theme_media_query_accepts_lower_camel_client_fields() {
+        let uri = "/Items/item-1/ThemeMedia?userId=user-1&inheritFromParent=true&startIndex=2&limit=10&fields=MediaSources"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<ThemeMediaQuery>::try_from_uri(&uri).unwrap();
 
         assert_eq!(query.user_id.as_deref(), Some("user-1"));
         assert_eq!(query.inherit_from_parent, Some(true));

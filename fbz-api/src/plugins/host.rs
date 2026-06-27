@@ -100,35 +100,6 @@ const PLUGIN_LIBRARY_ITEMS_AFTER_CURSOR_SQL: &str = r#"
             order by coalesce(nullif(mi.sort_title, ''), mi.title), mi.id
             limit $4
             "#;
-const PLUGIN_LIBRARY_ITEMS_OFFSET_SQL: &str = r#"
-            with requested_library as (
-                select case
-                    when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    then $1::uuid
-                    else null::uuid
-                end as public_id
-            )
-            select
-                mi.id as cursor_id,
-                coalesce(nullif(mi.sort_title, ''), mi.title) as sort_key,
-                mi.public_id::text as id,
-                l.public_id::text as library_id,
-                parent.public_id::text as parent_id,
-                mi.item_type,
-                mi.title,
-                mi.production_year,
-                mi.runtime_ticks,
-                count(*) over() as total_record_count
-            from requested_library
-            join libraries l on l.public_id = requested_library.public_id
-            join media_items mi on mi.library_id = l.id
-            left join media_items parent on parent.id = mi.parent_id
-            where l.is_hidden = false
-              and mi.is_deleted = false
-            order by coalesce(nullif(mi.sort_title, ''), mi.title), mi.id
-            limit $2
-            offset $3
-            "#;
 const PLUGIN_LIBRARY_EXISTS_SQL: &str = r#"
             select exists (
                 with requested_library as (
@@ -891,13 +862,6 @@ struct PluginItemWindow {
     start_index: i64,
     limit: i64,
     cursor: Option<PluginItemCursor>,
-    mode: PluginItemPaginationMode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PluginItemPaginationMode {
-    Keyset,
-    Offset,
 }
 
 impl PluginHostRepository {
@@ -1249,44 +1213,23 @@ impl PluginHostRepository {
         library_id: &str,
         window: &PluginItemWindow,
     ) -> Result<(Vec<PgRow>, u32, bool), sqlx::Error> {
-        match window.mode {
-            PluginItemPaginationMode::Keyset => {
-                let rows = if let Some(cursor) = &window.cursor {
-                    sqlx::query(PLUGIN_LIBRARY_ITEMS_AFTER_CURSOR_SQL)
-                        .bind(library_id)
-                        .bind(cursor.sort_key.as_str())
-                        .bind(cursor.cursor_id)
-                        .bind(window.fetch_limit())
-                        .fetch_all(&self.pool)
-                        .await?
-                } else {
-                    sqlx::query(PLUGIN_LIBRARY_ITEMS_FIRST_PAGE_SQL)
-                        .bind(library_id)
-                        .bind(window.fetch_limit())
-                        .fetch_all(&self.pool)
-                        .await?
-                };
-                let visible_lower_bound = rows.len().min(window.fetch_limit() as usize) as u32;
-                Ok((rows, visible_lower_bound, false))
-            }
-            PluginItemPaginationMode::Offset => {
-                let rows = sqlx::query(PLUGIN_LIBRARY_ITEMS_OFFSET_SQL)
-                    .bind(library_id)
-                    .bind(window.fetch_limit())
-                    .bind(window.offset())
-                    .fetch_all(&self.pool)
-                    .await?;
-                let total_record_count = rows
-                    .first()
-                    .map(|row| row.try_get::<i64, _>("total_record_count"))
-                    .transpose()?
-                    .unwrap_or(0)
-                    .try_into()
-                    .unwrap_or(u32::MAX);
-                let total_record_count_is_exact = !rows.is_empty();
-                Ok((rows, total_record_count, total_record_count_is_exact))
-            }
-        }
+        let rows = if let Some(cursor) = &window.cursor {
+            sqlx::query(PLUGIN_LIBRARY_ITEMS_AFTER_CURSOR_SQL)
+                .bind(library_id)
+                .bind(cursor.sort_key.as_str())
+                .bind(cursor.cursor_id)
+                .bind(window.fetch_limit())
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            sqlx::query(PLUGIN_LIBRARY_ITEMS_FIRST_PAGE_SQL)
+                .bind(library_id)
+                .bind(window.fetch_limit())
+                .fetch_all(&self.pool)
+                .await?
+        };
+        let visible_lower_bound = rows.len().min(window.fetch_limit() as usize) as u32;
+        Ok((rows, visible_lower_bound, false))
     }
 
     async fn get_item(
@@ -2633,17 +2576,8 @@ impl PluginItemWindow {
             .as_deref()
             .map(parse_plugin_item_cursor)
             .transpose()?;
-        let mode = if cursor.is_some() || query.start_index.is_none() {
-            PluginItemPaginationMode::Keyset
-        } else {
-            PluginItemPaginationMode::Offset
-        };
         Ok(Self {
-            start_index: if mode == PluginItemPaginationMode::Offset {
-                i64::from(query.start_index.unwrap_or(0))
-            } else {
-                0
-            },
+            start_index: 0,
             limit: i64::from(
                 query
                     .limit
@@ -2651,20 +2585,11 @@ impl PluginItemWindow {
                     .clamp(1, MAX_LIBRARY_ITEMS_LIMIT),
             ),
             cursor,
-            mode,
         })
     }
 
     fn fetch_limit(&self) -> i64 {
         self.limit.saturating_add(1)
-    }
-
-    fn offset(&self) -> i64 {
-        if self.mode == PluginItemPaginationMode::Offset {
-            self.start_index
-        } else {
-            0
-        }
     }
 }
 
@@ -3597,7 +3522,7 @@ mod tests {
     }
 
     #[test]
-    fn library_item_window_clamps_limits() {
+    fn library_item_window_ignores_start_index_and_clamps_limits() {
         let window = PluginItemWindow::from_query(&ListPluginLibraryItemsQueryDto {
             start_index: Some(7),
             limit: Some(10_000),
@@ -3605,11 +3530,9 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(window.start_index, 7);
+        assert_eq!(window.start_index, 0);
         assert_eq!(window.limit, i64::from(MAX_LIBRARY_ITEMS_LIMIT));
         assert_eq!(window.fetch_limit(), i64::from(MAX_LIBRARY_ITEMS_LIMIT) + 1);
-        assert_eq!(window.offset(), 7);
-        assert_eq!(window.mode, PluginItemPaginationMode::Offset);
     }
 
     #[test]
@@ -3624,9 +3547,7 @@ mod tests {
         assert_eq!(window.start_index, 0);
         assert_eq!(window.limit, 50);
         assert_eq!(window.fetch_limit(), 51);
-        assert_eq!(window.offset(), 0);
         assert_eq!(window.cursor, None);
-        assert_eq!(window.mode, PluginItemPaginationMode::Keyset);
     }
 
     #[test]
@@ -3642,8 +3563,6 @@ mod tests {
         assert_eq!(window.start_index, 0);
         assert_eq!(window.limit, 50);
         assert_eq!(window.fetch_limit(), 51);
-        assert_eq!(window.offset(), 0);
-        assert_eq!(window.mode, PluginItemPaginationMode::Keyset);
         assert_eq!(
             window.cursor,
             Some(PluginItemCursor {
@@ -3673,6 +3592,12 @@ mod tests {
 
     #[test]
     fn plugin_library_item_keyset_queries_do_not_force_full_counts_or_offsets() {
+        let host = include_str!("host.rs");
+        let bad_offset_query = format!("{}{}", "PLUGIN_LIBRARY_ITEMS_", "OFFSET_SQL");
+        let bad_offset_mode = format!("{}{}", "PluginItemPaginationMode::", "Offset");
+
+        assert!(!host.contains(&bad_offset_query));
+        assert!(!host.contains(&bad_offset_mode));
         for sql in [
             PLUGIN_LIBRARY_ITEMS_FIRST_PAGE_SQL,
             PLUGIN_LIBRARY_ITEMS_AFTER_CURSOR_SQL,
@@ -3681,8 +3606,6 @@ mod tests {
             assert!(!sql.contains("offset"));
         }
         assert!(PLUGIN_LIBRARY_ITEMS_AFTER_CURSOR_SQL.contains("> ($2::text, $3::bigint)"));
-        assert!(PLUGIN_LIBRARY_ITEMS_OFFSET_SQL.contains("count(*) over()"));
-        assert!(PLUGIN_LIBRARY_ITEMS_OFFSET_SQL.contains("offset $3"));
     }
 
     #[test]
@@ -3690,7 +3613,6 @@ mod tests {
         for sql in [
             PLUGIN_LIBRARY_ITEMS_FIRST_PAGE_SQL,
             PLUGIN_LIBRARY_ITEMS_AFTER_CURSOR_SQL,
-            PLUGIN_LIBRARY_ITEMS_OFFSET_SQL,
             PLUGIN_LIBRARY_EXISTS_SQL,
         ] {
             assert!(sql.contains("with requested_library as"));

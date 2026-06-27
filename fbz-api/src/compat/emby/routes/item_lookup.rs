@@ -31,27 +31,94 @@ pub struct ExternalIdInfoDto {
     pub is_supported_as_identifier: bool,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MetadataEditorInfoDto {
+    pub parental_rating_options: Vec<MetadataEditorParentalRatingDto>,
+    pub countries: Vec<MetadataEditorCountryInfoDto>,
+    pub cultures: Vec<MetadataEditorCultureDto>,
+    pub external_id_infos: Vec<MetadataEditorExternalIdInfoDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MetadataEditorParentalRatingDto {
+    pub name: String,
+    pub value: i32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MetadataEditorCountryInfoDto {
+    pub name: String,
+    pub display_name: String,
+    #[serde(rename = "TwoLetterISORegionName")]
+    pub two_letter_iso_region_name: String,
+    #[serde(rename = "ThreeLetterISORegionName")]
+    pub three_letter_iso_region_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MetadataEditorCultureDto {
+    pub name: String,
+    pub display_name: String,
+    #[serde(rename = "TwoLetterISOLanguageName")]
+    pub two_letter_iso_language_name: String,
+    #[serde(rename = "ThreeLetterISOLanguageName")]
+    pub three_letter_iso_language_name: String,
+    #[serde(rename = "ThreeLetterISOLanguageNames")]
+    pub three_letter_iso_language_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct MetadataEditorExternalIdInfoDto {
+    pub name: String,
+    pub key: String,
+    pub url_format_string: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteSearchResultDto {
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "originalTitle", alias = "original_title")]
     pub original_title: Option<String>,
+    #[serde(alias = "providerIds", alias = "provider_ids")]
     pub provider_ids: Option<BTreeMap<String, String>>,
+    #[serde(alias = "productionYear", alias = "production_year")]
     pub production_year: Option<i32>,
+    #[serde(alias = "indexNumber", alias = "index_number")]
     pub index_number: Option<i32>,
+    #[serde(alias = "indexNumberEnd", alias = "index_number_end")]
     pub index_number_end: Option<i32>,
+    #[serde(alias = "parentIndexNumber", alias = "parent_index_number")]
     pub parent_index_number: Option<i32>,
+    #[serde(alias = "sortIndexNumber", alias = "sort_index_number")]
     pub sort_index_number: Option<i32>,
+    #[serde(alias = "sortParentIndexNumber", alias = "sort_parent_index_number")]
     pub sort_parent_index_number: Option<i32>,
+    #[serde(alias = "premiereDate", alias = "premiere_date")]
     pub premiere_date: Option<String>,
+    #[serde(alias = "startDate", alias = "start_date")]
     pub start_date: Option<String>,
+    #[serde(alias = "endDate", alias = "end_date")]
     pub end_date: Option<String>,
+    #[serde(alias = "imageUrl", alias = "image_url")]
     pub image_url: Option<String>,
+    #[serde(alias = "searchProviderName", alias = "search_provider_name")]
     pub search_provider_name: Option<String>,
+    #[serde(alias = "gameSystem", alias = "game_system")]
     pub game_system: Option<String>,
+    #[serde(alias = "overview")]
     pub overview: Option<String>,
+    #[serde(alias = "disambiguationComment", alias = "disambiguation_comment")]
     pub disambiguation_comment: Option<String>,
+    #[serde(alias = "albumArtist", alias = "album_artist")]
     pub album_artist: Option<String>,
+    #[serde(alias = "artists")]
     pub artists: Option<Vec<String>>,
 }
 
@@ -95,26 +162,45 @@ enum RemoteSearchKind {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 struct RemoteSearchQueryDto {
+    #[serde(alias = "searchInfo", alias = "search_info")]
     pub search_info: Option<RemoteSearchInfoDto>,
+    #[serde(alias = "itemId", alias = "item_id")]
     pub item_id: Option<FlexibleTextValue>,
+    #[serde(alias = "searchProviderName", alias = "search_provider_name")]
     pub search_provider_name: Option<String>,
+    #[serde(alias = "providers")]
     pub providers: Option<Vec<String>>,
+    #[serde(
+        alias = "includeDisabledProviders",
+        alias = "include_disabled_providers"
+    )]
     pub include_disabled_providers: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 struct RemoteSearchInfoDto {
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "path")]
     pub path: Option<String>,
+    #[serde(alias = "metadataLanguage", alias = "metadata_language")]
     pub metadata_language: Option<String>,
+    #[serde(alias = "metadataCountryCode", alias = "metadata_country_code")]
     pub metadata_country_code: Option<String>,
+    #[serde(alias = "providerIds", alias = "provider_ids")]
     pub provider_ids: Option<BTreeMap<String, String>>,
+    #[serde(alias = "year")]
     pub year: Option<i32>,
+    #[serde(alias = "indexNumber", alias = "index_number")]
     pub index_number: Option<i32>,
+    #[serde(alias = "parentIndexNumber", alias = "parent_index_number")]
     pub parent_index_number: Option<i32>,
+    #[serde(alias = "premiereDate", alias = "premiere_date")]
     pub premiere_date: Option<String>,
+    #[serde(alias = "isAutomated", alias = "is_automated")]
     pub is_automated: Option<bool>,
+    #[serde(alias = "enableAdultMetadata", alias = "enable_adult_metadata")]
     pub enable_adult_metadata: Option<bool>,
 }
 
@@ -176,6 +262,19 @@ pub async fn external_id_infos(
     let _item_id = normalize_required_lookup_text("Id", &item_id, MAX_LOOKUP_TEXT_LEN)?;
 
     Ok(Json(external_id_info_items()))
+}
+
+pub async fn metadata_editor_info(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<MetadataEditorInfoDto>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    ensure_lookup_admin(&user)?;
+    let _item_id = normalize_required_lookup_text("ItemId", &item_id, MAX_LOOKUP_TEXT_LEN)?;
+
+    Ok(Json(metadata_editor_info_dto()))
 }
 
 pub async fn remote_search_image(
@@ -378,6 +477,71 @@ fn external_id_info_items() -> Vec<ExternalIdInfoDto> {
             is_supported_as_identifier: true,
         },
     ]
+}
+
+fn metadata_editor_info_dto() -> MetadataEditorInfoDto {
+    MetadataEditorInfoDto {
+        parental_rating_options: vec![
+            MetadataEditorParentalRatingDto {
+                name: "G".to_owned(),
+                value: 1,
+            },
+            MetadataEditorParentalRatingDto {
+                name: "PG".to_owned(),
+                value: 5,
+            },
+            MetadataEditorParentalRatingDto {
+                name: "PG-13".to_owned(),
+                value: 8,
+            },
+            MetadataEditorParentalRatingDto {
+                name: "R".to_owned(),
+                value: 9,
+            },
+            MetadataEditorParentalRatingDto {
+                name: "NC-17".to_owned(),
+                value: 10,
+            },
+        ],
+        countries: vec![
+            MetadataEditorCountryInfoDto {
+                name: "US".to_owned(),
+                display_name: "United States".to_owned(),
+                two_letter_iso_region_name: "US".to_owned(),
+                three_letter_iso_region_name: "USA".to_owned(),
+            },
+            MetadataEditorCountryInfoDto {
+                name: "CN".to_owned(),
+                display_name: "China".to_owned(),
+                two_letter_iso_region_name: "CN".to_owned(),
+                three_letter_iso_region_name: "CHN".to_owned(),
+            },
+        ],
+        cultures: vec![
+            MetadataEditorCultureDto {
+                name: "en-US".to_owned(),
+                display_name: "English (United States)".to_owned(),
+                two_letter_iso_language_name: "en".to_owned(),
+                three_letter_iso_language_name: "eng".to_owned(),
+                three_letter_iso_language_names: vec!["eng".to_owned()],
+            },
+            MetadataEditorCultureDto {
+                name: "zh-CN".to_owned(),
+                display_name: "Chinese (Simplified, China)".to_owned(),
+                two_letter_iso_language_name: "zh".to_owned(),
+                three_letter_iso_language_name: "zho".to_owned(),
+                three_letter_iso_language_names: vec!["zho".to_owned(), "chi".to_owned()],
+            },
+        ],
+        external_id_infos: external_id_info_items()
+            .into_iter()
+            .map(|info| MetadataEditorExternalIdInfoDto {
+                name: info.name,
+                key: info.key,
+                url_format_string: info.url_format_string,
+            })
+            .collect(),
+    }
 }
 
 fn remote_search_input(
@@ -672,6 +836,112 @@ mod tests {
         assert_eq!(input.year, Some(2024));
         assert!(input.include_disabled_providers);
         assert!(input.is_automated);
+    }
+
+    #[test]
+    fn remote_search_body_accepts_lower_camel_client_fields() {
+        let query: RemoteSearchQueryDto = serde_json::from_value(json!({
+            "searchInfo": {
+                "name": " A Movie ",
+                "path": "/media/movie.mkv",
+                "metadataLanguage": " en ",
+                "metadataCountryCode": " US ",
+                "providerIds": {
+                    "Tmdb": " 42 "
+                },
+                "year": 2024,
+                "indexNumber": 1,
+                "parentIndexNumber": 2,
+                "premiereDate": "2024-01-01",
+                "isAutomated": true,
+                "enableAdultMetadata": false
+            },
+            "itemId": 42,
+            "searchProviderName": " TheMovieDb ",
+            "providers": [" TheMovieDb "],
+            "includeDisabledProviders": true
+        }))
+        .expect("lower-camel remote search query should parse");
+
+        let input = remote_search_input(RemoteSearchKind::Movie, query)
+            .expect("lower-camel remote search query should normalize");
+
+        assert_eq!(input.kind, RemoteSearchKind::Movie);
+        assert_eq!(input.item_id.as_deref(), Some("42"));
+        assert_eq!(input.search_name.as_deref(), Some("A Movie"));
+        assert_eq!(input.search_path.as_deref(), Some("/media/movie.mkv"));
+        assert_eq!(input.metadata_language.as_deref(), Some("en"));
+        assert_eq!(input.metadata_country_code.as_deref(), Some("US"));
+        assert_eq!(input.search_provider_name.as_deref(), Some("TheMovieDb"));
+        assert_eq!(input.providers, ["TheMovieDb"]);
+        assert_eq!(
+            input.provider_ids.get("Tmdb").map(String::as_str),
+            Some("42")
+        );
+        assert_eq!(input.year, Some(2024));
+        assert_eq!(input.index_number, Some(1));
+        assert_eq!(input.parent_index_number, Some(2));
+        assert_eq!(input.premiere_date.as_deref(), Some("2024-01-01"));
+        assert!(input.include_disabled_providers);
+        assert!(input.is_automated);
+        assert!(!input.enable_adult_metadata);
+    }
+
+    #[test]
+    fn remote_search_apply_body_accepts_lower_camel_client_fields() {
+        let result: RemoteSearchResultDto = serde_json::from_value(json!({
+            "name": "A Movie",
+            "originalTitle": "Original Movie",
+            "providerIds": {
+                "Tmdb": "42"
+            },
+            "productionYear": 2024,
+            "indexNumber": 1,
+            "parentIndexNumber": 2,
+            "premiereDate": "2024-01-01",
+            "imageUrl": "https://image.example.test/poster.jpg",
+            "searchProviderName": "TheMovieDb",
+            "albumArtist": "Artist",
+            "artists": ["Artist"]
+        }))
+        .expect("lower-camel remote search result should parse");
+        let input = remote_search_apply_input(
+            "item-1",
+            RemoteSearchApplyQuery {
+                replace_all_images: Some(true),
+            },
+            result,
+        )
+        .expect("lower-camel remote search apply should normalize");
+
+        assert_eq!(input.item_id, "item-1");
+        assert!(input.replace_all_images);
+        assert_eq!(
+            input.provider_ids.get("Tmdb").map(String::as_str),
+            Some("42")
+        );
+        assert_eq!(input.search_provider_name.as_deref(), Some("TheMovieDb"));
+    }
+
+    #[test]
+    fn metadata_editor_info_uses_official_option_shape() {
+        let info = metadata_editor_info_dto();
+        let value = serde_json::to_value(info).unwrap();
+
+        assert_eq!(value["ParentalRatingOptions"][0]["Name"], "G");
+        assert_eq!(value["ParentalRatingOptions"][0]["Value"], 1);
+        assert_eq!(value["Countries"][0]["TwoLetterISORegionName"], "US");
+        assert_eq!(value["Countries"][0]["ThreeLetterISORegionName"], "USA");
+        assert_eq!(value["Cultures"][0]["TwoLetterISOLanguageName"], "en");
+        assert_eq!(
+            value["Cultures"][0]["ThreeLetterISOLanguageNames"][0],
+            "eng"
+        );
+        assert_eq!(value["ExternalIdInfos"][0]["Key"], "Tmdb");
+        assert_eq!(
+            value["ExternalIdInfos"][0]["UrlFormatString"],
+            "https://www.themoviedb.org/movie/{0}"
+        );
     }
 
     #[test]

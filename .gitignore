@@ -31,6 +31,7 @@ temp/
 
 # Local tool state
 .superpowers/
+.codegraph/
 
 # Editor and OS files
 .vscode/*

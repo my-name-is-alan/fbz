@@ -22,6 +22,7 @@ use crate::{
     library::repository::LibraryRepository,
     media::repository::{ArtworkRecord, MediaRepository},
     state::AppState,
+    users::repository::UsersRepository,
 };
 
 use super::access::authenticate_request_user;
@@ -29,7 +30,15 @@ use super::access::authenticate_request_user;
 const IMAGE_CACHE_CONTROL: &str = "public, max-age=86400";
 const MAX_ITEM_ID_LEN: usize = 128;
 const MAX_ITEM_IMAGE_MUTATION_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ENTITY_IMAGE_NAME_LEN: usize = 256;
+const MAX_GLOBAL_IMAGE_TEXT_LEN: usize = 128;
+const MAX_IMAGE_CACHE_TAG_LEN: usize = 128;
+const MAX_IMAGE_DIMENSION: i64 = 8192;
+const MAX_IMAGE_PERCENT_PLAYED: i64 = 100;
+const MAX_IMAGE_UNPLAYED_COUNT: i64 = 100_000;
+const MAX_USER_IMAGE_ID_LEN: usize = 128;
 const MAX_REMOTE_IMAGE_LIMIT: u32 = 100;
+const MAX_REMOTE_IMAGE_START_INDEX: u32 = 10_000;
 const MAX_REMOTE_IMAGE_PROVIDER_NAME_LEN: usize = 128;
 const MAX_REMOTE_IMAGE_URL_LEN: usize = 2048;
 const REMOTE_IMAGE_TYPES: &[&str] = &[
@@ -203,6 +212,71 @@ struct ItemImageMutationInput {
     body_len: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NamedEntityImageKind {
+    Artist,
+    Genre,
+    MusicGenre,
+    Person,
+    Studio,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NamedEntityImageInput {
+    kind: NamedEntityImageKind,
+    name: String,
+    image_type: String,
+    index: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UserImageInput {
+    user_id: String,
+    image_type: String,
+    index: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LongFormItemImageInput {
+    item_id: String,
+    image_type: String,
+    image_index: i32,
+    tag: String,
+    format: String,
+    max_width: i32,
+    max_height: i32,
+    percent_played: i32,
+    unplayed_count: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+enum GlobalImageKind {
+    General,
+    MediaInfo,
+    Ratings,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct GlobalImageInfoDto {
+    name: String,
+    theme: Option<String>,
+    r#type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GeneralImageInput {
+    name: String,
+    image_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThemedGlobalImageInput {
+    kind: GlobalImageKind,
+    theme: String,
+    name: String,
+}
+
 pub async fn item_image(
     State(state): State<AppState>,
     AxumPath((item_id, image_type)): AxumPath<(String, String)>,
@@ -219,6 +293,89 @@ pub async fn item_image_index(
     uri: Uri,
 ) -> Result<Response, AppError> {
     item_image_by_index(state, item_id, image_type, index, headers, uri).await
+}
+
+pub async fn item_image_long_form(
+    State(state): State<AppState>,
+    AxumPath((
+        item_id,
+        image_type,
+        index,
+        tag,
+        format,
+        max_width,
+        max_height,
+        percent_played,
+        unplayed_count,
+    )): AxumPath<(String, String, i64, String, String, i64, i64, i64, i64)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let input = long_form_item_image_input(
+        &item_id,
+        &image_type,
+        index,
+        &tag,
+        &format,
+        max_width,
+        max_height,
+        percent_played,
+        unplayed_count,
+    )?;
+    let _ = (
+        &input.tag,
+        &input.format,
+        input.max_width,
+        input.max_height,
+        input.percent_played,
+        input.unplayed_count,
+    );
+
+    item_image_by_index(
+        state,
+        input.item_id,
+        input.image_type,
+        i64::from(input.image_index),
+        headers,
+        uri,
+    )
+    .await
+}
+
+pub async fn named_entity_image(
+    State(state): State<AppState>,
+    AxumPath((name, image_type)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    named_entity_image_response(state, name, image_type, None, headers, uri).await
+}
+
+pub async fn named_entity_image_index(
+    State(state): State<AppState>,
+    AxumPath((name, image_type, index)): AxumPath<(String, String, i64)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    named_entity_image_response(state, name, image_type, Some(index), headers, uri).await
+}
+
+pub async fn user_image(
+    State(state): State<AppState>,
+    AxumPath((user_id, image_type)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    user_image_response(state, user_id, image_type, None, headers, uri).await
+}
+
+pub async fn user_image_index(
+    State(state): State<AppState>,
+    AxumPath((user_id, image_type, index)): AxumPath<(String, String, i64)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    user_image_response(state, user_id, image_type, Some(index), headers, uri).await
 }
 
 pub async fn upload_item_image(
@@ -441,6 +598,75 @@ pub async fn remote_image_proxy(
     ))
 }
 
+pub async fn global_image_catalog(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<GlobalImageInfoDto>>, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let _kind = global_image_catalog_kind(uri.path())?;
+
+    Ok(Json(Vec::new()))
+}
+
+pub async fn general_image(
+    State(state): State<AppState>,
+    AxumPath((name, image_type)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let input = general_image_input(&name, &image_type)?;
+    let _ = (&input.name, &input.image_type);
+
+    Err(AppError::not_found("general image not found"))
+}
+
+pub async fn themed_global_image(
+    State(state): State<AppState>,
+    AxumPath((theme, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let input = themed_global_image_input(uri.path(), &theme, &name)?;
+    let _ = (&input.kind, &input.theme, &input.name);
+
+    Err(AppError::not_found("global image not found"))
+}
+
+async fn named_entity_image_response(
+    state: AppState,
+    name: String,
+    image_type: String,
+    index: Option<i64>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let input = named_entity_image_input(uri.path(), &name, &image_type, index)?;
+    ensure_named_entity_visible(&state, user.id, &input).await?;
+    let _ = (&input.image_type, input.index);
+
+    Err(AppError::not_found("named entity image not found"))
+}
+
+async fn user_image_response(
+    state: AppState,
+    user_id: String,
+    image_type: String,
+    index: Option<i64>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let input = user_image_input(&user_id, &image_type, index)?;
+    ensure_user_image_target_visible(&state, &user, &input.user_id).await?;
+    let _ = (&input.image_type, input.index);
+
+    Err(AppError::not_found("user image not found"))
+}
+
 async fn item_image_by_index(
     state: AppState,
     item_id: String,
@@ -505,6 +731,78 @@ async fn ensure_user_can_access_item(
     Ok(())
 }
 
+async fn ensure_named_entity_visible(
+    state: &AppState,
+    user_id: i64,
+    input: &NamedEntityImageInput,
+) -> Result<(), AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let repository = LibraryRepository::new(database.clone());
+    let visible = match input.kind {
+        NamedEntityImageKind::Artist => repository
+            .find_user_artist_by_name(user_id, &input.name, false)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get artist: {err}")))?
+            .is_some(),
+        NamedEntityImageKind::Genre => repository
+            .find_user_genre_by_name(user_id, &input.name, false)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get genre: {err}")))?
+            .is_some(),
+        NamedEntityImageKind::MusicGenre => repository
+            .find_user_genre_by_name(user_id, &input.name, true)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get music genre: {err}")))?
+            .is_some(),
+        NamedEntityImageKind::Person => repository
+            .find_user_person_by_name(user_id, &input.name)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get person: {err}")))?
+            .is_some(),
+        NamedEntityImageKind::Studio => repository
+            .find_user_studio_by_name(user_id, &input.name)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get studio: {err}")))?
+            .is_some(),
+    };
+
+    if !visible {
+        return Err(AppError::not_found("named entity not found"));
+    }
+
+    Ok(())
+}
+
+async fn ensure_user_image_target_visible(
+    state: &AppState,
+    authenticated: &AuthenticatedUser,
+    requested_user_id: &str,
+) -> Result<(), AppError> {
+    if authenticated.public_id != requested_user_id && !authenticated.can_manage_server() {
+        return Err(AppError::forbidden(
+            "authenticated user does not match requested user",
+        ));
+    }
+
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let exists = UsersRepository::new(database.clone())
+        .find_user_by_public_id(requested_user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get user: {err}")))?
+        .is_some();
+    if !exists {
+        return Err(AppError::not_found("user not found"));
+    }
+
+    Ok(())
+}
+
 async fn local_artwork_response(
     artwork_cache_dir: &Path,
     storage_key: &str,
@@ -563,7 +861,10 @@ fn parse_optional_remote_image_download_body(
 fn remote_images_input(query: RemoteImagesQuery) -> Result<RemoteImagesInput, AppError> {
     Ok(RemoteImagesInput {
         image_type: normalize_optional_remote_image_type(query.r#type.as_deref())?,
-        start_index: query.start_index.unwrap_or(0),
+        start_index: query
+            .start_index
+            .unwrap_or(0)
+            .min(MAX_REMOTE_IMAGE_START_INDEX),
         limit: query.limit.unwrap_or(20).min(MAX_REMOTE_IMAGE_LIMIT),
         provider_name: normalize_optional_remote_image_text(
             "ProviderName",
@@ -667,6 +968,160 @@ fn item_image_url_input(
         image_url: Some(normalize_required_remote_image_url(query.url.as_deref())?),
         body_len: None,
     })
+}
+
+fn named_entity_image_input(
+    path: &str,
+    name: &str,
+    image_type: &str,
+    index: Option<i64>,
+) -> Result<NamedEntityImageInput, AppError> {
+    Ok(NamedEntityImageInput {
+        kind: named_entity_image_kind_from_path(path)?,
+        name: normalize_required_path_text("Name", name, MAX_ENTITY_IMAGE_NAME_LEN)?,
+        image_type: normalize_required_remote_image_type(Some(image_type))?,
+        index: normalize_nonnegative_i32_index(index.unwrap_or(0), "Index")?,
+    })
+}
+
+fn user_image_input(
+    user_id: &str,
+    image_type: &str,
+    index: Option<i64>,
+) -> Result<UserImageInput, AppError> {
+    Ok(UserImageInput {
+        user_id: normalize_required_path_text("Id", user_id, MAX_USER_IMAGE_ID_LEN)?,
+        image_type: normalize_required_remote_image_type(Some(image_type))?,
+        index: normalize_nonnegative_i32_index(index.unwrap_or(0), "Index")?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn long_form_item_image_input(
+    item_id: &str,
+    image_type: &str,
+    index: i64,
+    tag: &str,
+    format: &str,
+    max_width: i64,
+    max_height: i64,
+    percent_played: i64,
+    unplayed_count: i64,
+) -> Result<LongFormItemImageInput, AppError> {
+    Ok(LongFormItemImageInput {
+        item_id: normalize_required_path_text("item id", item_id, MAX_ITEM_ID_LEN)?,
+        image_type: normalize_required_remote_image_type(Some(image_type))?,
+        image_index: normalize_nonnegative_i32_index(index, "Index")?,
+        tag: normalize_required_path_text("Tag", tag, MAX_IMAGE_CACHE_TAG_LEN)?,
+        format: normalize_image_format(format)?,
+        max_width: normalize_bounded_positive_i32(max_width, "MaxWidth", MAX_IMAGE_DIMENSION)?,
+        max_height: normalize_bounded_positive_i32(max_height, "MaxHeight", MAX_IMAGE_DIMENSION)?,
+        percent_played: normalize_bounded_nonnegative_i32(
+            percent_played,
+            "PercentPlayed",
+            MAX_IMAGE_PERCENT_PLAYED,
+        )?,
+        unplayed_count: normalize_bounded_nonnegative_i32(
+            unplayed_count,
+            "UnplayedCount",
+            MAX_IMAGE_UNPLAYED_COUNT,
+        )?,
+    })
+}
+
+fn global_image_catalog_kind(path: &str) -> Result<GlobalImageKind, AppError> {
+    global_image_kind_from_path(path)
+}
+
+fn general_image_input(name: &str, image_type: &str) -> Result<GeneralImageInput, AppError> {
+    Ok(GeneralImageInput {
+        name: normalize_required_path_text("Name", name, MAX_GLOBAL_IMAGE_TEXT_LEN)?,
+        image_type: normalize_image_format(image_type)?,
+    })
+}
+
+fn themed_global_image_input(
+    path: &str,
+    theme: &str,
+    name: &str,
+) -> Result<ThemedGlobalImageInput, AppError> {
+    Ok(ThemedGlobalImageInput {
+        kind: global_image_kind_from_path(path)?,
+        theme: normalize_required_path_text("Theme", theme, MAX_GLOBAL_IMAGE_TEXT_LEN)?,
+        name: normalize_required_path_text("Name", name, MAX_GLOBAL_IMAGE_TEXT_LEN)?,
+    })
+}
+
+fn global_image_kind_from_path(path: &str) -> Result<GlobalImageKind, AppError> {
+    let mut segments = path.trim_start_matches('/').split('/');
+    let first = segments.next().unwrap_or_default();
+    let image_segment = if first.eq_ignore_ascii_case("emby") {
+        segments.next().unwrap_or_default()
+    } else {
+        first
+    };
+    if !image_segment.eq_ignore_ascii_case("images") {
+        return Err(AppError::not_found("global image route not found"));
+    }
+    let kind = segments.next().unwrap_or_default();
+
+    match kind.to_ascii_lowercase().as_str() {
+        "general" => Ok(GlobalImageKind::General),
+        "mediainfo" => Ok(GlobalImageKind::MediaInfo),
+        "ratings" => Ok(GlobalImageKind::Ratings),
+        _ => Err(AppError::not_found("global image route not found")),
+    }
+}
+
+fn named_entity_image_kind_from_path(path: &str) -> Result<NamedEntityImageKind, AppError> {
+    let mut segments = path.trim_start_matches('/').split('/');
+    let first = segments.next().unwrap_or_default();
+    let segment = if first.eq_ignore_ascii_case("emby") {
+        segments.next().unwrap_or_default()
+    } else {
+        first
+    };
+
+    match segment.to_ascii_lowercase().as_str() {
+        "artists" => Ok(NamedEntityImageKind::Artist),
+        "genres" => Ok(NamedEntityImageKind::Genre),
+        "musicgenres" => Ok(NamedEntityImageKind::MusicGenre),
+        "persons" => Ok(NamedEntityImageKind::Person),
+        "studios" => Ok(NamedEntityImageKind::Studio),
+        _ => Err(AppError::not_found("named entity image route not found")),
+    }
+}
+
+fn normalize_image_format(value: &str) -> Result<String, AppError> {
+    let format = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    match format.as_str() {
+        "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "avif" => Ok(format),
+        _ => Err(AppError::unprocessable("Format is invalid")),
+    }
+}
+
+fn normalize_bounded_positive_i32(
+    value: i64,
+    field: &'static str,
+    max: i64,
+) -> Result<i32, AppError> {
+    if value <= 0 || value > max {
+        return Err(AppError::unprocessable(format!("{field} is invalid")));
+    }
+
+    Ok(value as i32)
+}
+
+fn normalize_bounded_nonnegative_i32(
+    value: i64,
+    field: &'static str,
+    max: i64,
+) -> Result<i32, AppError> {
+    if value < 0 || value > max {
+        return Err(AppError::unprocessable(format!("{field} is invalid")));
+    }
+
+    Ok(value as i32)
 }
 
 fn normalize_item_image_index(
@@ -1067,6 +1522,19 @@ mod tests {
     }
 
     #[test]
+    fn remote_image_query_clamps_pathologically_large_start_index() {
+        let input = remote_images_input(RemoteImagesQuery {
+            start_index: Some(500_000),
+            limit: Some(20),
+            ..RemoteImagesQuery::default()
+        })
+        .expect("remote image query should normalize");
+
+        assert_eq!(input.start_index, 10_000);
+        assert_eq!(input.limit, 20);
+    }
+
+    #[test]
     fn remote_image_result_serializes_official_pascal_case() {
         let value = serde_json::to_value(RemoteImageResultDto {
             images: Vec::new(),
@@ -1241,6 +1709,108 @@ mod tests {
             .unwrap_err()
             .status_code(),
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn named_entity_image_input_normalizes_kind_name_type_and_index() {
+        let input = named_entity_image_input(
+            "/emby/MusicGenres/Rock/Images/primary/2",
+            " Rock ",
+            " primary ",
+            Some(2),
+        )
+        .expect("named entity image path should normalize");
+
+        assert_eq!(input.kind, NamedEntityImageKind::MusicGenre);
+        assert_eq!(input.name, "Rock");
+        assert_eq!(input.image_type, "Primary");
+        assert_eq!(input.index, 2);
+    }
+
+    #[test]
+    fn user_image_input_normalizes_user_type_and_rejects_unsafe_values() {
+        let input = user_image_input(" user-1 ", "primary", Some(0))
+            .expect("user image path should normalize");
+
+        assert_eq!(input.user_id, "user-1");
+        assert_eq!(input.image_type, "Primary");
+        assert_eq!(input.index, 0);
+
+        assert!(
+            named_entity_image_input("/Artists/Bad/Images/Primary", "bad/name", "Primary", None)
+                .is_err()
+        );
+        assert!(user_image_input("user-1", "../Primary", Some(0)).is_err());
+        assert!(user_image_input("user-1", "Primary", Some(-1)).is_err());
+    }
+
+    #[test]
+    fn long_form_item_image_input_normalizes_cache_path_fields() {
+        let input =
+            long_form_item_image_input(" item-1 ", "primary", 1, " tag-1 ", "jpg", 640, 360, 42, 1)
+                .expect("long-form image path should normalize");
+
+        assert_eq!(input.item_id, "item-1");
+        assert_eq!(input.image_type, "Primary");
+        assert_eq!(input.image_index, 1);
+        assert_eq!(input.tag, "tag-1");
+        assert_eq!(input.format, "jpg");
+        assert_eq!(input.max_width, 640);
+        assert_eq!(input.max_height, 360);
+        assert_eq!(input.percent_played, 42);
+        assert_eq!(input.unplayed_count, 1);
+
+        assert!(
+            long_form_item_image_input("item-1", "Primary", 0, "../tag", "jpg", 0, 360, 0, 0,)
+                .is_err()
+        );
+        assert!(
+            long_form_item_image_input(
+                "item-1",
+                "Primary",
+                0,
+                "tag",
+                "bad/format",
+                640,
+                360,
+                0,
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            long_form_item_image_input("item-1", "Primary", 0, "tag", "jpg", 100_000, 360, 0, 0,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn global_image_inputs_normalize_catalog_and_detail_paths() {
+        assert_eq!(
+            global_image_catalog_kind("/emby/Images/MediaInfo").unwrap(),
+            GlobalImageKind::MediaInfo
+        );
+        assert_eq!(
+            global_image_catalog_kind("/Images/Ratings").unwrap(),
+            GlobalImageKind::Ratings
+        );
+
+        let general = general_image_input(" logo ", "png").expect("general image should normalize");
+        assert_eq!(general.name, "logo");
+        assert_eq!(general.image_type, "png");
+
+        let themed =
+            themed_global_image_input("/emby/Images/Ratings/Dark/PG-13", " Dark ", " PG-13 ")
+                .expect("themed image should normalize");
+        assert_eq!(themed.kind, GlobalImageKind::Ratings);
+        assert_eq!(themed.theme, "Dark");
+        assert_eq!(themed.name, "PG-13");
+
+        assert!(general_image_input("../logo", "png").is_err());
+        assert!(general_image_input("logo", "bad/type").is_err());
+        assert!(
+            themed_global_image_input("/Images/MediaInfo/Dark/Play", "Dark/Mode", "Play").is_err()
         );
     }
 

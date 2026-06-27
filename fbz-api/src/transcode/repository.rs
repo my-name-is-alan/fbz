@@ -226,8 +226,17 @@ const TRANSCODE_FIND_HLS_SESSION_SQL: &str = r#"
             "#;
 
 const EXPIRE_STALE_TRANSCODE_LEASES_SQL: &str = r#"
-        with expired_sessions as (
-            update transcoding_sessions
+        with stale_session_candidates as (
+            select id
+            from transcoding_sessions
+            where status = 'running'
+              and lease_expires_at <= now()
+            order by lease_expires_at asc, id asc
+            limit 1000
+            for update skip locked
+        ),
+        expired_sessions as (
+            update transcoding_sessions as sessions
             set status = case
                     when attempts >= max_attempts then 'failed'
                     else 'queued'
@@ -243,10 +252,10 @@ const EXPIRE_STALE_TRANSCODE_LEASES_SQL: &str = r#"
                     else finished_at
                 end,
                 updated_at = now()
-            where status = 'running'
-              and lease_expires_at <= now()
-            returning id,
-                      attempts < max_attempts as retryable
+            from stale_session_candidates candidates
+            where sessions.id = candidates.id
+            returning sessions.id,
+                      sessions.attempts < sessions.max_attempts as retryable
         )
         select count(*)::bigint as expired_sessions,
                count(*) filter (where retryable)::bigint as retryable_sessions,
@@ -263,7 +272,7 @@ const TRANSCODE_UPDATE_TERMINAL_STATUS_SQL: &str = r#"
             finished_at = coalesce(finished_at, now()),
             updated_at = now()
         where public_id = case
-            when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
             then $1::uuid
             else null::uuid
         end
@@ -557,11 +566,17 @@ impl TranscodeRepository {
         let active_count = sqlx::query_scalar::<_, i64>(
             r#"
             select count(*)::bigint
-            from transcoding_sessions
-            where status = 'running'
-              and lease_expires_at > now()
+            from (
+                select 1
+                from transcoding_sessions
+                where status = 'running'
+                  and lease_expires_at > now()
+                order by lease_expires_at asc, id asc
+                limit $1
+            ) active_sessions
             "#,
         )
+        .bind(i64::from(max_concurrent))
         .fetch_one(&mut *tx)
         .await?;
 
@@ -774,6 +789,8 @@ mod tests {
     const REPOSITORY_SOURCE: &str = include_str!("repository.rs");
     const TRANSCODE_ADMIN_KEYSET_INDEX_MIGRATION: &str =
         include_str!("../../migrations/0053_transcode_session_admin_keyset_indexes.sql");
+    const TRANSCODE_LEASE_MIGRATION: &str =
+        include_str!("../../migrations/0013_transcode_queue_leases.sql");
 
     #[test]
     fn output_base_path_trims_trailing_separators() {
@@ -910,6 +927,41 @@ mod tests {
     }
 
     #[test]
+    fn stale_transcode_lease_recovery_uses_bounded_locked_candidate_batch() {
+        let normalized = EXPIRE_STALE_TRANSCODE_LEASES_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(normalized.contains("with stale_session_candidates as"));
+        assert!(normalized.contains("from transcoding_sessions"));
+        assert!(normalized.contains("where status = 'running'"));
+        assert!(normalized.contains("lease_expires_at <= now()"));
+        assert!(normalized.contains("order by lease_expires_at asc, id asc"));
+        assert!(normalized.contains("limit 1000"));
+        assert!(normalized.contains("for update skip locked"));
+        assert!(normalized.contains("from stale_session_candidates candidates"));
+        assert!(normalized.contains("sessions.id = candidates.id"));
+        assert!(
+            !normalized.contains("), with expired_sessions as"),
+            "stale transcode recovery should use one WITH clause with comma-separated CTEs"
+        );
+        assert!(
+            !normalized.contains("update transcoding_sessions set status = case when attempts"),
+            "stale transcode recovery should not update every expired running session directly"
+        );
+    }
+
+    #[test]
+    fn stale_transcode_lease_recovery_index_matches_candidate_batch_shape() {
+        assert!(TRANSCODE_LEASE_MIGRATION.contains("idx_transcoding_sessions_running_lease"));
+        assert!(
+            TRANSCODE_LEASE_MIGRATION.contains("on transcoding_sessions (lease_expires_at, id)")
+        );
+        assert!(TRANSCODE_LEASE_MIGRATION.contains("where status = 'running'"));
+    }
+
+    #[test]
     fn stale_transcode_lease_recovery_reports_structured_summary_fields() {
         let production_source = REPOSITORY_SOURCE
             .split("#[cfg(test)]")
@@ -923,6 +975,100 @@ mod tests {
         assert!(production_source.contains("retryable_sessions = summary.retryable_sessions"));
         assert!(production_source.contains("terminal_sessions = summary.terminal_sessions"));
         assert!(production_source.contains("recovered stale transcode sessions"));
+    }
+
+    #[test]
+    fn claim_next_uses_bounded_capacity_probe() {
+        let claim_start = REPOSITORY_SOURCE
+            .find("pub async fn claim_next")
+            .expect("claim_next should exist");
+        let claim_end = REPOSITORY_SOURCE[claim_start..]
+            .find("pub async fn mark_succeeded")
+            .map(|offset| claim_start + offset)
+            .expect("claim_next should be followed by terminal update methods");
+        let claim_source = &REPOSITORY_SOURCE[claim_start..claim_end];
+
+        assert!(
+            !claim_source
+                .contains("select count(*)::bigint\n            from transcoding_sessions"),
+            "claim_next should not exact-count every active transcode session"
+        );
+        assert!(
+            claim_source.contains(
+                "from (\n                select 1\n                from transcoding_sessions"
+            ),
+            "claim_next should count only a bounded running-session probe"
+        );
+        assert!(
+            claim_source.contains("limit $1"),
+            "claim_next capacity probe should be bounded by max_concurrent"
+        );
+    }
+
+    // Live-DB smoke: validates stale transcode lease recovery parses and plans
+    // against the migrated schema. Plain EXPLAIN does not execute the UPDATE,
+    // so this does not mutate any transcode sessions.
+    //   cargo test -- --ignored stale_transcode_lease_recovery_sql_plans_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn stale_transcode_lease_recovery_sql_plans_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let plan_rows = sqlx::query(&format!("explain {EXPIRE_STALE_TRANSCODE_LEASES_SQL}"))
+            .fetch_all(&pool)
+            .await
+            .expect("stale transcode lease recovery SQL should parse and plan");
+        assert!(
+            !plan_rows.is_empty(),
+            "EXPLAIN should return a query plan for stale transcode lease recovery"
+        );
+    }
+
+    // Live-DB smoke: validates the bounded capacity probe used before claiming
+    // transcode work. This is a read-only SELECT and does not mutate sessions.
+    //   cargo test -- --ignored transcode_claim_capacity_probe_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn transcode_claim_capacity_probe_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let active_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            select count(*)::bigint
+            from (
+                select 1
+                from transcoding_sessions
+                where status = 'running'
+                  and lease_expires_at > now()
+                order by lease_expires_at asc, id asc
+                limit $1
+            ) active_sessions
+            "#,
+        )
+        .bind(3_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("transcode claim capacity probe should execute against live schema");
+
+        assert!(active_count <= 3);
     }
 }
 

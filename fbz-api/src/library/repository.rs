@@ -3,6 +3,157 @@ use sqlx::{Row, postgres::PgRow};
 use crate::db::DbPool;
 
 const USER_VIEW_LIMIT: i64 = 1_000;
+const LIST_USER_PLAYLISTS_SQL: &str = r#"
+            with requested_parent as (
+                select case
+                    when $2::text is null then null::uuid
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            visible_playlists as (
+                select
+                    c.id as internal_id,
+                    c.public_id::text as id,
+                    c.name
+                from collections c
+                left join libraries l on l.id = c.library_id
+                left join library_permissions lp on lp.library_id = c.library_id
+                    and lp.user_id = $1
+                cross join requested_parent rp
+                where (
+                        $2::text is null
+                     or (
+                            c.library_id is not null
+                        and l.public_id = rp.public_id
+                     )
+                  )
+                  and (
+                        c.library_id is null
+                     or (
+                            lp.can_view = true
+                        and l.is_hidden = false
+                     )
+                  )
+                  and (
+                        c.library_id is not null
+                     or exists (
+                            select 1
+                            from collection_items ci_visible
+                            join media_items mi_visible
+                              on mi_visible.id = ci_visible.media_item_id
+                            join libraries l_visible
+                              on l_visible.id = mi_visible.library_id
+                            join library_permissions lp_visible
+                              on lp_visible.library_id = mi_visible.library_id
+                            where ci_visible.collection_id = c.id
+                              and lp_visible.user_id = $1
+                              and lp_visible.can_view = true
+                              and mi_visible.is_deleted = false
+                              and l_visible.is_hidden = false
+                     )
+                  )
+                  and (
+                        $5::text is null
+                     or lower(c.name) like '%' || lower($5::text) || '%'
+                  )
+            )
+            select
+                id,
+                name
+            from visible_playlists
+            order by
+                case when $6 = 'asc' then lower(name) end asc nulls last,
+                case when $6 = 'desc' then lower(name) end desc nulls last,
+                internal_id asc
+            limit $3 + 1
+            offset $4
+            "#;
+const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
+            with requested_playlist as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            ),
+            playlist_scope as (
+                select c.id
+                from collections c
+                left join libraries playlist_library
+                  on playlist_library.id = c.library_id
+                left join library_permissions playlist_permission
+                  on playlist_permission.library_id = c.library_id
+                 and playlist_permission.user_id = $1
+                cross join requested_playlist requested
+                where c.public_id = requested.public_id
+                  and (
+                        c.library_id is null
+                     or (
+                            playlist_permission.can_view = true
+                        and playlist_library.is_hidden = false
+                     )
+                  )
+            )
+            select
+                mi.public_id::text as id,
+                mi.title as name,
+                mi.item_type,
+                parent.public_id::text as parent_id,
+                coalesce(mi.runtime_ticks, primary_file.duration_ticks) as runtime_ticks,
+                primary_file.media_file_id,
+                primary_file.file_size as media_file_size,
+                primary_file.container as media_file_container,
+                primary_file.bitrate as media_file_bitrate,
+                primary_file.is_strm as media_file_is_strm,
+                (u.allow_transcode and lp.can_transcode) as supports_transcoding,
+                mi.production_year,
+                coalesce(up.position_ticks, 0) as playback_position_ticks,
+                coalesce(up.play_count, 0) as play_count,
+                coalesce(up.is_favorite, false) as is_favorite,
+                up.rating::double precision as rating,
+                coalesce(up.played, false) as played,
+                case
+                    when $5::boolean = true then coalesce(item_images.image_tags, array[]::text[])
+                    else array[]::text[]
+                end as image_tags
+            from playlist_scope scope
+            join collection_items ci on ci.collection_id = scope.id
+            join media_items mi on mi.id = ci.media_item_id
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+            join users u on u.id = lp.user_id
+            left join media_items parent on parent.id = mi.parent_id
+            left join lateral (
+                select mf.id as media_file_id,
+                       mf.file_size,
+                       mf.container,
+                       mf.duration_ticks,
+                       mf.bitrate,
+                       mf.is_strm
+                from media_files mf
+                where mf.media_item_id = mi.id
+                order by mf.is_primary desc, mf.id
+                limit 1
+            ) primary_file on true
+            left join user_playstates up on up.user_id = $1
+                and up.media_item_id = mi.id
+            left join lateral (
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                from artwork a
+                where a.media_item_id = mi.id
+            ) item_images on $5::boolean = true
+            where lp.user_id = $1
+              and lp.can_view = true
+              and mi.is_deleted = false
+              and l.is_hidden = false
+            order by ci.sort_order asc,
+                     coalesce(nullif(mi.sort_title, ''), mi.title) asc,
+                     mi.id asc
+            limit $3 + 1
+            offset $4
+            "#;
 
 #[derive(Clone)]
 pub struct LibraryRepository {
@@ -915,22 +1066,129 @@ impl LibraryRepository {
     pub async fn count_user_items(&self, user_id: i64) -> Result<ItemCountsRecord, sqlx::Error> {
         sqlx::query(
             r#"
+            with item_count_sample_limit as (
+                select 10000::bigint as lower_bound_count
+            ),
+            allowed_libraries as (
+                select l.id
+                from libraries l
+                join library_permissions lp on lp.library_id = l.id
+                where lp.user_id = $1
+                  and lp.can_view = true
+                  and l.is_hidden = false
+            )
             select
-                count(*) filter (where mi.item_type = 'movie') as movie_count,
-                count(*) filter (where mi.item_type = 'series') as series_count,
-                count(*) filter (where mi.item_type = 'episode') as episode_count,
-                count(*) filter (where mi.item_type = 'artist') as artist_count,
-                count(*) filter (where mi.item_type = 'track') as song_count,
-                count(*) filter (where mi.item_type = 'album') as album_count,
-                count(*) filter (where mi.item_type = 'collection') as box_set_count,
-                count(*) as item_count
-            from media_items mi
-            join libraries l on l.id = mi.library_id
-            join library_permissions lp on lp.library_id = mi.library_id
-            where lp.user_id = $1
-              and lp.can_view = true
-              and mi.is_deleted = false
-              and l.is_hidden = false
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                          and mi.item_type = 'movie'
+                        limit 10001
+                    ) movie_count_sample
+                ) as movie_count,
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                          and mi.item_type = 'series'
+                        limit 10001
+                    ) series_count_sample
+                ) as series_count,
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                          and mi.item_type = 'episode'
+                        limit 10001
+                    ) episode_count_sample
+                ) as episode_count,
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                          and mi.item_type = 'artist'
+                        limit 10001
+                    ) artist_count_sample
+                ) as artist_count,
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                          and mi.item_type = 'track'
+                        limit 10001
+                    ) song_count_sample
+                ) as song_count,
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                          and mi.item_type = 'album'
+                        limit 10001
+                    ) album_count_sample
+                ) as album_count,
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                          and mi.item_type = 'collection'
+                        limit 10001
+                    ) box_set_count_sample
+                ) as box_set_count,
+                (
+                    select least(
+                        count(*),
+                        (select lower_bound_count from item_count_sample_limit)
+                    )::bigint
+                    from (
+                        select 1
+                        from media_items mi
+                        join allowed_libraries al on al.id = mi.library_id
+                        where mi.is_deleted = false
+                        limit 10001
+                    ) visible_item_sample
+                ) as item_count
             "#,
         )
         .bind(user_id)
@@ -943,188 +1201,33 @@ impl LibraryRepository {
         &self,
         input: PlaylistListInput,
     ) -> Result<PlaylistListResult, sqlx::Error> {
-        let rows = sqlx::query(
-            r#"
-            with requested_parent as (
-                select case
-                    when $2::text is null then null::uuid
-                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    then $2::uuid
-                    else null::uuid
-                end as public_id
-            ),
-            visible_playlists as (
-                select
-                    c.id as internal_id,
-                    c.public_id::text as id,
-                    c.name
-                from collections c
-                left join libraries l on l.id = c.library_id
-                left join library_permissions lp on lp.library_id = c.library_id
-                    and lp.user_id = $1
-                cross join requested_parent rp
-                where (
-                        $2::text is null
-                     or (
-                            c.library_id is not null
-                        and l.public_id = rp.public_id
-                     )
-                  )
-                  and (
-                        c.library_id is null
-                     or (
-                            lp.can_view = true
-                        and l.is_hidden = false
-                     )
-                  )
-                  and (
-                        c.library_id is not null
-                     or exists (
-                            select 1
-                            from collection_items ci_visible
-                            join media_items mi_visible
-                              on mi_visible.id = ci_visible.media_item_id
-                            join libraries l_visible
-                              on l_visible.id = mi_visible.library_id
-                            join library_permissions lp_visible
-                              on lp_visible.library_id = mi_visible.library_id
-                            where ci_visible.collection_id = c.id
-                              and lp_visible.user_id = $1
-                              and lp_visible.can_view = true
-                              and mi_visible.is_deleted = false
-                              and l_visible.is_hidden = false
-                     )
-                  )
-                  and (
-                        $5::text is null
-                     or lower(c.name) like '%' || lower($5::text) || '%'
-                  )
-            )
-            select
-                id,
-                name,
-                count(*) over() as total_record_count
-            from visible_playlists
-            order by
-                case when $6 = 'asc' then lower(name) end asc nulls last,
-                case when $6 = 'desc' then lower(name) end desc nulls last,
-                internal_id asc
-            limit $3
-            offset $4
-            "#,
-        )
-        .bind(input.user_id)
-        .bind(input.parent_id)
-        .bind(input.limit)
-        .bind(input.start_index)
-        .bind(input.search_term)
-        .bind(input.sort_direction.as_sql_key())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(LIST_USER_PLAYLISTS_SQL)
+            .bind(input.user_id)
+            .bind(input.parent_id)
+            .bind(input.limit)
+            .bind(input.start_index)
+            .bind(input.search_term)
+            .bind(input.sort_direction.as_sql_key())
+            .fetch_all(&self.pool)
+            .await?;
 
-        playlist_result_from_rows(rows)
+        playlist_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_user_playlist_items(
         &self,
         input: PlaylistItemsInput,
     ) -> Result<BrowseItemsResult, sqlx::Error> {
-        let rows = sqlx::query(
-            r#"
-            with requested_playlist as (
-                select case
-                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    then $2::uuid
-                    else null::uuid
-                end as public_id
-            ),
-            playlist_scope as (
-                select c.id
-                from collections c
-                left join libraries playlist_library
-                  on playlist_library.id = c.library_id
-                left join library_permissions playlist_permission
-                  on playlist_permission.library_id = c.library_id
-                 and playlist_permission.user_id = $1
-                cross join requested_playlist requested
-                where c.public_id = requested.public_id
-                  and (
-                        c.library_id is null
-                     or (
-                            playlist_permission.can_view = true
-                        and playlist_library.is_hidden = false
-                     )
-                  )
-            )
-            select
-                mi.public_id::text as id,
-                mi.title as name,
-                mi.item_type,
-                parent.public_id::text as parent_id,
-                coalesce(mi.runtime_ticks, primary_file.duration_ticks) as runtime_ticks,
-                primary_file.media_file_id,
-                primary_file.file_size as media_file_size,
-                primary_file.container as media_file_container,
-                primary_file.bitrate as media_file_bitrate,
-                primary_file.is_strm as media_file_is_strm,
-                (u.allow_transcode and lp.can_transcode) as supports_transcoding,
-                mi.production_year,
-                coalesce(up.position_ticks, 0) as playback_position_ticks,
-                coalesce(up.play_count, 0) as play_count,
-                coalesce(up.is_favorite, false) as is_favorite,
-                up.rating::double precision as rating,
-                coalesce(up.played, false) as played,
-                case
-                    when $5::boolean = true then coalesce(item_images.image_tags, array[]::text[])
-                    else array[]::text[]
-                end as image_tags,
-                count(*) over() as total_record_count
-            from playlist_scope scope
-            join collection_items ci on ci.collection_id = scope.id
-            join media_items mi on mi.id = ci.media_item_id
-            join libraries l on l.id = mi.library_id
-            join library_permissions lp on lp.library_id = mi.library_id
-            join users u on u.id = lp.user_id
-            left join media_items parent on parent.id = mi.parent_id
-            left join lateral (
-                select mf.id as media_file_id,
-                       mf.file_size,
-                       mf.container,
-                       mf.duration_ticks,
-                       mf.bitrate,
-                       mf.is_strm
-                from media_files mf
-                where mf.media_item_id = mi.id
-                order by mf.is_primary desc, mf.id
-                limit 1
-            ) primary_file on true
-            left join user_playstates up on up.user_id = $1
-                and up.media_item_id = mi.id
-            left join lateral (
-                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
-                from artwork a
-                where a.media_item_id = mi.id
-            ) item_images on $5::boolean = true
-            where lp.user_id = $1
-              and lp.can_view = true
-              and mi.is_deleted = false
-              and l.is_hidden = false
-            order by ci.sort_order asc,
-                     coalesce(nullif(mi.sort_title, ''), mi.title) asc,
-                     mi.id asc
-            limit $3
-            offset $4
-            "#,
-        )
-        .bind(input.user_id)
-        .bind(input.playlist_id)
-        .bind(input.limit)
-        .bind(input.start_index)
-        .bind(input.include_image_tags)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(LIST_USER_PLAYLIST_ITEMS_SQL)
+            .bind(input.user_id)
+            .bind(input.playlist_id)
+            .bind(input.limit)
+            .bind(input.start_index)
+            .bind(input.include_image_tags)
+            .fetch_all(&self.pool)
+            .await?;
 
-        browse_result_from_rows(rows)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_user_item_filters(
@@ -1380,13 +1483,13 @@ impl LibraryRepository {
             select
                 id,
                 name,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from genre_candidates
             order by
                 case when $10 = 'asc' then lower(name) end asc nulls last,
                 case when $10 = 'desc' then lower(name) end desc nulls last,
                 id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -1403,7 +1506,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        genre_result_from_rows(rows)
+        genre_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn find_user_genre_by_name(
@@ -1535,13 +1638,13 @@ impl LibraryRepository {
             select
                 id,
                 name,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from studio_candidates
             order by
                 case when $9 = 'asc' then lower(name) end asc nulls last,
                 case when $9 = 'desc' then lower(name) end desc nulls last,
                 id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -1557,7 +1660,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        studio_result_from_rows(rows)
+        studio_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn find_user_studio_by_name(
@@ -1679,13 +1782,13 @@ impl LibraryRepository {
             select
                 id,
                 name,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from tag_candidates
             order by
                 case when $9 = 'asc' then lower(name) end asc nulls last,
                 case when $9 = 'desc' then lower(name) end desc nulls last,
                 id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -1701,7 +1804,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        tag_result_from_rows(rows)
+        tag_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_user_official_ratings(
@@ -1787,13 +1890,13 @@ impl LibraryRepository {
             )
             select
                 name,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from rating_candidates
             order by
                 case when $9 = 'asc' then lower(name) end asc nulls last,
                 case when $9 = 'desc' then lower(name) end desc nulls last,
                 name asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -1809,7 +1912,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        official_rating_result_from_rows(rows)
+        official_rating_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_user_years(
@@ -1894,13 +1997,13 @@ impl LibraryRepository {
             )
             select
                 year,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from year_candidates
             order by
                 case when $9 = 'asc' then year end asc nulls last,
                 case when $9 = 'desc' then year end desc nulls last,
                 year asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -1916,7 +2019,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        year_result_from_rows(rows)
+        year_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_user_technical_facets(
@@ -2060,13 +2163,13 @@ impl LibraryRepository {
             select
                 name as id,
                 name,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from filtered_facets
             order by
                 case when $10 = 'asc' then lower(name) end asc nulls last,
                 case when $10 = 'desc' then lower(name) end desc nulls last,
                 name asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -2083,7 +2186,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        technical_facet_result_from_rows(rows)
+        technical_facet_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_user_artists(
@@ -2094,7 +2197,7 @@ impl LibraryRepository {
             r#"
             with recursive requested_parent as (
                 select case
-                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     then $2::uuid
                     else null::uuid
                 end as public_id
@@ -2102,7 +2205,7 @@ impl LibraryRepository {
             requested_album_ids as (
                 select distinct album_id::uuid as public_id
                 from unnest($14::text[]) as album_id
-                where album_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                where album_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
             ),
             allowed_libraries as (
                 select l.id,
@@ -2245,13 +2348,13 @@ impl LibraryRepository {
             select
                 id,
                 name,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from artist_candidates
             order by
                 case when $10 = 'asc' then lower(name) end asc nulls last,
                 case when $10 = 'desc' then lower(name) end desc nulls last,
                 id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -2272,7 +2375,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        artist_result_from_rows(rows)
+        artist_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn find_user_artist_by_name(
@@ -2354,7 +2457,7 @@ impl LibraryRepository {
             r#"
             with recursive requested_parent as (
                 select case
-                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     then $2::uuid
                     else null::uuid
                 end as public_id
@@ -2435,13 +2538,13 @@ impl LibraryRepository {
             select
                 id,
                 name,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from person_candidates
             order by
                 case when $11 = 'asc' then lower(name) end asc nulls last,
                 case when $11 = 'desc' then lower(name) end desc nulls last,
                 id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -2459,7 +2562,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        person_result_from_rows(rows)
+        person_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn find_user_person_by_name(
@@ -2621,7 +2724,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from media_items mi
             join browse_scope scope on scope.library_id = mi.library_id
             left join media_items parent on parent.id = mi.parent_id
@@ -2970,7 +3073,7 @@ impl LibraryRepository {
                 case when $71 = 'asc' then mi.id end asc,
                 case when $71 = 'desc' then mi.id end desc,
                 mi.id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -3052,22 +3155,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let total_record_count = rows
-            .first()
-            .map(|row| row.try_get::<i64, _>("total_record_count"))
-            .transpose()?
-            .unwrap_or(0)
-            .try_into()
-            .unwrap_or(u32::MAX);
-        let items = rows
-            .into_iter()
-            .map(MediaItemBrowseRecord::from_row)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(BrowseItemsResult {
-            items,
-            total_record_count,
-        })
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     async fn list_user_items_from_playstates(
@@ -3162,7 +3250,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from state_items up
             join media_items mi on mi.id = up.media_item_id
             join browse_scope scope on scope.library_id = mi.library_id
@@ -3206,7 +3294,7 @@ impl LibraryRepository {
                 case when $15 = 'asc' then mi.id end asc,
                 case when $15 = 'desc' then mi.id end desc,
                 mi.id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -3234,7 +3322,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        browse_result_from_rows(rows)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_user_item_prefixes(
@@ -3321,7 +3409,7 @@ impl LibraryRepository {
             from prefix_candidates
             where prefix <> ''
             order by lower(prefix), prefix
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -3339,7 +3427,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(ItemPrefixRecord::from_row).collect()
+        item_prefix_records_from_rows(rows, input.limit)
     }
 
     async fn list_user_items_by_include_ids(
@@ -3423,7 +3511,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from requested_ids requested
             join media_items mi on mi.public_id = requested.public_id
             join browse_scope scope on scope.library_id = mi.library_id
@@ -3469,7 +3557,7 @@ impl LibraryRepository {
                 case when $11 = 'asc' then mi.id end asc,
                 case when $11 = 'desc' then mi.id end desc,
                 mi.id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -3487,7 +3575,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        browse_result_from_rows(rows)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     async fn list_user_items_by_provider_ids(
@@ -3572,7 +3660,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from provider_items provider_match
             join media_items mi on mi.id = provider_match.media_item_id
             join browse_scope scope on scope.library_id = mi.library_id
@@ -3618,7 +3706,7 @@ impl LibraryRepository {
                 case when $11 = 'asc' then mi.id end asc,
                 case when $11 = 'desc' then mi.id end desc,
                 mi.id asc
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -3636,7 +3724,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        browse_result_from_rows(rows)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_resume_items(
@@ -3804,7 +3892,7 @@ impl LibraryRepository {
                 case when $8 = 'asc' then mi.id end asc,
                 case when $8 = 'desc' then mi.id end desc,
                 mi.id asc
-            limit $2
+            limit $2 + 1
             offset $3
             "#,
         )
@@ -3819,7 +3907,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        browse_result_from_rows(rows)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_similar_items(
@@ -3936,6 +4024,62 @@ impl LibraryRepository {
         browse_result_lower_bound_from_rows(rows, input.start_index, input.limit).map(Some)
     }
 
+    /// Resolve the distinct genre ids associated with a seed media item for an
+    /// item-seeded instant mix (`Songs/{Id}/InstantMix`, `Albums/{Id}/InstantMix`,
+    /// `Items/{Id}/InstantMix`). Permission filtering happens inside the query:
+    /// the seed must be visible to the user (granted library, `can_view`, library
+    /// not hidden, item not deleted) for its genres to surface, so upper layers do
+    /// not need to re-check visibility. Returns `None` when the seed item is not
+    /// visible/not found so the caller can answer 404 (matching
+    /// [`Self::list_similar_items`]); returns `Some(ids)` (possibly empty) when the
+    /// seed is visible, so a genre-less seed yields an empty mix rather than an
+    /// unrelated Audio listing. The seed `public_id` is compared with the same
+    /// index-friendly `case ... uuid` guard used elsewhere, so a malformed id
+    /// simply matches nothing.
+    pub async fn list_instant_mix_seed_genre_ids(
+        &self,
+        user_id: i64,
+        item_id: &str,
+    ) -> Result<Option<Vec<i64>>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select distinct mig.genre_id
+            from media_items mi
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+            join media_item_genres mig on mig.media_item_id = mi.id
+            where mi.public_id = case
+                when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $2::uuid
+                else null::uuid
+            end
+              and lp.user_id = $1
+              and lp.can_view = true
+              and mi.is_deleted = false
+              and l.is_hidden = false
+            order by mig.genre_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(item_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let genre_ids = rows
+            .into_iter()
+            .map(|row| row.try_get::<i64, _>("genre_id"))
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        if !genre_ids.is_empty() {
+            return Ok(Some(genre_ids));
+        }
+
+        // No genre rows: a visible but genre-less seed (empty mix) must be
+        // distinguished from a missing/invisible seed (404). Reuse the proven
+        // visibility lookup so the permission boundary stays identical.
+        let visible = self.find_user_item_by_id(user_id, item_id).await?.is_some();
+        Ok(visible.then(Vec::new))
+    }
+
     pub async fn list_series_seasons(
         &self,
         input: ShowItemsInput,
@@ -3961,7 +4105,7 @@ impl LibraryRepository {
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
                 array[]::text[] as image_tags,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from media_items series
             join libraries l on l.id = series.library_id
             join library_permissions lp on lp.library_id = series.library_id
@@ -3997,7 +4141,7 @@ impl LibraryRepository {
             order by season.index_number nulls last,
                      season.sort_title,
                      season.id
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -4010,7 +4154,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        browse_result_from_rows(rows)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_series_episodes(
@@ -4079,7 +4223,7 @@ impl LibraryRepository {
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
                 array[]::text[] as image_tags,
-                count(*) over() as total_record_count
+                0::bigint as total_record_count
             from episode_parent_scope episode_parent
             join media_items episode on episode.parent_id = episode_parent.id
             join media_items parent on parent.id = episode.parent_id
@@ -4105,7 +4249,7 @@ impl LibraryRepository {
                      episode.index_number nulls last,
                      episode.sort_title,
                      episode.id
-            limit $3
+            limit $3 + 1
             offset $4
             "#,
         )
@@ -4119,7 +4263,7 @@ impl LibraryRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        browse_result_from_rows(rows)
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
     pub async fn list_next_up_items(
@@ -4616,25 +4760,6 @@ impl LibraryRepository {
     }
 }
 
-fn browse_result_from_rows(rows: Vec<PgRow>) -> Result<BrowseItemsResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
-        .into_iter()
-        .map(MediaItemBrowseRecord::from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(BrowseItemsResult {
-        items,
-        total_record_count,
-    })
-}
-
 fn browse_result_lower_bound_from_rows(
     rows: Vec<PgRow>,
     start_index: i64,
@@ -4676,18 +4801,22 @@ fn items_filters_result_from_row(row: PgRow) -> Result<ItemsFiltersResult, sqlx:
     })
 }
 
-fn genre_result_from_rows(rows: Vec<PgRow>) -> Result<GenreListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+fn genre_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<GenreListResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(GenreRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(GenreListResult {
         items,
@@ -4695,18 +4824,22 @@ fn genre_result_from_rows(rows: Vec<PgRow>) -> Result<GenreListResult, sqlx::Err
     })
 }
 
-fn artist_result_from_rows(rows: Vec<PgRow>) -> Result<ArtistListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+fn artist_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<ArtistListResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(ArtistRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(ArtistListResult {
         items,
@@ -4714,18 +4847,22 @@ fn artist_result_from_rows(rows: Vec<PgRow>) -> Result<ArtistListResult, sqlx::E
     })
 }
 
-fn person_result_from_rows(rows: Vec<PgRow>) -> Result<PersonListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+fn person_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<PersonListResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(PersonRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(PersonListResult {
         items,
@@ -4733,18 +4870,22 @@ fn person_result_from_rows(rows: Vec<PgRow>) -> Result<PersonListResult, sqlx::E
     })
 }
 
-fn studio_result_from_rows(rows: Vec<PgRow>) -> Result<StudioListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+fn studio_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<StudioListResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(StudioRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(StudioListResult {
         items,
@@ -4752,18 +4893,22 @@ fn studio_result_from_rows(rows: Vec<PgRow>) -> Result<StudioListResult, sqlx::E
     })
 }
 
-fn tag_result_from_rows(rows: Vec<PgRow>) -> Result<TagListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+fn tag_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<TagListResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(TagRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(TagListResult {
         items,
@@ -4771,20 +4916,22 @@ fn tag_result_from_rows(rows: Vec<PgRow>) -> Result<TagListResult, sqlx::Error> 
     })
 }
 
-fn official_rating_result_from_rows(
+fn official_rating_result_lower_bound_from_rows(
     rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
 ) -> Result<OfficialRatingListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(OfficialRatingRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(OfficialRatingListResult {
         items,
@@ -4792,18 +4939,22 @@ fn official_rating_result_from_rows(
     })
 }
 
-fn year_result_from_rows(rows: Vec<PgRow>) -> Result<YearListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+fn year_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<YearListResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(YearRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(YearListResult {
         items,
@@ -4811,20 +4962,22 @@ fn year_result_from_rows(rows: Vec<PgRow>) -> Result<YearListResult, sqlx::Error
     })
 }
 
-fn technical_facet_result_from_rows(
+fn technical_facet_result_lower_bound_from_rows(
     rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
 ) -> Result<TechnicalFacetListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let items = rows
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
+    let mut items = rows
         .into_iter()
+        .take(visible_limit)
         .map(TechnicalFacetRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = lower_bound_total_record_count(start_index, items.len(), has_more);
+    for item in &mut items {
+        item.total_record_count = i64::from(total_record_count);
+    }
 
     Ok(TechnicalFacetListResult {
         items,
@@ -4832,23 +4985,56 @@ fn technical_facet_result_from_rows(
     })
 }
 
-fn playlist_result_from_rows(rows: Vec<PgRow>) -> Result<PlaylistListResult, sqlx::Error> {
-    let total_record_count = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total_record_count"))
-        .transpose()?
-        .unwrap_or(0)
-        .try_into()
-        .unwrap_or(u32::MAX);
+fn lower_bound_total_record_count(start_index: i64, item_count: usize, has_more: bool) -> u32 {
+    if item_count == 0 {
+        0
+    } else {
+        start_index
+            .max(0)
+            .saturating_add(item_count as i64)
+            .saturating_add(i64::from(has_more))
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+}
+
+fn playlist_result_lower_bound_from_rows(
+    rows: Vec<PgRow>,
+    start_index: i64,
+    limit: i64,
+) -> Result<PlaylistListResult, sqlx::Error> {
+    let visible_limit = limit.max(0) as usize;
+    let has_more = rows.len() > visible_limit;
     let items = rows
         .into_iter()
+        .take(visible_limit)
         .map(PlaylistRecord::from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let total_record_count = if items.is_empty() {
+        0
+    } else {
+        start_index
+            .max(0)
+            .saturating_add(items.len() as i64)
+            .saturating_add(i64::from(has_more))
+            .try_into()
+            .unwrap_or(u32::MAX)
+    };
 
     Ok(PlaylistListResult {
         items,
         total_record_count,
     })
+}
+
+fn item_prefix_records_from_rows(
+    rows: Vec<PgRow>,
+    limit: i64,
+) -> Result<Vec<ItemPrefixRecord>, sqlx::Error> {
+    rows.into_iter()
+        .take(limit.max(0) as usize)
+        .map(ItemPrefixRecord::from_row)
+        .collect()
 }
 
 fn admin_physical_paths_query() -> &'static str {
@@ -5173,9 +5359,66 @@ mod tests {
         assert!(fast_query.contains("up.rating >= 5"));
         assert!(fast_query.contains("up.rating < 5"));
         assert!(fast_query.contains("up.position_ticks > 0 and up.played = false"));
+        assert!(!fast_query.contains("count(*) over()"));
+        assert!(fast_query.contains("0::bigint as total_record_count"));
+        assert!(fast_query.contains("limit $3 + 1"));
+        assert!(
+            fast_query.contains(
+                "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
+            )
+        );
         assert!(!fast_query.contains("media_item_people"));
         assert!(!fast_query.contains("media_streams"));
         assert!(!fast_query.contains("media_external_ids"));
+    }
+
+    #[test]
+    fn item_counts_query_uses_bounded_lower_bound_samples() {
+        let repository = include_str!("repository.rs");
+        let query = repository
+            .split("pub async fn count_user_items")
+            .nth(1)
+            .expect("item counts query should exist")
+            .split("pub async fn list_user_playlists")
+            .next()
+            .expect("playlist query should follow item counts query");
+        let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(query.contains("item_count_sample_limit"));
+        assert!(query.contains("visible_item_sample"));
+        assert!(query.contains("limit 10001"));
+        assert!(
+            !normalized.contains("count(*) filter"),
+            "Items/Counts should not exact-count every visible media item"
+        );
+    }
+
+    // Live-DB smoke: validates the bounded Items/Counts SQL parses and executes
+    // against the fully migrated schema without mutating data. Requires
+    // dockerized PostgreSQL (`./scripts/dev-deps.ps1`) and `DATABASE_URL`
+    // (defaults to the dev URL). Run with:
+    //   cargo test -- --ignored item_counts_query_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn item_counts_query_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let repository = LibraryRepository::new(pool);
+        let counts = repository
+            .count_user_items(-1)
+            .await
+            .expect("item counts query should execute against the live schema");
+
+        assert_eq!(counts, ItemCountsRecord::default());
     }
 
     #[test]
@@ -5246,6 +5489,31 @@ mod tests {
     }
 
     #[test]
+    fn main_browse_query_uses_lower_bound_pagination_result() {
+        let repository = include_str!("repository.rs");
+        let main_query = repository
+            .split("pub async fn list_user_items")
+            .nth(1)
+            .unwrap()
+            .split("async fn list_user_items_from_playstates")
+            .next()
+            .unwrap();
+
+        assert!(!main_query.contains("count(*) over()"));
+        assert!(main_query.contains("0::bigint as total_record_count"));
+        assert!(main_query.contains("limit $3 + 1"));
+        assert!(
+            main_query.contains(
+                "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
+            )
+        );
+        assert!(
+            !main_query.contains(".map(MediaItemBrowseRecord::from_row)"),
+            "main browse must not return the extra lower-bound probe row"
+        );
+    }
+
+    #[test]
     fn main_browse_association_id_filters_use_uuid_sets() {
         let repository = include_str!("repository.rs");
         let main_query = repository
@@ -5302,6 +5570,31 @@ mod tests {
         assert!(!is_uuid_text("item-1"));
         assert!(!is_uuid_text("bbbbbbbb000000000000000000000001"));
         assert!(!is_uuid_text("bbbbbbbb-0000-0000-0000-00000000000x"));
+    }
+
+    #[test]
+    fn public_id_sql_uuid_guards_use_canonical_uuid_shape() {
+        let malformed_uuid_regex =
+            concat!("'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}", "-[0-9a-f]{12}$'");
+
+        for (name, source) in [
+            ("admin repository", include_str!("../admin/repository.rs")),
+            ("library repository", include_str!("repository.rs")),
+            ("media repository", include_str!("../media/repository.rs")),
+            (
+                "scheduler repository",
+                include_str!("../scheduler/repository.rs"),
+            ),
+            (
+                "transcode repository",
+                include_str!("../transcode/repository.rs"),
+            ),
+        ] {
+            assert!(
+                !source.contains(malformed_uuid_regex),
+                "{name} contains malformed 8-4-4-12 UUID regex; public_id guards must use 8-4-4-4-12"
+            );
+        }
     }
 
     #[test]
@@ -5387,7 +5680,14 @@ mod tests {
         assert!(fast_query.contains("from requested_ids requested"));
         assert!(fast_query.contains("join browse_scope scope on scope.library_id = mi.library_id"));
         assert!(fast_query.contains("left join user_playstates up"));
-        assert!(fast_query.contains("count(*) over() as total_record_count"));
+        assert!(!fast_query.contains("count(*) over()"));
+        assert!(fast_query.contains("0::bigint as total_record_count"));
+        assert!(fast_query.contains("limit $3 + 1"));
+        assert!(
+            fast_query.contains(
+                "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
+            )
+        );
         assert!(!fast_query.contains("media_item_people"));
         assert!(!fast_query.contains("media_streams"));
         assert!(!fast_query.contains("media_external_ids"));
@@ -5396,20 +5696,8 @@ mod tests {
     #[test]
     fn playlist_queries_keep_uuid_and_permission_boundaries() {
         let repository = include_str!("repository.rs");
-        let list_query = repository
-            .split("pub async fn list_user_playlists")
-            .nth(1)
-            .unwrap()
-            .split("pub async fn list_user_playlist_items")
-            .next()
-            .unwrap();
-        let items_query = repository
-            .split("pub async fn list_user_playlist_items")
-            .nth(1)
-            .unwrap()
-            .split("pub async fn list_user_genres")
-            .next()
-            .unwrap();
+        let list_query = LIST_USER_PLAYLISTS_SQL;
+        let items_query = LIST_USER_PLAYLIST_ITEMS_SQL;
 
         assert!(list_query.contains("with requested_parent as"));
         assert!(list_query.contains("then $2::uuid"));
@@ -5418,6 +5706,11 @@ mod tests {
         assert!(list_query.contains("lp.can_view = true"));
         assert!(list_query.contains("l.is_hidden = false"));
         assert!(list_query.contains("exists ("));
+        assert!(!list_query.contains("count(*) over()"));
+        assert!(list_query.contains("limit $3 + 1"));
+        assert!(
+            repository.contains("playlist_result_lower_bound_from_rows(rows, input.start_index")
+        );
         assert!(!list_query.contains("c.public_id::text = $2"));
 
         assert!(items_query.contains("with requested_playlist as"));
@@ -5430,7 +5723,59 @@ mod tests {
         assert!(items_query.contains("lp.can_view = true"));
         assert!(items_query.contains("l.is_hidden = false"));
         assert!(items_query.contains("order by ci.sort_order asc"));
+        assert!(!items_query.contains("count(*) over()"));
+        assert!(items_query.contains("limit $3 + 1"));
+        assert!(repository.contains("browse_result_lower_bound_from_rows(rows, input.start_index"));
         assert!(!items_query.contains("c.public_id::text = $2"));
+    }
+
+    // Live-DB smoke: validates the production playlist SQL parses and plans
+    // against the fully migrated schema without executing either statement.
+    // Requires dockerized PostgreSQL (`./scripts/dev-deps.ps1`) and `DATABASE_URL`
+    // (defaults to the dev URL). Run with:
+    //   cargo test -- --ignored playlist_queries_plan_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn playlist_queries_plan_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let playlist_rows = sqlx::query(&format!("explain {LIST_USER_PLAYLISTS_SQL}"))
+            .bind(-1_i64)
+            .bind(Option::<String>::None)
+            .bind(20_i64)
+            .bind(0_i64)
+            .bind(Option::<String>::None)
+            .bind(SortDirection::Asc.as_sql_key())
+            .fetch_all(&pool)
+            .await
+            .expect("playlist list SQL should plan against the live schema");
+        assert!(
+            !playlist_rows.is_empty(),
+            "EXPLAIN should return a plan for playlist list SQL"
+        );
+
+        let item_rows = sqlx::query(&format!("explain {LIST_USER_PLAYLIST_ITEMS_SQL}"))
+            .bind(-1_i64)
+            .bind("bbbbbbbb-0000-0000-0000-000000000001")
+            .bind(20_i64)
+            .bind(0_i64)
+            .bind(false)
+            .fetch_all(&pool)
+            .await
+            .expect("playlist item SQL should plan against the live schema");
+        assert!(
+            !item_rows.is_empty(),
+            "EXPLAIN should return a plan for playlist item SQL"
+        );
     }
 
     #[test]
@@ -5567,6 +5912,116 @@ mod tests {
     }
 
     #[test]
+    fn facet_dictionary_queries_use_lower_bound_pagination() {
+        let repository = include_str!("repository.rs");
+        let query_ranges = [
+            (
+                "genres",
+                "pub async fn list_user_genres",
+                "pub async fn find_user_genre_by_name",
+            ),
+            (
+                "studios",
+                "pub async fn list_user_studios",
+                "pub async fn find_user_studio_by_name",
+            ),
+            (
+                "tags",
+                "pub async fn list_user_tags",
+                "pub async fn list_user_official_ratings",
+            ),
+            (
+                "official ratings",
+                "pub async fn list_user_official_ratings",
+                "pub async fn list_user_years",
+            ),
+            (
+                "years",
+                "pub async fn list_user_years",
+                "pub async fn list_user_technical_facets",
+            ),
+            (
+                "technical facets",
+                "pub async fn list_user_technical_facets",
+                "pub async fn list_user_artists",
+            ),
+        ];
+
+        for (label, start, end) in query_ranges {
+            let query = repository
+                .split(start)
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing query start `{start}`"))
+                .split(end)
+                .next()
+                .unwrap_or_else(|| panic!("missing query end `{end}`"));
+
+            assert!(
+                !query.contains("count(*) over()"),
+                "{label} query should not force an exact full count"
+            );
+            assert!(
+                query.contains("limit $3 + 1"),
+                "{label} query should fetch one extra row for lower-bound pagination"
+            );
+            assert!(
+                query.contains("total_record_count"),
+                "{label} query should still project parser-compatible count metadata"
+            );
+        }
+
+        assert!(repository.contains("genre_result_lower_bound_from_rows"));
+        assert!(repository.contains("studio_result_lower_bound_from_rows"));
+        assert!(repository.contains("tag_result_lower_bound_from_rows"));
+        assert!(repository.contains("official_rating_result_lower_bound_from_rows"));
+        assert!(repository.contains("year_result_lower_bound_from_rows"));
+        assert!(repository.contains("technical_facet_result_lower_bound_from_rows"));
+    }
+
+    #[test]
+    fn artist_and_person_queries_use_lower_bound_pagination() {
+        let repository = include_str!("repository.rs");
+        let query_ranges = [
+            (
+                "artists",
+                "pub async fn list_user_artists",
+                "pub async fn find_user_artist_by_name",
+            ),
+            (
+                "persons",
+                "pub async fn list_user_persons",
+                "pub async fn find_user_person_by_name",
+            ),
+        ];
+
+        for (label, start, end) in query_ranges {
+            let query = repository
+                .split(start)
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing query start `{start}`"))
+                .split(end)
+                .next()
+                .unwrap_or_else(|| panic!("missing query end `{end}`"));
+
+            assert!(
+                !query.contains("count(*) over()"),
+                "{label} query should not force an exact full count"
+            );
+            assert!(
+                query.contains("0::bigint as total_record_count"),
+                "{label} query should keep parser-compatible lower-bound metadata"
+            );
+            assert!(
+                query.contains("limit $3 + 1"),
+                "{label} query should fetch one extra row for lower-bound pagination"
+            );
+        }
+
+        assert!(repository.contains("artist_result_lower_bound_from_rows"));
+        assert!(repository.contains("person_result_lower_bound_from_rows"));
+    }
+
+    #[test]
     fn resume_and_latest_parent_scope_queries_use_uuid_public_id_comparisons() {
         let repository = include_str!("repository.rs");
         let query_ranges = [
@@ -5673,7 +6128,14 @@ mod tests {
         assert!(fast_query.contains("join media_items mi on mi.id = provider_match.media_item_id"));
         assert!(fast_query.contains("join browse_scope scope on scope.library_id = mi.library_id"));
         assert!(fast_query.contains("left join user_playstates up"));
-        assert!(fast_query.contains("count(*) over() as total_record_count"));
+        assert!(!fast_query.contains("count(*) over()"));
+        assert!(fast_query.contains("0::bigint as total_record_count"));
+        assert!(fast_query.contains("limit $3 + 1"));
+        assert!(
+            fast_query.contains(
+                "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
+            )
+        );
         assert!(!fast_query.contains("media_item_people"));
         assert!(!fast_query.contains("media_streams"));
         assert!(!fast_query.contains("media_item_tags"));
@@ -5687,7 +6149,7 @@ mod tests {
             .split("pub async fn list_user_item_prefixes")
             .nth(1)
             .unwrap()
-            .split("async fn list_user_items_from_playstates")
+            .split("async fn list_user_items_by_include_ids")
             .next()
             .unwrap();
 
@@ -5704,6 +6166,36 @@ mod tests {
         );
         assert!(!prefix_query.contains("public_id::text = $2"));
         assert!(!prefix_query.contains("item_type = any($7)"));
+    }
+
+    #[test]
+    fn item_prefixes_query_fetches_limit_probe_without_exact_total_count() {
+        let repository = include_str!("repository.rs");
+        let prefix_query = repository
+            .split("pub async fn list_user_item_prefixes")
+            .nth(1)
+            .unwrap()
+            .split("async fn list_user_items_by_include_ids")
+            .next()
+            .unwrap();
+
+        assert!(!prefix_query.contains("count(*) over()"));
+        assert!(prefix_query.contains("limit $3 + 1"));
+        assert!(prefix_query.contains("item_prefix_records_from_rows(rows, input.limit)"));
+    }
+
+    #[test]
+    fn item_prefixes_result_helper_drops_limit_probe_row() {
+        let repository = include_str!("repository.rs");
+        let helper = repository
+            .split("fn item_prefix_records_from_rows")
+            .nth(1)
+            .unwrap()
+            .split("fn admin_physical_paths_query")
+            .next()
+            .unwrap();
+
+        assert!(helper.contains(".take(limit.max(0) as usize)"));
     }
 
     #[test]
@@ -5791,6 +6283,48 @@ mod tests {
         assert!(next_up_query.contains("then $5::uuid"));
         assert!(!next_up_query.contains(&bad_series_filter));
         assert!(!next_up_query.contains(&bad_library_filter));
+    }
+
+    #[test]
+    fn show_child_queries_use_lower_bound_pagination() {
+        let repository = include_str!("repository.rs");
+        let query_ranges = [
+            (
+                "seasons",
+                "pub async fn list_series_seasons",
+                "pub async fn list_series_episodes",
+            ),
+            (
+                "episodes",
+                "pub async fn list_series_episodes",
+                "pub async fn list_next_up_items",
+            ),
+        ];
+
+        for (label, start, end) in query_ranges {
+            let query = repository
+                .split(start)
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing query start `{start}`"))
+                .split(end)
+                .next()
+                .unwrap_or_else(|| panic!("missing query end `{end}`"));
+
+            assert!(
+                !query.contains("count(*) over()"),
+                "{label} query should not force an exact full count"
+            );
+            assert!(
+                query.contains("0::bigint as total_record_count"),
+                "{label} query should keep parser-compatible lower-bound metadata"
+            );
+            assert!(
+                query.contains("limit $3 + 1"),
+                "{label} query should fetch one extra row for lower-bound pagination"
+            );
+        }
+
+        assert!(repository.contains("browse_result_lower_bound_from_rows(rows, input.start_index"));
     }
 
     #[test]
@@ -5923,6 +6457,12 @@ mod tests {
         assert!(!latest_query.contains("count(*) over()"));
         assert!(latest_query.contains("0::bigint as total_record_count"));
         assert!(latest_query.contains("mi.item_type in ('movie', 'series', 'episode', 'track')"));
+        assert!(latest_query.contains("limit $2 + 1"));
+        assert!(
+            latest_query.contains(
+                "browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)"
+            )
+        );
     }
 
     #[test]
@@ -6100,5 +6640,71 @@ mod tests {
             })
             .await
             .expect("upcoming query with ParentId scope should execute");
+    }
+
+    #[test]
+    fn instant_mix_seed_genre_query_filters_visible_seed_genres() {
+        let repository = include_str!("repository.rs");
+        let seed_query = repository
+            .split("pub async fn list_instant_mix_seed_genre_ids")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_series_seasons")
+            .next()
+            .unwrap();
+        let bad_item_filter = format!("{}{}", "mi.public_id::text = ", "$");
+
+        // Genre ids come from the seed item's own associations.
+        assert!(seed_query.contains("select distinct mig.genre_id"));
+        assert!(seed_query.contains("join media_item_genres mig on mig.media_item_id = mi.id"));
+        // Repository-side permission filtering (not deferred to upper layers).
+        assert!(seed_query.contains("lp.user_id = $1"));
+        assert!(seed_query.contains("lp.can_view = true"));
+        assert!(seed_query.contains("mi.is_deleted = false"));
+        assert!(seed_query.contains("l.is_hidden = false"));
+        // Index-friendly uuid comparison for the seed public_id, never ::text cast.
+        assert!(seed_query.contains("when $2 ~* '^[0-9a-f]{8}"));
+        assert!(seed_query.contains("then $2::uuid"));
+        assert!(!seed_query.contains(&bad_item_filter));
+        // Visible-but-genre-less seed is distinguished from a missing seed via the
+        // proven visibility lookup so the 404 boundary stays identical.
+        assert!(seed_query.contains("self.find_user_item_by_id(user_id, item_id)"));
+        assert!(seed_query.contains("Ok(visible.then(Vec::new))"));
+    }
+
+    // Live-DB smoke: validates the seed-genre SQL parses and executes against the
+    // real migrated schema. Requires dockerized PostgreSQL (`./scripts/dev-deps.ps1`)
+    // and `DATABASE_URL` (defaults to the dev URL). Run with:
+    //   cargo test -- --ignored instant_mix_seed_genre_ids_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn instant_mix_seed_genre_ids_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let repository = LibraryRepository::new(pool);
+        // Synthetic user/seed: no permissions and a well-formed but absent uuid, so
+        // the seed resolves as invisible (None) while still forcing the planner to
+        // accept the genre join and every permission predicate.
+        let absent = repository
+            .list_instant_mix_seed_genre_ids(-1, "bbbbbbbb-0000-0000-0000-000000000002")
+            .await
+            .expect("seed genre query should execute against the live schema");
+        assert!(absent.is_none());
+
+        // A malformed seed id must match nothing rather than error.
+        let malformed = repository
+            .list_instant_mix_seed_genre_ids(-1, "not-a-uuid")
+            .await
+            .expect("malformed seed id should execute and resolve to no seed");
+        assert!(malformed.is_none());
     }
 }

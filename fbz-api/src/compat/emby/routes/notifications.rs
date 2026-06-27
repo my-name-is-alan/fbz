@@ -19,16 +19,22 @@ const MAX_NOTIFIER_KEY_LEN: usize = 128;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct AdminNotificationQuery {
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "description")]
     pub description: Option<String>,
+    #[serde(alias = "imageUrl", alias = "image_url")]
     pub image_url: Option<String>,
+    #[serde(alias = "url")]
     pub url: Option<String>,
+    #[serde(alias = "level")]
     pub level: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct AddAdminNotificationDto {
+    #[serde(alias = "displayDateTime", alias = "display_date_time")]
     pub display_date_time: Option<bool>,
 }
 
@@ -52,20 +58,35 @@ pub struct NotificationTypeInfoDto {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct UserNotificationInfoDto {
+    #[serde(alias = "notifierKey", alias = "notifier_key")]
     pub notifier_key: String,
+    #[serde(alias = "setupModuleUrl", alias = "setup_module_url")]
     pub setup_module_url: String,
+    #[serde(alias = "serviceName", alias = "service_name")]
     pub service_name: String,
+    #[serde(alias = "pluginId", alias = "plugin_id")]
     pub plugin_id: String,
+    #[serde(alias = "friendlyName", alias = "friendly_name")]
     pub friendly_name: String,
+    #[serde(alias = "id")]
     pub id: String,
+    #[serde(alias = "enabled")]
     pub enabled: bool,
+    #[serde(alias = "userIds", alias = "user_ids")]
     pub user_ids: Vec<String>,
+    #[serde(alias = "deviceIds", alias = "device_ids")]
     pub device_ids: Vec<String>,
+    #[serde(alias = "libraryIds", alias = "library_ids")]
     pub library_ids: Vec<String>,
+    #[serde(alias = "eventIds", alias = "event_ids")]
     pub event_ids: Vec<String>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "isSelfNotification", alias = "is_self_notification")]
     pub is_self_notification: bool,
+    #[serde(alias = "groupItems", alias = "group_items")]
     pub group_items: bool,
+    #[serde(alias = "options")]
     pub options: Value,
 }
 
@@ -265,6 +286,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -344,6 +367,29 @@ mod tests {
     }
 
     #[test]
+    fn notification_admin_payloads_accept_lower_camel_client_fields() {
+        let uri = "/Notifications/Admin?name=Library&description=Scan%20finished&imageUrl=https%3A%2F%2Fexample.test%2Fimage.png&url=https%3A%2F%2Fexample.test%2Factivity&level=Info"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<AdminNotificationQuery>::try_from_uri(&uri).unwrap();
+        let request = serde_json::from_value::<AddAdminNotificationDto>(json!({
+            "displayDateTime": true
+        }))
+        .unwrap();
+        let input = admin_notification_input(&query, &request).unwrap();
+
+        assert_eq!(input.name, "Library");
+        assert_eq!(input.description, "Scan finished");
+        assert_eq!(
+            input.image_url.as_deref(),
+            Some("https://example.test/image.png")
+        );
+        assert_eq!(input.url.as_deref(), Some("https://example.test/activity"));
+        assert_eq!(input.level.as_deref(), Some("Info"));
+        assert!(input.display_date_time);
+    }
+
+    #[test]
     fn default_notification_service_serializes_official_pascal_shape() {
         let value = serde_json::to_value(default_notification_service()).unwrap();
 
@@ -357,6 +403,75 @@ mod tests {
         assert_eq!(value["LibraryIds"], json!([]));
         assert_eq!(value["EventIds"], json!([]));
         assert_eq!(value["Options"], json!({}));
+    }
+
+    #[test]
+    fn notification_service_body_accepts_lower_camel_and_snake_case_fields() {
+        let lower_camel = serde_json::from_value::<UserNotificationInfoDto>(json!({
+            "notifierKey": "fbz-host",
+            "setupModuleUrl": "/notifications/setup",
+            "serviceName": "FBZ Host Notifications",
+            "pluginId": "fbz-core",
+            "friendlyName": "Host",
+            "id": "fbz-host",
+            "enabled": true,
+            "userIds": ["user-1"],
+            "deviceIds": ["device-1"],
+            "libraryIds": ["library-1"],
+            "eventIds": ["event-1"],
+            "userId": "user-1",
+            "isSelfNotification": true,
+            "groupItems": true,
+            "options": {"level": "Info"}
+        }))
+        .expect("lower-camel notification service body should deserialize");
+
+        assert_eq!(lower_camel.notifier_key, "fbz-host");
+        assert_eq!(lower_camel.setup_module_url, "/notifications/setup");
+        assert_eq!(lower_camel.service_name, "FBZ Host Notifications");
+        assert_eq!(lower_camel.plugin_id, "fbz-core");
+        assert_eq!(lower_camel.friendly_name, "Host");
+        assert_eq!(lower_camel.user_ids, ["user-1"]);
+        assert_eq!(lower_camel.device_ids, ["device-1"]);
+        assert_eq!(lower_camel.library_ids, ["library-1"]);
+        assert_eq!(lower_camel.event_ids, ["event-1"]);
+        assert_eq!(lower_camel.user_id.as_deref(), Some("user-1"));
+        assert!(lower_camel.is_self_notification);
+        assert!(lower_camel.group_items);
+        assert_eq!(lower_camel.options["level"], "Info");
+
+        let snake_case = serde_json::from_value::<UserNotificationInfoDto>(json!({
+            "notifier_key": "fbz-host",
+            "setup_module_url": "/notifications/setup",
+            "service_name": "FBZ Host Notifications",
+            "plugin_id": "fbz-core",
+            "friendly_name": "Host",
+            "id": "fbz-host",
+            "enabled": true,
+            "user_ids": ["user-1"],
+            "device_ids": ["device-1"],
+            "library_ids": ["library-1"],
+            "event_ids": ["event-1"],
+            "user_id": "user-1",
+            "is_self_notification": true,
+            "group_items": true,
+            "options": {"level": "Info"}
+        }))
+        .expect("snake-case notification service body should deserialize");
+
+        assert_eq!(snake_case.notifier_key, "fbz-host");
+        assert_eq!(snake_case.setup_module_url, "/notifications/setup");
+        assert_eq!(snake_case.service_name, "FBZ Host Notifications");
+        assert_eq!(snake_case.plugin_id, "fbz-core");
+        assert_eq!(snake_case.friendly_name, "Host");
+        assert_eq!(snake_case.user_ids, ["user-1"]);
+        assert_eq!(snake_case.device_ids, ["device-1"]);
+        assert_eq!(snake_case.library_ids, ["library-1"]);
+        assert_eq!(snake_case.event_ids, ["event-1"]);
+        assert_eq!(snake_case.user_id.as_deref(), Some("user-1"));
+        assert!(snake_case.is_self_notification);
+        assert!(snake_case.group_items);
+        assert_eq!(snake_case.options["level"], "Info");
     }
 
     #[test]

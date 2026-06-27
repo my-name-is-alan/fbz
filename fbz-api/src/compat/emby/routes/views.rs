@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::{
     auth::service::AuthenticatedUser,
-    compat::emby::dto::{LibraryViewSource, QueryResultDto, UserViewDto},
+    compat::emby::dto::{BaseItemDto, LibraryViewSource, QueryResultDto, UserViewDto},
     db::DbPool,
     error::AppError,
     library::repository::{LibraryRepository, UserLibraryViewRecord},
@@ -19,6 +19,7 @@ use super::access::{authenticate_query_user, authenticate_route_user};
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserViewsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
@@ -51,6 +52,14 @@ pub async fn user_views_by_query(
     list_views_for_user(database.clone(), authenticated_user).await
 }
 
+pub async fn grouping_options(
+    Path(user_id): Path<String>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let _user_id = grouping_options_user_id(&user_id)?;
+
+    Ok(Json(grouping_options_response()))
+}
+
 async fn list_views_for_user(
     database: DbPool,
     authenticated_user: AuthenticatedUser,
@@ -75,6 +84,24 @@ fn user_views_query_user_id(query: &UserViewsQuery) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
+fn grouping_options_user_id(user_id: &str) -> Result<String, AppError> {
+    let user_id = user_id.trim();
+    if user_id.is_empty()
+        || user_id.len() > 256
+        || user_id
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+    {
+        return Err(AppError::unprocessable("UserId is invalid"));
+    }
+
+    Ok(user_id.to_owned())
+}
+
+fn grouping_options_response() -> Vec<BaseItemDto> {
+    Vec::new()
+}
+
 fn user_library_view_to_dto(record: UserLibraryViewRecord) -> UserViewDto {
     UserViewDto::from(LibraryViewSource {
         id: record.id,
@@ -85,6 +112,9 @@ fn user_library_view_to_dto(record: UserLibraryViewRecord) -> UserViewDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
+
     use super::*;
 
     #[test]
@@ -100,5 +130,22 @@ mod tests {
         };
 
         assert_eq!(user_views_query_user_id(&query), None);
+    }
+
+    #[test]
+    fn user_views_query_accepts_lower_camel_client_fields() {
+        let uri = "/UserViews?userId=user-1".parse::<Uri>().unwrap();
+        let Query(query) = Query::<UserViewsQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(user_views_query_user_id(&query), Some("user-1"));
+    }
+
+    #[test]
+    fn grouping_options_normalizes_user_id_and_returns_empty_array() {
+        let user_id = grouping_options_user_id(" user-1 ").unwrap();
+        let options = grouping_options_response();
+
+        assert_eq!(user_id, "user-1");
+        assert!(options.is_empty());
     }
 }

@@ -13,29 +13,38 @@ use super::access::authenticate_request_user;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PackagesQuery {
+    #[serde(alias = "packageType", alias = "package_type")]
     pub package_type: Option<String>,
+    #[serde(alias = "targetSystems", alias = "target_systems")]
     pub target_systems: Option<String>,
+    #[serde(alias = "isPremium", alias = "is_premium")]
     pub is_premium: Option<bool>,
+    #[serde(alias = "isAdult", alias = "is_adult")]
     pub is_adult: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PackageByNameQuery {
+    #[serde(alias = "assemblyGuid", alias = "assembly_guid")]
     pub assembly_guid: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PackageUpdatesQuery {
+    #[serde(alias = "packageType", alias = "package_type")]
     pub package_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct InstallPackageQuery {
+    #[serde(alias = "assemblyGuid", alias = "assembly_guid")]
     pub assembly_guid: Option<String>,
+    #[serde(alias = "version")]
     pub version: Option<String>,
+    #[serde(alias = "updateClass", alias = "update_class")]
     pub update_class: Option<String>,
 }
 
@@ -395,6 +404,9 @@ fn validate_safe_query_text<'a>(
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
+
     use super::*;
 
     #[test]
@@ -438,6 +450,46 @@ mod tests {
         assert_eq!(package_catalog(&system_server).len(), 1);
         assert!(package_catalog(&user_installed).is_empty());
         assert!(package_catalog(&other_target).is_empty());
+    }
+
+    #[test]
+    fn package_queries_accept_lower_camel_client_fields() {
+        let uri =
+            "/Packages?packageType=System&targetSystems=Server,Other&isPremium=false&isAdult=false"
+                .parse::<Uri>()
+                .unwrap();
+        let Query(query) = Query::<PackagesQuery>::try_from_uri(&uri).unwrap();
+        let query = normalize_packages_query(query).unwrap();
+        assert_eq!(query.package_type, Some(PackageTypeDto::System));
+        assert_eq!(
+            query.target_systems,
+            Some(vec![
+                PackageTargetSystemDto::Server,
+                PackageTargetSystemDto::Other
+            ])
+        );
+        assert_eq!(query.is_premium, Some(false));
+        assert_eq!(query.is_adult, Some(false));
+
+        let uri = "/Packages/FBZ%20Core?assemblyGuid=fbz-core"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<PackageByNameQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.assembly_guid.as_deref(), Some("fbz-core"));
+
+        let uri = "/Packages/Updates?packageType=System"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<PackageUpdatesQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.package_type.as_deref(), Some("System"));
+
+        let uri = "/Packages/Installed/FBZ%20Core?assemblyGuid=fbz-core&version=1.0.0&updateClass=Release"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<InstallPackageQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.assembly_guid.as_deref(), Some("fbz-core"));
+        assert_eq!(query.version.as_deref(), Some("1.0.0"));
+        assert_eq!(query.update_class.as_deref(), Some("Release"));
     }
 
     #[test]

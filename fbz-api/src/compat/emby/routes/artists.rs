@@ -19,6 +19,7 @@ use super::{
 
 const DEFAULT_ARTISTS_LIMIT: u32 = 100;
 const MAX_ARTISTS_LIMIT: u32 = 200;
+const MAX_ARTISTS_START_INDEX: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArtistKind {
@@ -29,27 +30,53 @@ enum ArtistKind {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ArtistsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "artistType", alias = "artist_type")]
     pub artist_type: Option<String>,
+    #[serde(alias = "nameStartsWith", alias = "name_starts_with")]
     pub name_starts_with: Option<String>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(
+        alias = "artistStartsWithOrGreater",
+        alias = "artist_starts_with_or_greater"
+    )]
     pub artist_starts_with_or_greater: Option<String>,
+    #[serde(
+        alias = "albumArtistStartsWithOrGreater",
+        alias = "album_artist_starts_with_or_greater"
+    )]
     pub album_artist_starts_with_or_greater: Option<String>,
+    #[serde(alias = "albums")]
     pub albums: Option<String>,
+    #[serde(alias = "albumIds", alias = "album_ids")]
     pub album_ids: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ArtistByNameQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
@@ -147,7 +174,7 @@ struct ArtistWindow {
 impl ArtistWindow {
     fn from_query(query: &ArtistsQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: i64::from(query.start_index.unwrap_or(0).min(MAX_ARTISTS_START_INDEX)),
             limit: i64::from(
                 query
                     .limit
@@ -202,6 +229,8 @@ fn artist_to_base_item(record: ArtistRecord) -> BaseItemDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -248,6 +277,41 @@ mod tests {
     }
 
     #[test]
+    fn artist_queries_accept_lower_camel_client_fields() {
+        let uri = "/Artists?userId=user-1&parentId=library-1&recursive=true&startIndex=10&limit=500&searchTerm=bow&sortOrder=Descending&artistType=AlbumArtist&nameStartsWith=B&artistStartsWithOrGreater=A&albumArtistStartsWithOrGreater=C&albums=Low%7CHeroes&albumIds=bbbbbbbb-0000-0000-0000-000000000001%7Cinvalid&fields=PrimaryImageAspectRatio&enableImages=true"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<ArtistsQuery>::try_from_uri(&uri).unwrap();
+
+        let window = ArtistWindow::from_query(&query);
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_ARTISTS_LIMIT));
+        assert_eq!(query.search_term.as_deref(), Some("bow"));
+        assert!(is_album_artist_query(query.artist_type.as_deref()));
+        assert_eq!(artist_prefix_filter(&query).as_deref(), Some("A"));
+        assert_eq!(query.albums.as_deref(), Some("Low|Heroes"));
+        assert_eq!(
+            query.album_ids.as_deref(),
+            Some("bbbbbbbb-0000-0000-0000-000000000001|invalid")
+        );
+        assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(
+            sort_direction_from_query(query.sort_order.as_deref()),
+            SortDirection::Desc
+        );
+
+        let uri = "/Artists/David%20Bowie?userId=user-1"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<ArtistByNameQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
     fn artists_query_album_filters_reuse_item_filter_parsing() {
         let query = ArtistsQuery {
             albums: Some(" Low | Heroes |LOW ".to_owned()),
@@ -265,6 +329,18 @@ mod tests {
             album_ids.values,
             ["bbbbbbbb-0000-0000-0000-000000000001", "bad"]
         );
+    }
+
+    #[test]
+    fn artist_window_clamps_pathologically_large_start_index() {
+        let window = ArtistWindow::from_query(&ArtistsQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..ArtistsQuery::default()
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
     }
 
     #[test]

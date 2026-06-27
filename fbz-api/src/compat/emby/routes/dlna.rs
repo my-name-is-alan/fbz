@@ -19,44 +19,98 @@ const MAX_DLNA_PROFILE_TEXT_LEN: usize = 256;
 pub struct DlnaProfileDto {
     #[serde(rename = "Type")]
     pub profile_type: DeviceProfileTypeDto,
+    #[serde(alias = "path")]
     pub path: Option<String>,
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "albumArtPn", alias = "album_art_pn")]
     pub album_art_pn: Option<String>,
+    #[serde(alias = "maxAlbumArtWidth", alias = "max_album_art_width")]
     pub max_album_art_width: i32,
+    #[serde(alias = "maxAlbumArtHeight", alias = "max_album_art_height")]
     pub max_album_art_height: i32,
+    #[serde(alias = "maxIconWidth", alias = "max_icon_width")]
     pub max_icon_width: i32,
+    #[serde(alias = "maxIconHeight", alias = "max_icon_height")]
     pub max_icon_height: i32,
+    #[serde(alias = "friendlyName", alias = "friendly_name")]
     pub friendly_name: Option<String>,
+    #[serde(alias = "manufacturer")]
     pub manufacturer: Option<String>,
+    #[serde(alias = "manufacturerUrl", alias = "manufacturer_url")]
     pub manufacturer_url: Option<String>,
+    #[serde(alias = "modelName", alias = "model_name")]
     pub model_name: Option<String>,
+    #[serde(alias = "modelDescription", alias = "model_description")]
     pub model_description: Option<String>,
+    #[serde(alias = "modelNumber", alias = "model_number")]
     pub model_number: Option<String>,
+    #[serde(alias = "modelUrl", alias = "model_url")]
     pub model_url: Option<String>,
+    #[serde(alias = "serialNumber", alias = "serial_number")]
     pub serial_number: Option<String>,
+    #[serde(alias = "enableAlbumArtInDidl", alias = "enable_album_art_in_didl")]
     pub enable_album_art_in_didl: bool,
+    #[serde(
+        alias = "enableSingleAlbumArtLimit",
+        alias = "enable_single_album_art_limit"
+    )]
     pub enable_single_album_art_limit: bool,
+    #[serde(
+        alias = "enableSingleSubtitleLimit",
+        alias = "enable_single_subtitle_limit"
+    )]
     pub enable_single_subtitle_limit: bool,
+    #[serde(alias = "protocolInfo", alias = "protocol_info")]
     pub protocol_info: Option<String>,
+    #[serde(alias = "timelineOffsetSeconds", alias = "timeline_offset_seconds")]
     pub timeline_offset_seconds: i32,
+    #[serde(
+        alias = "requiresPlainVideoItems",
+        alias = "requires_plain_video_items"
+    )]
     pub requires_plain_video_items: bool,
+    #[serde(alias = "requiresPlainFolders", alias = "requires_plain_folders")]
     pub requires_plain_folders: bool,
+    #[serde(
+        alias = "ignoreTranscodeByteRangeRequests",
+        alias = "ignore_transcode_byte_range_requests"
+    )]
     pub ignore_transcode_byte_range_requests: bool,
+    #[serde(alias = "supportsSamsungBookmark", alias = "supports_samsung_bookmark")]
     pub supports_samsung_bookmark: bool,
+    #[serde(alias = "identification")]
     pub identification: Vec<DeviceIdentificationDto>,
+    #[serde(alias = "protocolInfoDetection", alias = "protocol_info_detection")]
     pub protocol_info_detection: ProtocolInfoDetectionDto,
+    #[serde(alias = "name")]
     pub name: String,
+    #[serde(alias = "id")]
     pub id: String,
+    #[serde(alias = "supportedMediaTypes", alias = "supported_media_types")]
     pub supported_media_types: String,
+    #[serde(alias = "maxStreamingBitrate", alias = "max_streaming_bitrate")]
     pub max_streaming_bitrate: i64,
+    #[serde(
+        alias = "musicStreamingTranscodingBitrate",
+        alias = "music_streaming_transcoding_bitrate"
+    )]
     pub music_streaming_transcoding_bitrate: i32,
+    #[serde(alias = "maxStaticMusicBitrate", alias = "max_static_music_bitrate")]
     pub max_static_music_bitrate: i32,
+    #[serde(alias = "declaredFeatures", alias = "declared_features")]
     pub declared_features: Vec<String>,
+    #[serde(alias = "directPlayProfiles", alias = "direct_play_profiles")]
     pub direct_play_profiles: Vec<DirectPlayProfileDto>,
+    #[serde(alias = "transcodingProfiles", alias = "transcoding_profiles")]
     pub transcoding_profiles: Vec<TranscodingProfileDto>,
+    #[serde(alias = "containerProfiles", alias = "container_profiles")]
     pub container_profiles: Vec<ProfileConditionGroupDto>,
+    #[serde(alias = "codecProfiles", alias = "codec_profiles")]
     pub codec_profiles: Vec<ProfileConditionGroupDto>,
+    #[serde(alias = "responseProfiles", alias = "response_profiles")]
     pub response_profiles: Vec<ResponseProfileDto>,
+    #[serde(alias = "subtitleProfiles", alias = "subtitle_profiles")]
     pub subtitle_profiles: Vec<SubtitleProfileDto>,
 }
 
@@ -70,15 +124,25 @@ pub enum DeviceProfileTypeDto {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct DeviceIdentificationDto {
+    #[serde(alias = "friendlyName", alias = "friendly_name")]
     pub friendly_name: Option<String>,
+    #[serde(alias = "modelNumber", alias = "model_number")]
     pub model_number: Option<String>,
+    #[serde(alias = "serialNumber", alias = "serial_number")]
     pub serial_number: Option<String>,
+    #[serde(alias = "modelName", alias = "model_name")]
     pub model_name: Option<String>,
+    #[serde(alias = "modelDescription", alias = "model_description")]
     pub model_description: Option<String>,
+    #[serde(alias = "deviceDescription", alias = "device_description")]
     pub device_description: Option<String>,
+    #[serde(alias = "modelUrl", alias = "model_url")]
     pub model_url: Option<String>,
+    #[serde(alias = "manufacturer")]
     pub manufacturer: Option<String>,
+    #[serde(alias = "manufacturerUrl", alias = "manufacturer_url")]
     pub manufacturer_url: Option<String>,
+    #[serde(alias = "headers")]
     pub headers: Vec<HttpHeaderInfoDto>,
 }
 
@@ -102,16 +166,22 @@ pub enum HeaderMatchTypeDto {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct ProtocolInfoDetectionDto {
+    #[serde(alias = "enabledForVideo", alias = "enabled_for_video")]
     pub enabled_for_video: bool,
+    #[serde(alias = "enabledForAudio", alias = "enabled_for_audio")]
     pub enabled_for_audio: bool,
+    #[serde(alias = "enabledForPhotos", alias = "enabled_for_photos")]
     pub enabled_for_photos: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct DirectPlayProfileDto {
+    #[serde(alias = "container")]
     pub container: String,
+    #[serde(alias = "audioCodec", alias = "audio_codec")]
     pub audio_codec: Option<String>,
+    #[serde(alias = "videoCodec", alias = "video_codec")]
     pub video_codec: Option<String>,
     #[serde(rename = "Type")]
     pub profile_type: DlnaProfileTypeDto,
@@ -128,26 +198,51 @@ pub enum DlnaProfileTypeDto {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct TranscodingProfileDto {
+    #[serde(alias = "container")]
     pub container: String,
     #[serde(rename = "Type")]
     pub profile_type: DlnaProfileTypeDto,
+    #[serde(alias = "videoCodec", alias = "video_codec")]
     pub video_codec: Option<String>,
+    #[serde(alias = "audioCodec", alias = "audio_codec")]
     pub audio_codec: Option<String>,
+    #[serde(alias = "protocol")]
     pub protocol: String,
+    #[serde(alias = "estimateContentLength", alias = "estimate_content_length")]
     pub estimate_content_length: bool,
+    #[serde(alias = "enableMpegtsM2TsMode", alias = "enable_mpegts_m2_ts_mode")]
     pub enable_mpegts_m2_ts_mode: bool,
+    #[serde(alias = "transcodeSeekInfo", alias = "transcode_seek_info")]
     pub transcode_seek_info: TranscodeSeekInfoDto,
+    #[serde(alias = "copyTimestamps", alias = "copy_timestamps")]
     pub copy_timestamps: bool,
+    #[serde(alias = "context")]
     pub context: EncodingContextDto,
+    #[serde(alias = "maxAudioChannels", alias = "max_audio_channels")]
     pub max_audio_channels: Option<String>,
+    #[serde(alias = "minSegments", alias = "min_segments")]
     pub min_segments: i32,
+    #[serde(alias = "segmentLength", alias = "segment_length")]
     pub segment_length: i32,
+    #[serde(alias = "breakOnNonKeyFrames", alias = "break_on_non_key_frames")]
     pub break_on_non_key_frames: bool,
+    #[serde(
+        alias = "allowInterlacedVideoStreamCopy",
+        alias = "allow_interlaced_video_stream_copy"
+    )]
     pub allow_interlaced_video_stream_copy: bool,
+    #[serde(alias = "manifestSubtitles", alias = "manifest_subtitles")]
     pub manifest_subtitles: Option<String>,
+    #[serde(alias = "maxManifestSubtitles", alias = "max_manifest_subtitles")]
     pub max_manifest_subtitles: i32,
+    #[serde(alias = "maxWidth", alias = "max_width")]
     pub max_width: Option<i32>,
+    #[serde(alias = "maxHeight", alias = "max_height")]
     pub max_height: Option<i32>,
+    #[serde(
+        alias = "fillEmptySubtitleSegments",
+        alias = "fill_empty_subtitle_segments"
+    )]
     pub fill_empty_subtitle_segments: bool,
 }
 
@@ -170,18 +265,26 @@ pub enum EncodingContextDto {
 pub struct ProfileConditionGroupDto {
     #[serde(rename = "Type")]
     pub profile_type: Option<String>,
+    #[serde(alias = "conditions")]
     pub conditions: Vec<ProfileConditionDto>,
+    #[serde(alias = "applyConditions", alias = "apply_conditions")]
     pub apply_conditions: Vec<ProfileConditionDto>,
+    #[serde(alias = "container")]
     pub container: Option<String>,
+    #[serde(alias = "codec")]
     pub codec: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct ProfileConditionDto {
+    #[serde(alias = "condition")]
     pub condition: ProfileConditionTypeDto,
+    #[serde(alias = "property")]
     pub property: String,
+    #[serde(alias = "value")]
     pub value: String,
+    #[serde(alias = "isRequired", alias = "is_required")]
     pub is_required: bool,
 }
 
@@ -198,25 +301,38 @@ pub enum ProfileConditionTypeDto {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct ResponseProfileDto {
+    #[serde(alias = "container")]
     pub container: Option<String>,
+    #[serde(alias = "audioCodec", alias = "audio_codec")]
     pub audio_codec: Option<String>,
+    #[serde(alias = "videoCodec", alias = "video_codec")]
     pub video_codec: Option<String>,
     #[serde(rename = "Type")]
     pub profile_type: DlnaProfileTypeDto,
+    #[serde(alias = "orgPn", alias = "org_pn")]
     pub org_pn: Option<String>,
+    #[serde(alias = "mimeType", alias = "mime_type")]
     pub mime_type: Option<String>,
+    #[serde(alias = "conditions")]
     pub conditions: Vec<ProfileConditionDto>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct SubtitleProfileDto {
+    #[serde(alias = "format")]
     pub format: String,
+    #[serde(alias = "method")]
     pub method: SubtitleDeliveryMethodDto,
+    #[serde(alias = "didlMode", alias = "didl_mode")]
     pub didl_mode: Option<String>,
+    #[serde(alias = "language")]
     pub language: Option<String>,
+    #[serde(alias = "container")]
     pub container: Option<String>,
+    #[serde(alias = "allowChunkedResponse", alias = "allow_chunked_response")]
     pub allow_chunked_response: bool,
+    #[serde(alias = "protocol")]
     pub protocol: Option<String>,
 }
 
@@ -557,6 +673,138 @@ mod tests {
                 .unwrap_err()
                 .status_code(),
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn dlna_profile_body_accepts_lower_camel_and_snake_case_fields() {
+        let lower_camel = serde_json::from_value::<DlnaProfileDto>(serde_json::json!({
+            "Type": "User",
+            "Name": "Custom Profile",
+            "Id": "custom-profile",
+            "friendlyName": "Living Room",
+            "manufacturerUrl": "https://example.test",
+            "modelName": "FBZ Client",
+            "modelDescription": "Test profile",
+            "modelNumber": "1",
+            "enableAlbumArtInDidl": true,
+            "timelineOffsetSeconds": 7,
+            "supportedMediaTypes": "Audio,Video",
+            "maxStreamingBitrate": 1000000,
+            "musicStreamingTranscodingBitrate": 128000,
+            "protocolInfoDetection": {
+                "enabledForVideo": true,
+                "enabledForAudio": true,
+                "enabledForPhotos": false
+            },
+            "identification": [{
+                "friendlyName": "FBZ Client",
+                "modelName": "Model",
+                "manufacturerUrl": "https://example.test",
+                "headers": [{
+                    "Name": "User-Agent",
+                    "Value": "Client",
+                    "Match": "Substring"
+                }]
+            }],
+            "directPlayProfiles": [{
+                "container": "mp4",
+                "audioCodec": "aac",
+                "videoCodec": "h264",
+                "Type": "Video"
+            }],
+            "transcodingProfiles": [{
+                "container": "ts",
+                "Type": "Video",
+                "audioCodec": "aac",
+                "videoCodec": "h264",
+                "estimateContentLength": true,
+                "copyTimestamps": true,
+                "maxAudioChannels": "2",
+                "minSegments": 2,
+                "segmentLength": 6,
+                "manifestSubtitles": "vtt",
+                "maxManifestSubtitles": 1,
+                "fillEmptySubtitleSegments": true
+            }],
+            "responseProfiles": [{
+                "container": "mp4",
+                "audioCodec": "aac",
+                "videoCodec": "h264",
+                "orgPn": "AVC_MP4",
+                "mimeType": "video/mp4"
+            }],
+            "subtitleProfiles": [{
+                "format": "srt",
+                "method": "External",
+                "didlMode": "CaptionInfoEx",
+                "allowChunkedResponse": true
+            }]
+        }))
+        .expect("lower-camel DLNA profile should deserialize");
+
+        assert_eq!(lower_camel.profile_type, DeviceProfileTypeDto::User);
+        assert_eq!(lower_camel.friendly_name.as_deref(), Some("Living Room"));
+        assert_eq!(
+            lower_camel.manufacturer_url.as_deref(),
+            Some("https://example.test")
+        );
+        assert_eq!(lower_camel.model_name.as_deref(), Some("FBZ Client"));
+        assert!(lower_camel.enable_album_art_in_didl);
+        assert_eq!(lower_camel.timeline_offset_seconds, 7);
+        assert_eq!(lower_camel.supported_media_types, "Audio,Video");
+        assert_eq!(lower_camel.max_streaming_bitrate, 1_000_000);
+        assert_eq!(lower_camel.music_streaming_transcoding_bitrate, 128_000);
+        assert!(lower_camel.protocol_info_detection.enabled_for_video);
+        assert!(lower_camel.protocol_info_detection.enabled_for_audio);
+        assert!(!lower_camel.protocol_info_detection.enabled_for_photos);
+        assert_eq!(
+            lower_camel.identification[0].friendly_name.as_deref(),
+            Some("FBZ Client")
+        );
+        assert_eq!(
+            lower_camel.direct_play_profiles[0].audio_codec.as_deref(),
+            Some("aac")
+        );
+        assert!(lower_camel.transcoding_profiles[0].estimate_content_length);
+        assert!(lower_camel.transcoding_profiles[0].copy_timestamps);
+        assert_eq!(
+            lower_camel.response_profiles[0].mime_type.as_deref(),
+            Some("video/mp4")
+        );
+        assert!(lower_camel.subtitle_profiles[0].allow_chunked_response);
+
+        let snake_case = serde_json::from_value::<DlnaProfileDto>(serde_json::json!({
+            "Type": "User",
+            "Name": "Snake Profile",
+            "Id": "snake-profile",
+            "friendly_name": "Den",
+            "manufacturer_url": "https://example.test",
+            "model_name": "Snake Client",
+            "supported_media_types": "Audio",
+            "max_streaming_bitrate": 640000,
+            "protocol_info_detection": {
+                "enabled_for_video": false,
+                "enabled_for_audio": true,
+                "enabled_for_photos": false
+            },
+            "direct_play_profiles": [{
+                "container": "mp3",
+                "audio_codec": "mp3",
+                "Type": "Audio"
+            }]
+        }))
+        .expect("snake-case DLNA profile should deserialize");
+
+        assert_eq!(snake_case.friendly_name.as_deref(), Some("Den"));
+        assert_eq!(snake_case.model_name.as_deref(), Some("Snake Client"));
+        assert_eq!(snake_case.supported_media_types, "Audio");
+        assert_eq!(snake_case.max_streaming_bitrate, 640_000);
+        assert!(!snake_case.protocol_info_detection.enabled_for_video);
+        assert!(snake_case.protocol_info_detection.enabled_for_audio);
+        assert_eq!(
+            snake_case.direct_play_profiles[0].audio_codec.as_deref(),
+            Some("mp3")
         );
     }
 }

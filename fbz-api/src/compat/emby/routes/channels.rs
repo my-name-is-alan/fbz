@@ -14,6 +14,7 @@ use crate::{
 use super::access::authenticate_query_user;
 
 const MAX_CHANNEL_LIMIT: u32 = 200;
+const MAX_CHANNEL_START_INDEX: u32 = 10_000;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -48,7 +49,10 @@ pub async fn channels(
 fn channel_query_input(query: &ChannelQuery) -> Result<ChannelQueryInput, AppError> {
     Ok(ChannelQueryInput {
         user_id: normalize_optional_text(query.user_id.as_deref())?,
-        start_index: query.start_index.unwrap_or_default(),
+        start_index: query
+            .start_index
+            .unwrap_or_default()
+            .min(MAX_CHANNEL_START_INDEX),
         limit: query
             .limit
             .unwrap_or(MAX_CHANNEL_LIMIT)
@@ -102,5 +106,18 @@ mod tests {
         assert_eq!(empty.start_index, 0);
         assert_eq!(empty.total_record_count, 0);
         assert!(empty.items.is_empty());
+    }
+
+    #[test]
+    fn channel_query_clamps_pathologically_large_start_index() {
+        let input = channel_query_input(&ChannelQuery {
+            user_id: None,
+            start_index: Some(500_000),
+            limit: Some(50),
+        })
+        .unwrap();
+
+        assert_eq!(input.start_index, 10_000);
+        assert_eq!(input.limit, 50);
     }
 }

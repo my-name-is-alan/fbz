@@ -22,30 +22,40 @@ const MAX_NETWORK_PATH_LEN: usize = 512;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct DirectoryContentsQuery {
+    #[serde(alias = "path")]
     pub path: Option<String>,
+    #[serde(alias = "includeFiles", alias = "include_files")]
     pub include_files: Option<bool>,
+    #[serde(alias = "includeDirectories", alias = "include_directories")]
     pub include_directories: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PathQuery {
+    #[serde(alias = "path")]
     pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct DirectoryCredentialsDto {
+    #[serde(alias = "username")]
     pub username: Option<String>,
+    #[serde(alias = "password")]
     pub password: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ValidatePathDto {
+    #[serde(alias = "validateWriteable", alias = "validate_writeable")]
     pub validate_writeable: Option<bool>,
+    #[serde(alias = "isFile", alias = "is_file")]
     pub is_file: Option<bool>,
+    #[serde(alias = "username")]
     pub username: Option<String>,
+    #[serde(alias = "password")]
     pub password: Option<String>,
 }
 
@@ -386,7 +396,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
     use axum::http::StatusCode;
+    use http::Uri;
+    use serde_json::json;
 
     use super::*;
 
@@ -417,6 +430,45 @@ mod tests {
         assert!(input.options.include_files);
         assert!(input.options.include_directories);
         assert!(input.path.is_absolute());
+    }
+
+    #[test]
+    fn environment_queries_accept_lower_camel_client_fields() {
+        let uri =
+            "/Environment/DirectoryContents?path=.&includeFiles=false&includeDirectories=true"
+                .parse::<Uri>()
+                .unwrap();
+        let Query(query) = Query::<DirectoryContentsQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.path.as_deref(), Some("."));
+        assert_eq!(query.include_files, Some(false));
+        assert_eq!(query.include_directories, Some(true));
+
+        let uri = "/Environment/ParentPath?path=.".parse::<Uri>().unwrap();
+        let Query(query) = Query::<PathQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.path.as_deref(), Some("."));
+    }
+
+    #[test]
+    fn environment_bodies_accept_lower_camel_client_fields() {
+        let credentials = serde_json::from_value::<DirectoryCredentialsDto>(json!({
+            "username": "admin",
+            "password": "secret"
+        }))
+        .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("admin"));
+        assert_eq!(credentials.password.as_deref(), Some("secret"));
+
+        let request = serde_json::from_value::<ValidatePathDto>(json!({
+            "validateWriteable": true,
+            "isFile": false,
+            "username": "admin",
+            "password": "secret"
+        }))
+        .unwrap();
+        assert_eq!(request.validate_writeable, Some(true));
+        assert_eq!(request.is_file, Some(false));
+        assert_eq!(request.username.as_deref(), Some("admin"));
+        assert_eq!(request.password.as_deref(), Some("secret"));
     }
 
     #[test]

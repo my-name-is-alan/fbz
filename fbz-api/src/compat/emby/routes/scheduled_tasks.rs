@@ -31,7 +31,9 @@ const TICKS_PER_SECOND: i64 = 10_000_000;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ScheduledTasksQuery {
+    #[serde(alias = "isHidden", alias = "is_hidden")]
     pub is_hidden: Option<bool>,
+    #[serde(alias = "isEnabled", alias = "is_enabled")]
     pub is_enabled: Option<bool>,
 }
 
@@ -373,6 +375,27 @@ mod tests {
     fn scheduled_task_id_validation_rejects_empty_values() {
         assert!(validate_scheduled_task_id("task-1").is_ok());
         assert!(validate_scheduled_task_id(" ").is_err());
+    }
+
+    #[test]
+    fn scheduled_tasks_query_accepts_lower_camel_and_snake_case_filters() {
+        let lower_camel_uri: Uri = "/emby/ScheduledTasks?isEnabled=true&isHidden=false"
+            .parse()
+            .unwrap();
+        let Query(lower_camel) =
+            Query::<ScheduledTasksQuery>::try_from_uri(&lower_camel_uri).unwrap();
+
+        assert_eq!(lower_camel.is_enabled, Some(true));
+        assert_eq!(lower_camel.is_hidden, Some(false));
+
+        let snake_case_uri: Uri = "/ScheduledTasks?is_enabled=false&is_hidden=true"
+            .parse()
+            .unwrap();
+        let Query(snake_case) =
+            Query::<ScheduledTasksQuery>::try_from_uri(&snake_case_uri).unwrap();
+
+        assert_eq!(snake_case.is_enabled, Some(false));
+        assert_eq!(snake_case.is_hidden, Some(true));
     }
 
     #[test]

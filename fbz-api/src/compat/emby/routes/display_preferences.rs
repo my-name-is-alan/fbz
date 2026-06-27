@@ -26,25 +26,35 @@ const MAX_USER_SETTINGS_PARTIAL_BYTES: usize = 64 * 1024;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct DisplayPreferencesQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "client")]
     pub client: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct DisplayPreferencesUpdateDto {
+    #[serde(alias = "id")]
     pub id: Option<String>,
+    #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "customPrefs", alias = "custom_prefs")]
     pub custom_prefs: Option<BTreeMap<String, String>>,
+    #[serde(alias = "client")]
     pub client: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserSettingUpdateDto {
+    #[serde(alias = "name")]
     pub name: Option<String>,
+    #[serde(alias = "key")]
     pub key: Option<String>,
+    #[serde(alias = "value")]
     pub value: Option<String>,
 }
 
@@ -351,6 +361,9 @@ fn normalized_optional_text(value: Option<String>, max_len: usize) -> Option<Str
 
 #[cfg(test)]
 mod tests {
+    use axum::{extract::Query, http::Uri};
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -399,6 +412,70 @@ mod tests {
         );
         assert!(!input.custom_prefs.contains_key("blank"));
         assert_eq!(input.custom_prefs["long"].len(), 256);
+    }
+
+    #[test]
+    fn display_preference_queries_accept_lower_camel_client_fields() {
+        let uri: Uri = "/emby/DisplayPreferences/item-1?userId=user-1&client=Infuse"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<DisplayPreferencesQuery>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.client.as_deref(), Some("Infuse"));
+    }
+
+    #[test]
+    fn display_preference_bodies_accept_lower_camel_client_fields() {
+        let request = serde_json::from_value::<DisplayPreferencesUpdateDto>(json!({
+            "id": " body-id ",
+            "sortBy": " DateCreated ",
+            "sortOrder": "descending",
+            "client": " Infuse ",
+            "customPrefs": {
+                "view": "poster"
+            }
+        }))
+        .expect("display preferences body should deserialize");
+
+        let input = display_preferences_update_input(
+            " path-id ",
+            DisplayPreferencesQuery {
+                user_id: Some("user-1".to_owned()),
+                client: Some(" QueryClient ".to_owned()),
+            },
+            request,
+        )
+        .expect("display preferences update should normalize");
+
+        assert_eq!(input.client, "Infuse");
+        assert_eq!(input.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(input.sort_order.as_deref(), Some("Descending"));
+        assert_eq!(
+            input.custom_prefs.get("view").map(String::as_str),
+            Some("poster")
+        );
+    }
+
+    #[test]
+    fn user_setting_bodies_accept_lower_camel_client_fields() {
+        let request = serde_json::from_value::<Vec<UserSettingUpdateDto>>(json!([
+            { "name": " theme ", "value": " dark " },
+            { "key": "layout", "value": "grid" }
+        ]))
+        .expect("user settings body should deserialize");
+
+        let input = user_settings_update_input(" user-1 ", request)
+            .expect("user settings update should normalize");
+
+        assert_eq!(
+            input.settings.get("theme").map(String::as_str),
+            Some("dark")
+        );
+        assert_eq!(
+            input.settings.get("layout").map(String::as_str),
+            Some("grid")
+        );
     }
 
     #[test]

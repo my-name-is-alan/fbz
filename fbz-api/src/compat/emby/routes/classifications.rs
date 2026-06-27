@@ -23,30 +23,49 @@ use super::{
 
 const DEFAULT_CLASSIFICATION_LIMIT: u32 = 100;
 const MAX_CLASSIFICATION_LIMIT: u32 = 200;
+const MAX_CLASSIFICATION_START_INDEX: u32 = 10_000;
 const ITEMS_FILTERS_LIMIT: i64 = 500;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ClassificationQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "nameStartsWith", alias = "name_starts_with")]
     pub name_starts_with: Option<String>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsFiltersQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "mediaTypes", alias = "media_types")]
     pub media_types: Option<String>,
 }
 
@@ -72,6 +91,21 @@ pub struct ItemsFiltersDto {
     pub years: Vec<i32>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct NameLongIdPairDto {
+    pub name: String,
+    pub id: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ItemsFilters2Dto {
+    pub genres: Vec<NameLongIdPairDto>,
+    pub studios: Vec<NameLongIdPairDto>,
+    pub tags: Vec<String>,
+}
+
 pub async fn items_filters(
     State(state): State<AppState>,
     Query(query): Query<ItemsFiltersQuery>,
@@ -93,6 +127,27 @@ pub async fn items_filters(
     Ok(Json(items_filters_to_dto(result)))
 }
 
+pub async fn items_filters2(
+    State(state): State<AppState>,
+    Query(query): Query<ItemsFiltersQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<ItemsFilters2Dto>, AppError> {
+    let user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let repository = LibraryRepository::new(database.clone());
+
+    let result = repository
+        .list_user_item_filters(items_filters_input(user.id, query))
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list item filters: {err}")))?;
+
+    Ok(Json(items_filters2_to_dto(result)))
+}
+
 fn items_filters_input(user_id: i64, query: ItemsFiltersQuery) -> ItemsFiltersInput {
     ItemsFiltersInput {
         user_id,
@@ -110,6 +165,18 @@ fn items_filters_to_dto(result: ItemsFiltersResult) -> ItemsFiltersDto {
         tags: result.tags,
         official_ratings: result.official_ratings,
         years: result.years,
+    }
+}
+
+fn items_filters2_to_dto(result: ItemsFiltersResult) -> ItemsFilters2Dto {
+    ItemsFilters2Dto {
+        genres: result
+            .genres
+            .into_iter()
+            .map(|name| NameLongIdPairDto { name, id: 0 })
+            .collect(),
+        studios: Vec::new(),
+        tags: result.tags,
     }
 }
 
@@ -366,7 +433,12 @@ struct ClassificationWindow {
 impl ClassificationWindow {
     fn from_query(query: &ClassificationQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: i64::from(
+                query
+                    .start_index
+                    .unwrap_or(0)
+                    .min(MAX_CLASSIFICATION_START_INDEX),
+            ),
             limit: i64::from(
                 query
                     .limit
@@ -420,6 +492,8 @@ fn technical_facet_to_dto(record: TechnicalFacetRecord) -> TagItemDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -458,6 +532,30 @@ mod tests {
     }
 
     #[test]
+    fn classification_queries_accept_lower_camel_client_fields() {
+        let uri = "/Tags?userId=user-1&parentId=library-1&recursive=true&startIndex=10&limit=500&searchTerm=hdr&sortOrder=Descending&nameStartsWith=H&nameStartsWithOrGreater=G&fields=PrimaryImageAspectRatio&enableImages=true"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<ClassificationQuery>::try_from_uri(&uri).unwrap();
+
+        let window = ClassificationWindow::from_query(&query);
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_CLASSIFICATION_LIMIT));
+        assert_eq!(query.search_term.as_deref(), Some("hdr"));
+        assert_eq!(query.name_starts_with.as_deref(), Some("H"));
+        assert_eq!(query.name_starts_with_or_greater.as_deref(), Some("G"));
+        assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(
+            sort_direction_from_query(query.sort_order.as_deref()),
+            SortDirection::Desc
+        );
+    }
+
+    #[test]
     fn items_filters_query_accepts_official_filter_context_parameters() {
         let query = serde_json::from_value::<ItemsFiltersQuery>(json!({
             "UserId": "user-1",
@@ -466,6 +564,31 @@ mod tests {
             "MediaTypes": "Video"
         }))
         .unwrap();
+
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.include_item_types.as_deref(), Some("Movie,Series"));
+        assert_eq!(query.media_types.as_deref(), Some("Video"));
+    }
+
+    #[test]
+    fn classification_window_clamps_pathologically_large_start_index() {
+        let window = ClassificationWindow::from_query(&ClassificationQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..ClassificationQuery::default()
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
+    }
+
+    #[test]
+    fn items_filters_query_accepts_lower_camel_client_fields() {
+        let uri = "/Items/Filters?userId=user-1&parentId=library-1&includeItemTypes=Movie,Series&mediaTypes=Video"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<ItemsFiltersQuery>::try_from_uri(&uri).unwrap();
 
         assert_eq!(query.user_id.as_deref(), Some("user-1"));
         assert_eq!(query.parent_id.as_deref(), Some("library-1"));
@@ -489,6 +612,30 @@ mod tests {
                 "Tags": ["HDR"],
                 "OfficialRatings": ["PG-13"],
                 "Years": [2024]
+            })
+        );
+    }
+
+    #[test]
+    fn items_filters2_response_uses_official_query_filters_shape() {
+        let filters = items_filters2_to_dto(ItemsFiltersResult {
+            genres: vec!["Action".to_owned()],
+            tags: vec!["HDR".to_owned()],
+            official_ratings: vec!["PG-13".to_owned()],
+            years: vec![2024],
+        });
+
+        assert_eq!(
+            serde_json::to_value(filters).unwrap(),
+            json!({
+                "Genres": [
+                    {
+                        "Name": "Action",
+                        "Id": 0
+                    }
+                ],
+                "Studios": [],
+                "Tags": ["HDR"]
             })
         );
     }

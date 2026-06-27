@@ -12,6 +12,7 @@ use super::access::{authenticate_query_user, authenticate_request_user};
 
 const DEFAULT_SYNC_LIMIT: u32 = 100;
 const MAX_SYNC_LIMIT: u32 = 200;
+const MAX_SYNC_START_INDEX: u32 = 10_000;
 const MAX_SYNC_ID_LEN: usize = 256;
 const MAX_SYNC_ITEM_IDS_LEN: usize = 4096;
 const MAX_SYNC_CATEGORY_LEN: usize = 64;
@@ -433,7 +434,10 @@ fn sync_list_input(query: &SyncListQuery, require_target: bool) -> Result<SyncLi
     Ok(SyncListInput {
         user_id: normalize_optional_text(query.user_id.as_deref(), MAX_SYNC_ID_LEN, "UserId")?,
         target_id,
-        start_index: query.start_index.unwrap_or_default(),
+        start_index: query
+            .start_index
+            .unwrap_or_default()
+            .min(MAX_SYNC_START_INDEX),
         limit: query
             .limit
             .unwrap_or(DEFAULT_SYNC_LIMIT)
@@ -560,6 +564,23 @@ mod tests {
         assert_eq!(input.limit, MAX_SYNC_LIMIT);
 
         assert!(sync_list_input(&SyncListQuery::default(), true).is_err());
+    }
+
+    #[test]
+    fn sync_list_input_clamps_pathologically_large_start_index() {
+        let input = sync_list_input(
+            &SyncListQuery {
+                user_id: Some(" user-1 ".to_owned()),
+                target_id: Some(" device-1 ".to_owned()),
+                start_index: Some(500_000),
+                limit: Some(50),
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(input.start_index, 10_000);
+        assert_eq!(input.limit, 50);
     }
 
     #[test]

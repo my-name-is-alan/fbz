@@ -16,26 +16,42 @@ use super::{access::authenticate_query_user, items::normalized_parent_id};
 
 const DEFAULT_STUDIOS_LIMIT: u32 = 100;
 const MAX_STUDIOS_LIMIT: u32 = 200;
+const MAX_STUDIOS_START_INDEX: u32 = 10_000;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct StudiosQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
+    #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
+    #[serde(alias = "recursive")]
     pub recursive: Option<bool>,
+    #[serde(alias = "startIndex", alias = "start_index")]
     pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
     pub limit: Option<u32>,
+    #[serde(alias = "searchTerm", alias = "search_term")]
     pub search_term: Option<String>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
     pub sort_order: Option<String>,
+    #[serde(alias = "nameStartsWith", alias = "name_starts_with")]
     pub name_starts_with: Option<String>,
+    #[serde(
+        alias = "nameStartsWithOrGreater",
+        alias = "name_starts_with_or_greater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
+    #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
     pub enable_images: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct StudioByNameQuery {
+    #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
 }
 
@@ -108,7 +124,7 @@ struct StudioWindow {
 impl StudioWindow {
     fn from_query(query: &StudiosQuery) -> Self {
         Self {
-            start_index: i64::from(query.start_index.unwrap_or(0)),
+            start_index: i64::from(query.start_index.unwrap_or(0).min(MAX_STUDIOS_START_INDEX)),
             limit: i64::from(
                 query
                     .limit
@@ -149,6 +165,8 @@ fn studio_to_base_item(record: StudioRecord) -> BaseItemDto {
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+    use http::Uri;
     use serde_json::json;
 
     use super::*;
@@ -184,6 +202,34 @@ mod tests {
     }
 
     #[test]
+    fn studio_queries_accept_lower_camel_client_fields() {
+        let uri = "/Studios?userId=user-1&parentId=library-1&recursive=true&startIndex=10&limit=500&searchTerm=studio&sortOrder=Descending&nameStartsWith=S&nameStartsWithOrGreater=M&fields=PrimaryImageAspectRatio&enableImages=true"
+            .parse::<Uri>()
+            .unwrap();
+        let Query(query) = Query::<StudiosQuery>::try_from_uri(&uri).unwrap();
+
+        let window = StudioWindow::from_query(&query);
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.recursive, Some(true));
+        assert_eq!(window.start_index, 10);
+        assert_eq!(window.limit, i64::from(MAX_STUDIOS_LIMIT));
+        assert_eq!(query.search_term.as_deref(), Some("studio"));
+        assert_eq!(query.name_starts_with.as_deref(), Some("S"));
+        assert_eq!(query.name_starts_with_or_greater.as_deref(), Some("M"));
+        assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+        assert_eq!(query.enable_images, Some(true));
+        assert_eq!(
+            sort_direction_from_query(query.sort_order.as_deref()),
+            SortDirection::Desc
+        );
+
+        let uri = "/Studios/Studio%20A?userId=user-1".parse::<Uri>().unwrap();
+        let Query(query) = Query::<StudioByNameQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.user_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
     fn studio_mapping_uses_studio_shape() {
         let item = studio_to_base_item(StudioRecord {
             id: "studio-1".to_owned(),
@@ -194,5 +240,17 @@ mod tests {
         assert_eq!(item.item_type, "Studio");
         assert_eq!(item.media_type, None);
         assert!(item.is_folder);
+    }
+
+    #[test]
+    fn studio_window_clamps_pathologically_large_start_index() {
+        let window = StudioWindow::from_query(&StudiosQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..StudiosQuery::default()
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
     }
 }

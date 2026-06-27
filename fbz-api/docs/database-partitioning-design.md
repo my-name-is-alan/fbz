@@ -30,7 +30,7 @@
   task_status keyset 四索引与 scheduled_tasks 外键。`started_at` 插入后不变,running-lease/claim 语义安全。
   本地实跑校验:`success=t`、relkind `p`、2 行保留、无 UNIQUE、active partial 索引在;active-query 兼容性实测——
   插入 running run 路由 `2026m06`、按 id 更新状态成功、lease 回收查询(`status='running' and lease_expires_at<=now()`)正确返回。
-  后续:`notification_delivery_attempts`(category B 余,纯审计、当前 0 行,达规模再实施)、C 类(先改造入站外键)、
+  后续:`notification_delivery_attempts` 经复核有成功投递幂等唯一索引,暂不分区;C 类(先改造入站外键)、
   D 类活跃队列,并补滚动维护任务与 `queue_stats_rollup` 物化统计。
 
 ## 各表落地就绪分析(基于实际 schema 巡检)
@@ -50,7 +50,15 @@
 
 - `plugin_host_api_calls`(分区键 `finished_at`;11 个索引、9 个 check、3 个出站外键;高增长审计,价值最高)
   —— **已落地**(迁移 `0065`,采用方案 (a))。
-- `notification_delivery_attempts`(分区键 `created_at`)
+- `notification_delivery_attempts`(分区键 `created_at`)—— **暂不分区。** 除 `public_id`
+  唯一约束外,该表还有 partial unique index `idx_notification_delivery_attempts_target_success`
+  (`notification_request_id, target_id where status = 'succeeded' and target_id is not null`),
+  与 delivery worker 的 `has_successful_attempt(request.id, target.id)` 前置检查共同保护
+  **同一通知请求同一目标最多一个成功投递**(same request + target may have at most one successful delivery)。
+  按 `created_at` 分区会迫使该唯一索引包含分区键或降级为普通索引,两者都不能等价维持跨月份的成功幂等不变量。
+  该表达规模前先保留现状;若未来必须分区,需单独设计例如请求级目标成功状态表、显式幂等键表,
+  或让 `plugin_notification_requests` 与 attempts 共生命周期后再重评;在替代防线落地前 do not partition,
+  不能沿用普通 B 类 `public_id` 降级方案。
 - `scheduled_task_runs`(分区键 `started_at`)—— **已落地**(迁移 `0066`,方案 (a))。虽有 running-lease/claim 语义,但 `started_at` 插入后不变(行不跨分区),lease 回收/并发查询经各分区 partial 索引仍正确。
 
 ### C. 有入站外键 —— 需先改造引用方外键
@@ -61,6 +69,12 @@
 
 - `job_runs` ← `job_events`(及其分区)的 `job_run_id` —— **已落地**(迁移 `0067`):先 drop 入站 FK
   `job_events_job_run_id_fkey`(安全:job_runs 仅经 jobs 级联删除,该级联同时删除引用方 job_events,故 SET NULL 路径永不触发;`job_run_id` 列保留),再按 `started_at` 分区(无 public_id,无需唯一性降级)。**这是唯一可简单安全 drop 的 C 表。**
+- `plugin_notification_requests` ← `notification_delivery_attempts.notification_request_id`(CASCADE)——
+  **暂不分区。** attempts 是通知请求的子审计行,该入站 FK 当前负责把请求删除与 attempts 生命周期绑定。
+  分区 `plugin_notification_requests` 会使单列 `id` 不再能被 attempts 作为 FK 目标;而 attempts 本身又有
+  `idx_notification_delivery_attempts_target_success` 成功幂等阻塞点。request/attempt pair must be redesigned together:
+  未来若必须分区,需一起设计请求/尝试共分区、显式 request public-id 引用、或替代级联清理机制。在该方案落地前
+  do not partition `plugin_notification_requests`。
 - `plugin_execution_runs` ← `plugin_host_tokens`(CASCADE)、`plugin_host_api_calls`(SET NULL)——
   **暂不分区。** 入站 FK 本身可安全 drop(execution_runs 仅经 plugin 级联删除,host_tokens/host_api_calls 也各自经 plugin_id 级联同删,路径被吸收;代码无独立 `delete from plugin_execution_runs`),但该表另带**业务唯一约束** `unique(outbox_event_public_id, attempt)`——派发幂等不变量(DB 强制,非 ON CONFLICT),按 `started_at` 分区将被迫 drop 该不变量(含分区键也无法等价强制),属移除防御性保证而非「安全 drop」,需单独决策。
 - `playback_sessions` ← `transcoding_sessions` 的 `playback_session_id`(SET NULL)—— **已落地**(迁移 `0069`,触发器方案)。
@@ -98,8 +112,8 @@
 | `scheduled_task_runs` | `started_at` | 月 | 6 个月 | 归档后 drop |
 | `plugin_host_api_calls` | `finished_at` | 月 | 3 个月 | 归档后 drop |
 | `plugin_execution_runs` | `started_at` | 月 | 3 个月 | 归档后 drop |
-| `notification_delivery_attempts` | `created_at` | 月 | 3 个月 | 归档后 drop |
-| `plugin_notification_requests` | `created_at` | 月 | 6 个月 | 归档后 drop |
+| `notification_delivery_attempts` | `created_at` | 月 | 3 个月 | 暂不分区;需先设计成功幂等替代 |
+| `plugin_notification_requests` | `created_at` | 月 | 6 个月 | 暂不分区;需与 attempts 共设计 |
 | `playback_sessions` | `started_at` | 月 | 按合规需求(默认 12 个月) | 归档后 drop |
 | `transcoding_sessions` | `created_at` | 月 | 热:活跃 + 近 7 天终态 | 终态由 `core.transcode.cleanup` 清理后归档 |
 
@@ -134,14 +148,30 @@ PostgreSQL 原生分区要求**唯一约束/主键必须包含分区键**:
   `DROP`。`DETACH` 是元数据操作,不阻塞热分区读写。
 - **滚动维护**:用一个计划任务(可复用 `scheduler` 节点的 cron 调度)按月预创建下一分区、归档并分离过期分区。
   预创建必须早于写入到达,避免落到默认分区。
-  - **预创建机制已落地**(迁移 `0068`):`ensure_partition_coverage(months_ahead int) returns int` 幂等地为所有已分区表
-    (`job_events`/`plugin_host_api_calls`/`scheduled_task_runs`/`job_runs`)创建当前月 + N 个未来月分区(已存在则跳过),返回新建数量。
-    迁移内已调用 `ensure_partition_coverage(18)` 把四表覆盖延伸到 2027m12(各 19 月分区 + default)。本地实跑校验:
-    函数存在、四表各 20 分区、重复调用返回 0(幂等)。
+  - **预创建机制已落地**(迁移 `0068`,并由 `0069` 扩展):`ensure_partition_coverage(months_ahead int) returns int`
+    幂等地为所有已分区表
+    (`job_events`/`plugin_host_api_calls`/`scheduled_task_runs`/`job_runs`/`playback_sessions`)
+    创建当前月 + N 个未来月分区(已存在则跳过),返回新建数量。
+    `0068` 先把四表覆盖延伸到 2027m12(各 19 月分区 + default),`0069` 再把 `playback_sessions`
+    加入同一函数并调用 `ensure_partition_coverage(18)`;本地实跑校验:
+    函数存在、五表各 20 分区、重复调用返回 0(幂等)。
   - **滚动计划任务已落地**:`core.partition.maintenance`(task_type `partition.maintenance`,默认 `SCHEDULE_PARTITION_MAINTENANCE=daily`)
     在 `bootstrap_core_tasks` 注册,`run_claimed_task` 调用 `ensure_partition_coverage(6)` 保持向前 6 个月覆盖。该任务受 scheduler 节点角色 + 开关门控,
-    本地实跑校验:启用 scheduler 后任务注册(enabled=t)、强制 due 后经真实调度器派发并 `succeeded`(queued_jobs=0,因覆盖已到 2027m12)。
-    **待办**:冷分区归档/`DETACH`+`DROP` 与 `queue_stats_rollup` 物化统计仍为设计,后续单独实施。
+    并刷新当前月的 `queue_stats_rollup` 热 bucket。当前月刷新按五张已分区表写入幂等月度计数:
+    `job_events.event_level`、`plugin_host_api_calls.status_code`、`scheduled_task_runs.status`、
+    `job_runs.status`、`playback_sessions` 的 active/stopped 状态桶。本地实跑校验:启用 scheduler 后任务注册(enabled=t)、
+    强制 due 后经真实调度器派发并 `succeeded`;`queue_stats_rollup_refresh_writes_against_live_schema`
+    证明刷新 SQL 可在迁移后 schema 上计划、写入、重复刷新不累加并可恢复 bucket。
+    冷分区归档的只读候选发现已在调度仓储落地:`list_partition_archive_candidates(retention_months, limit)`
+    从 `pg_inherits` 枚举五张已分区表的月度子分区,排除 default 分区,只返回早于热窗口且已有
+    `queue_stats_rollup.source_partition` bucket 的候选;真实 schema 冒烟
+    `partition_archive_candidates_plan_against_live_schema` 已验证 SQL 可计划、当前月不会被误判为候选、
+    有 rollup 证据的冷分区可被发现。实际 `DETACH`+归档+`DROP` 执行任务仍为后续单独实施。
+  - **只读 Admin 可观测入口已落地**:`GET /api/admin/partition-maintenance/rollups`
+    按 allowlist 表名、bucket 日期范围和上限读取 `queue_stats_rollup`;
+    `GET /api/admin/partition-maintenance/archive-candidates` 按 retention/month limit 读取冷分区候选。
+    两个入口都要求服务器管理员权限,只调用调度仓储只读查询,不执行 `DETACH`、`DROP`、`DELETE` 或归档写动作;
+    `queue_stats_rollup_read_query_executes_against_live_schema` 已在真实迁移 schema 上验证读查询可计划、可读取 marker row 且 limit 生效。
 - **冷数据查询**:合规 / 审计场景查冷数据走归档库;在线 `/api/admin/*` 列表只查热窗口,
   并在 UI/文档上明示「仅近 N 个月」。这与现有 keyset 列表「不算精确总数」的取舍一致。
 
@@ -151,9 +181,14 @@ PostgreSQL 原生分区要求**唯一约束/主键必须包含分区键**:
 
 - **活跃 backlog**(`/ready` 的 jobs/event_outbox/transcodes/notifications/mirror)只统计活跃状态行,
   天然集中在最新分区,继续走现有部分索引即可,**不受归档影响**——这是当前实现已满足的。
-- **历史聚合 / 仪表盘计数**改为物化:用一张 `queue_stats_rollup(bucket_date, table_name, status, count)`
+- **历史聚合 / 仪表盘计数**改为物化:用一张 `queue_stats_rollup(bucket_date, table_name, status, row_count)`
   汇总表,由滚动维护任务在归档分区前写入该分区的最终计数,在线仪表盘读 rollup 而非扫描历史分区。
+  迁移 `0076` 已先落表结构、主键和按 `(table_name, bucket_date desc, status)` 读取的索引;调度仓储
+  `refresh_queue_stats_rollup_for_month` 已提供非破坏性刷新,并由 `core.partition.maintenance` 刷新当前月热 bucket。
+  Admin 只读入口 `GET /api/admin/partition-maintenance/rollups` 已接入该读取索引,用表名 allowlist、日期范围和 limit 约束查询窗口。
+  冷分区归档任务接入时,需复用同一刷新语义在 `DETACH` 前写入待归档分区的最终 bucket。
 - 物化刷新与归档同一事务/同一任务完成,保证「分区被分离前其计数已落 rollup」,避免计数丢失。
+  当前只读候选发现已经把「有 rollup bucket」作为候选前置条件,为后续执行任务提供防线。
 
 ## 迁移实施步骤(确认后执行)
 

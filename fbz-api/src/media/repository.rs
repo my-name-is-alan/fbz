@@ -725,7 +725,7 @@ impl MediaRepository {
                 join libraries l on l.id = mi.library_id
                 join library_permissions lp on lp.library_id = mi.library_id
                 where mi.public_id = case
-                    when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     then $2::uuid
                     else null::uuid
                 end

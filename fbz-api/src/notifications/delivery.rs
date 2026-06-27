@@ -1196,7 +1196,9 @@ mod tests {
     // type-checks against the real migrated schema via EXPLAIN — which fully
     // resolves the UPDATE...FROM claimed CTE, every column/type and the prior-
     // state RETURNING without executing the UPDATE, so it never mutates a real
-    // queued event. Requires dockerized PostgreSQL and `DATABASE_URL`.
+    // queued event. It also checks the notification-specific event_outbox claim
+    // indexes created by the migration chain. Requires dockerized PostgreSQL
+    // and `DATABASE_URL`.
     //   cargo test -- --ignored claim_next_event_executes_against_live_schema
     #[tokio::test]
     #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
@@ -1211,6 +1213,38 @@ mod tests {
             .await
             .expect("connect to live PostgreSQL");
         crate::db::migrate(&pool).await.expect("run migrations");
+
+        let available_index = sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_event_outbox_notification_delivery_available'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read available notification delivery claim index")
+        .expect("notification delivery available claim index should exist");
+        assert!(available_index.contains("event_type = 'notification.send.requested'::text"));
+        assert!(available_index.contains("status = ANY"));
+        assert!(available_index.contains("attempts < max_attempts"));
+
+        let expired_lease_index = sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            select indexdef
+            from pg_indexes
+            where schemaname = 'public'
+              and indexname = 'idx_event_outbox_notification_delivery_expired_lease'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read expired notification delivery lease claim index")
+        .expect("notification delivery expired lease claim index should exist");
+        assert!(expired_lease_index.contains("event_type = 'notification.send.requested'::text"));
+        assert!(expired_lease_index.contains("status = 'delivering'::text"));
+        assert!(expired_lease_index.contains("attempts < max_attempts"));
 
         // Plain EXPLAIN (not ANALYZE) plans the statement without executing it.
         let plan_rows = sqlx::query(&format!("explain {CLAIM_NEXT_EVENT_SQL}"))
@@ -1241,6 +1275,41 @@ mod tests {
         assert!(delivery.contains("\"recovered stale notification delivery lease\""));
         assert!(delivery.contains("outbox_public_id = %event.public_id"));
         assert!(delivery.contains("prior_locked_by = event.prior_locked_by"));
+    }
+
+    #[test]
+    fn notification_delivery_claim_indexes_match_claim_query() {
+        use std::{fs, path::Path};
+
+        assert!(CLAIM_NEXT_EVENT_SQL.contains("where event_type = $1"));
+        assert!(CLAIM_NEXT_EVENT_SQL.contains("status in ('pending', 'failed')"));
+        assert!(CLAIM_NEXT_EVENT_SQL.contains("status = 'delivering' and locked_until <= now()"));
+        assert!(CLAIM_NEXT_EVENT_SQL.contains("attempts < max_attempts"));
+        assert!(CLAIM_NEXT_EVENT_SQL.contains("order by available_at asc, id asc"));
+        assert!(CLAIM_NEXT_EVENT_SQL.contains("for update skip locked"));
+
+        let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let migrations = fs::read_dir(&migrations_dir)
+            .expect("read migrations directory")
+            .map(|entry| {
+                let path = entry.expect("read migration entry").path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("sql") {
+                    fs::read_to_string(path).expect("read migration sql")
+                } else {
+                    String::new()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(migrations.contains("idx_event_outbox_notification_delivery_available"));
+        assert!(migrations.contains("idx_event_outbox_notification_delivery_expired_lease"));
+        assert!(migrations.contains("event_type = 'notification.send.requested'"));
+        assert!(migrations.contains("on event_outbox (available_at, id)"));
+        assert!(migrations.contains("status in ('pending', 'failed')"));
+        assert!(migrations.contains("on event_outbox (locked_until, id)"));
+        assert!(migrations.contains("status = 'delivering'"));
+        assert!(migrations.contains("attempts < max_attempts"));
     }
 
     #[test]
