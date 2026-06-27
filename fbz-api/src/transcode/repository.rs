@@ -979,14 +979,15 @@ mod tests {
 
     #[test]
     fn claim_next_uses_bounded_capacity_probe() {
-        let claim_start = REPOSITORY_SOURCE
+        let repository_source = REPOSITORY_SOURCE.replace("\r\n", "\n");
+        let claim_start = repository_source
             .find("pub async fn claim_next")
             .expect("claim_next should exist");
-        let claim_end = REPOSITORY_SOURCE[claim_start..]
+        let claim_end = repository_source[claim_start..]
             .find("pub async fn mark_succeeded")
             .map(|offset| claim_start + offset)
             .expect("claim_next should be followed by terminal update methods");
-        let claim_source = &REPOSITORY_SOURCE[claim_start..claim_end];
+        let claim_source = &repository_source[claim_start..claim_end];
 
         assert!(
             !claim_source
