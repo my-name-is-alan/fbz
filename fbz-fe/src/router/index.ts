@@ -1,6 +1,8 @@
 import type { RouteRecordRaw } from "vue-router";
 import { createRouter, createWebHistory } from "vue-router";
 
+import { setupRouterGuard } from "@/router/guard.ts";
+
 const adminPage = () => import("@/views/account/index.vue");
 
 export const routes = [
@@ -22,6 +24,21 @@ export const routes = [
         path: "library/:id",
         name: "library-detail",
         component: () => import("@/views/library/detail/index.vue"),
+      },
+      {
+        path: "music/:id",
+        name: "music-library",
+        component: () => import("@/views/music/library/index.vue"),
+      },
+      {
+        path: "artist/:id",
+        name: "artist-detail",
+        component: () => import("@/views/detail/artist/index.vue"),
+      },
+      {
+        path: "album/:id",
+        name: "album-detail",
+        component: () => import("@/views/detail/album/index.vue"),
       },
       {
         path: "movie/:id",
@@ -58,12 +75,14 @@ export const routes = [
       // 媒体设置
       { path: "metadata", name: "admin-metadata", component: adminPage },
       { path: "libraries", name: "admin-libraries", component: adminPage },
+      { path: "photos", name: "admin-photos", component: adminPage },
       { path: "transcode", name: "admin-transcode", component: adminPage },
       // 系统设置
       { path: "users", name: "admin-users", component: adminPage },
       { path: "users/create", name: "admin-users-create", component: adminPage },
       { path: "users/:id", name: "admin-users-edit", component: adminPage },
       { path: "plugins", name: "admin-plugins", component: adminPage },
+      { path: "scheduled-tasks", name: "admin-scheduled-tasks", component: adminPage },
       { path: "metadata-mgr", name: "admin-metadata-mgr", component: adminPage },
       { path: "logs", name: "admin-logs", component: adminPage },
       { path: "about", name: "admin-about", component: adminPage },
@@ -88,3 +107,5 @@ export const router = createRouter({
     return savedPosition ?? { top: 0 };
   },
 });
+
+setupRouterGuard(router);

@@ -1,11 +1,11 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
@@ -22,6 +22,29 @@ use super::access::authenticate_request_user;
 
 const MAX_SYSTEM_CONFIGURATION_KEY_LEN: usize = 128;
 const MAX_SYSTEM_CONFIGURATION_BODY_BYTES: usize = 128 * 1024;
+const MAX_SYSTEM_LOG_NAME_LEN: usize = 256;
+
+/// Official Emby `LogFile` descriptor returned by `System/Logs`.
+///
+/// FBZ emits structured logs to stdout/stderr (captured by the container or
+/// service manager) rather than to rotating on-disk log files, so the server
+/// log list is intentionally empty. The DTO is still shaped exactly like the
+/// official `LogFile` so the admin dashboard's log viewer renders an empty
+/// list instead of choking on a missing field.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub(crate) struct LogFileDto {
+    name: String,
+    size: i64,
+    date_created: String,
+    date_modified: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SystemLogQuery {
+    #[serde(default, alias = "name")]
+    pub name: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +94,7 @@ pub async fn system_configuration(
     authenticate_request_user(&state, &headers, &uri).await?;
 
     Ok(Json(ServerConfigurationDto::from(
-        server_configuration_source(&state),
+        server_configuration_source(&state).await,
     )))
 }
 
@@ -86,7 +109,7 @@ pub async fn system_configuration_by_key(
 
     Ok(Json(named_configuration_value(
         &key,
-        server_configuration_source(&state),
+        server_configuration_source(&state).await,
     )))
 }
 
@@ -166,6 +189,81 @@ pub async fn release_note_versions(
 
 pub async fn system_ping() -> Response {
     (StatusCode::OK, "").into_response()
+}
+
+/// `GET System/Logs` — admin-only server log file listing.
+///
+/// FBZ logs to structured stdout/stderr, not rotating on-disk files, so this
+/// returns an empty `LogFile[]` under the official shape. Keeping the route
+/// present (instead of letting it 404) lets the Emby admin dashboard's log
+/// viewer load cleanly and show "no server logs" rather than erroring.
+pub async fn system_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<LogFileDto>>, AppError> {
+    authenticate_admin_user(&state, &headers, &uri).await?;
+
+    Ok(Json(Vec::new()))
+}
+
+/// `GET System/Logs/Log?name=...` — admin-only fetch of a single named log.
+///
+/// The `name` is validated as a bounded, path-traversal-safe file name so a
+/// malicious client cannot probe the host filesystem. Because FBZ exposes no
+/// on-disk server log files, every valid request resolves to a controlled
+/// not-found rather than a generic 404 or any filesystem path disclosure.
+pub async fn system_log(
+    State(state): State<AppState>,
+    Query(query): Query<SystemLogQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, AppError> {
+    authenticate_admin_user(&state, &headers, &uri).await?;
+    let name = normalized_log_name(query.name.as_deref())?;
+
+    Err(AppError::not_found(format!(
+        "server log file '{name}' is not available; FBZ logs to structured stdout"
+    )))
+}
+
+/// `POST System/Restart` — admin-only server restart command.
+///
+/// The Emby admin dashboard exposes a "Restart" power button that POSTs here.
+/// FBZ's process lifecycle is owned by the container/service manager (a node
+/// restart is a supervised operation with its own graceful shutdown on signal),
+/// so an Emby client must not be able to bounce the process out of band. The
+/// route is admin-protected and returns a controlled conflict instead of a
+/// generic 404, so the dashboard renders a clear "managed externally" message
+/// rather than a missing-endpoint error or a fake success.
+pub async fn system_restart(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_admin_user(&state, &headers, &uri).await?;
+
+    Err(AppError::conflict(
+        "server restart is managed by the FBZ deployment (container/service manager), not the Emby client",
+    ))
+}
+
+/// `POST System/Shutdown` — admin-only server shutdown command.
+///
+/// Mirrors [`system_restart`]: the dashboard's "Shutdown" power button POSTs
+/// here. FBZ shuts down gracefully on process signal under its supervisor, so an
+/// Emby client must not be able to halt the process out of band. Admin-protected
+/// controlled conflict, never a fake success.
+pub async fn system_shutdown(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_admin_user(&state, &headers, &uri).await?;
+
+    Err(AppError::conflict(
+        "server shutdown is managed by the FBZ deployment (container/service manager), not the Emby client",
+    ))
 }
 
 async fn authenticate_admin_user(
@@ -252,6 +350,28 @@ fn normalized_configuration_key(value: &str) -> Result<String, AppError> {
     Ok(value.to_owned())
 }
 
+/// Validate the `name` query of `System/Logs/Log` as a bounded, path-traversal
+/// safe file name. Rejects empty values, anything over the length cap, path
+/// separators, parent-directory escapes and control characters so a client
+/// cannot probe the host filesystem through the log-fetch route.
+fn normalized_log_name(value: Option<&str>) -> Result<String, AppError> {
+    let value = value.map(str::trim).unwrap_or_default();
+    if value.is_empty() {
+        return Err(AppError::unprocessable("log file name is required"));
+    }
+
+    if value.len() > MAX_SYSTEM_LOG_NAME_LEN
+        || value.contains("..")
+        || value
+            .chars()
+            .any(|ch| matches!(ch, '/' | '\\') || ch.is_control())
+    {
+        return Err(AppError::unprocessable("log file name is invalid"));
+    }
+
+    Ok(value.to_owned())
+}
+
 fn ensure_configuration_body_within_limit(body: &Bytes) -> Result<(), AppError> {
     if body.len() > MAX_SYSTEM_CONFIGURATION_BODY_BYTES {
         return Err(AppError::unprocessable(format!(
@@ -285,6 +405,7 @@ mod tests {
             cache_path: "./var/artwork".to_owned(),
             metadata_path: "./var/metadata".to_owned(),
             simultaneous_stream_limit: 3,
+            has_users: true,
         }
     }
 
@@ -344,9 +465,52 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn log_name_accepts_bounded_path_safe_values() {
+        assert_eq!(
+            normalized_log_name(Some(" fbz-2026-06-28.log ")).unwrap(),
+            "fbz-2026-06-28.log"
+        );
+    }
+
+    #[test]
+    fn log_name_rejects_empty_and_unsafe_values() {
+        for bad in [None, Some(""), Some("   ")] {
+            let err = normalized_log_name(bad).unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        for traversal in [
+            "../secret",
+            "..\\secret",
+            "logs/app.log",
+            "logs\\app.log",
+            "a\0b",
+            "line\nbreak",
+        ] {
+            let err = normalized_log_name(Some(traversal)).unwrap_err();
+            assert_eq!(
+                err.status_code(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "expected {traversal} to be rejected"
+            );
+        }
+
+        let err = normalized_log_name(Some(&"x".repeat(MAX_SYSTEM_LOG_NAME_LEN + 1))).unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 }
 
-fn server_configuration_source(state: &AppState) -> ServerConfigurationSource {
+async fn server_configuration_source(state: &AppState) -> ServerConfigurationSource {
+    // 初始化状态随用户数动态变化；DB 不可用或查询失败时退守 false（视为未初始化），
+    // 避免误报"已完成向导"把首次部署者挡在外面。
+    let has_users = match state.database() {
+        Some(database) => crate::setup::service::has_any_user(database)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
     ServerConfigurationSource {
         server_name: "FBZ".to_owned(),
         public_base_url: state.config().server.public_base_url.clone(),
@@ -364,5 +528,6 @@ fn server_configuration_source(state: &AppState) -> ServerConfigurationSource {
             .display()
             .to_string(),
         simultaneous_stream_limit: i32::from(state.config().transcode.max_concurrent),
+        has_users,
     }
 }

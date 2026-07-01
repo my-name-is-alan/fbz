@@ -1,37 +1,18 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/stores/auth.ts";
 import { useUiStore } from "@/stores/ui.ts";
-import { catalogItems, imageUrl } from "@/service/modules/tmdb.ts";
 
 const router = useRouter();
+const route = useRoute();
 const authStore = useAuthStore();
 const uiStore = useUiStore();
 
-/* ---------- 左侧海报墙 ---------- */
-interface PosterTile {
-  id: number;
-  title: string;
-  src?: string;
-}
-
-const posters: PosterTile[] = catalogItems
-  .filter((it) => it.poster_path)
-  .slice(0, 32)
-  .map((it) => ({ id: it.id, title: it.title, src: imageUrl(it.poster_path, "w342") }));
-
-// 拆成 4 列，交错上下缓慢漂移
-const columns = computed<PosterTile[][]>(() => {
-  const cols: PosterTile[][] = [[], [], [], []];
-  posters.forEach((p, i) => cols[i % 4]!.push(p));
-  return cols;
-});
+const columns = [0, 1, 2, 3];
+const tilesPerColumn = 8;
 
 /* ---------- 表单状态 ---------- */
 const username = ref(authStore.username || "");
 const password = ref("");
-const serverAddress = ref(
-  authStore.serverAddress || (typeof window !== "undefined" ? window.location.origin : ""),
-);
 const remember = ref(localStorage.getItem("fbz_authenticated") === "true");
 const showPassword = ref(false);
 const language = ref(authStore.language);
@@ -51,13 +32,10 @@ const appVersion = "FBZ Server · v0.1.0";
 async function handleLogin() {
   if (loading.value) return;
   loading.value = true;
-  // 设计阶段模拟一次请求时延，给登录按钮一个加载态
-  await new Promise((resolve) => setTimeout(resolve, 550));
 
-  const ok = authStore.login({
+  const ok = await authStore.login({
     username: username.value,
     password: password.value,
-    serverAddress: serverAddress.value,
     remember: remember.value,
   });
 
@@ -65,7 +43,8 @@ async function handleLogin() {
   if (!ok) return;
 
   authStore.setLanguage(language.value);
-  await router.push("/");
+  const redirect = route.query.redirect;
+  await router.push(typeof redirect === "string" ? redirect : "/");
 }
 
 function handleForgot() {
@@ -85,9 +64,8 @@ function handleForgot() {
           class="poster-col"
           :class="ci % 2 === 0 ? 'drift-up' : 'drift-down'"
         >
-          <div v-for="tile in col" :key="tile.id" class="poster-tile">
-            <img v-if="tile.src" :src="tile.src" :alt="tile.title" loading="lazy" />
-            <span v-else class="poster-fallback">{{ tile.title.charAt(0) }}</span>
+          <div v-for="tile in tilesPerColumn" :key="`${col}-${tile}`" class="poster-tile">
+            <span class="poster-fallback">{{ (col * tilesPerColumn + tile) % 9 }}</span>
           </div>
         </div>
       </div>
@@ -120,35 +98,11 @@ function handleForgot() {
           <span class="indicator" />
           <div>
             <h2>登录到 FBZ</h2>
-            <p>输入服务器与账户凭据以进入媒体工作台。</p>
+            <p>输入账户凭据以进入媒体工作台。</p>
           </div>
         </header>
 
         <form class="login-form" @submit.prevent="handleLogin">
-          <div class="form-group">
-            <label for="login-server">服务器地址</label>
-            <div class="control-wrap">
-              <svg class="lead-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M4 6h16M4 6v12h16V6M4 12h16"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  stroke-linecap="round"
-                />
-              </svg>
-              <input
-                id="login-server"
-                v-model="serverAddress"
-                type="text"
-                inputmode="url"
-                placeholder="http://127.0.0.1:8080"
-                class="control-input has-icon"
-                autocomplete="url"
-              />
-            </div>
-          </div>
-
           <div class="form-group">
             <label for="login-username">用户名</label>
             <div class="control-wrap">
@@ -318,15 +272,12 @@ function handleForgot() {
   aspect-ratio: 2 / 3;
   border-radius: var(--fbz-radius-card);
   overflow: hidden;
-  background: var(--fbz-color-panel-strong);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--fbz-color-brand-500) 20%, var(--fbz-color-panel-strong)),
+    var(--fbz-color-panel)
+  );
   border: 1px solid var(--fbz-color-line-soft);
-
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
 
   .poster-fallback {
     width: 100%;

@@ -44,6 +44,8 @@ const ICONS = {
     "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75",
   user: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
   plugin: "M12 2L2 7l10 5 10-5-10-5z M2 17l10 5 10-5 M2 12l10 5 10-5",
+  schedule:
+    "M8 2v4 M16 2v4 M3 10h18 M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M12 14v4 M10 16h4",
   metaMgr: "M4 7V4h16v3 M9 20h6 M12 4v16",
   log: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M12 18v-6 M8 18v-4 M16 18v-2",
   info: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 16v-4 M12 8h.01",
@@ -77,6 +79,12 @@ const navItems: NavItem[] = [
     children: [
       { label: "用户管理", to: "/admin/users", name: "admin-users", icon: ICONS.users },
       { label: "插件设置", to: "/admin/plugins", name: "admin-plugins", icon: ICONS.plugin },
+      {
+        label: "任务计划",
+        to: "/admin/scheduled-tasks",
+        name: "admin-scheduled-tasks",
+        icon: ICONS.schedule,
+      },
       {
         label: "元数据管理",
         to: "/admin/metadata-mgr",
@@ -459,7 +467,12 @@ useEventListener(window, "keydown", (e) => {
           </button>
 
           <RouterLink to="/admin/profile" class="user-badge" title="个人信息与偏好设置">
-            <span class="user-avatar">{{ authStore.nickname.charAt(0).toUpperCase() }}</span>
+            <BaseAvatar
+              :user-id="authStore.userId"
+              :name="authStore.nickname"
+              :version="authStore.avatarVersion"
+              :size="24"
+            />
             <span class="user-name">{{ authStore.nickname }}</span>
           </RouterLink>
         </div>
@@ -752,18 +765,6 @@ useEventListener(window, "keydown", (e) => {
   background: var(--fbz-color-panel-strong);
   border: 1px solid var(--fbz-color-line);
   border-radius: var(--fbz-radius-round);
-
-  .user-avatar {
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    background: var(--fbz-color-brand-500);
-    color: #07120a;
-    font-weight: 800;
-    font-size: 10px;
-    display: grid;
-    place-content: center;
-  }
 
   .user-name {
     font-size: 11px;

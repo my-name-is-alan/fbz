@@ -647,6 +647,39 @@ impl MediaRepository {
         .transpose()
     }
 
+    /// 解析一个对用户可见的图片条目 public_id → 内部 bigint id（用于拼缩略图文件名）。
+    /// 走与 artwork 查询同样的 can_view 权限过滤；只匹配未删除、非隐藏库的 photo 条目。
+    /// 返回整数 id（无法目录穿越），None 时调用方退回 404。
+    pub async fn find_photo_thumbnail_item_id(
+        &self,
+        user_id: i64,
+        item_id: &str,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            select mi.id
+            from media_items mi
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+            where mi.public_id = case
+                when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $2::uuid
+                else null::uuid
+            end
+              and lp.user_id = $1
+              and lp.can_view = true
+              and mi.item_type = 'photo'
+              and mi.is_deleted = false
+              and l.is_hidden = false
+            limit 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
     pub async fn find_item_artwork(
         &self,
         user_id: i64,

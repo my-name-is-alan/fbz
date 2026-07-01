@@ -1,33 +1,23 @@
 <script setup lang="ts">
 import type { CollectionDetail, MediaItem } from "@/types/media.ts";
-import { getCollectionDetail, imageUrl } from "@/service/modules/tmdb.ts";
+import { loadCollectionDetail } from "@/service/modules/detail.ts";
 
 const route = useRoute();
-const id = computed(() => Number(route.params.id));
+const id = computed(() => String(route.params.id ?? ""));
 const collection = ref<CollectionDetail>();
+const parts = ref<MediaItem[]>([]);
 
 watch(
   id,
   async (v) => {
-    collection.value = await getCollectionDetail(v);
+    const detail = await loadCollectionDetail(v);
+    collection.value = detail?.collection;
+    parts.value = detail?.parts ?? [];
   },
   { immediate: true },
 );
 
-const parts = computed<MediaItem[]>(
-  () =>
-    collection.value?.parts.map((p) => ({
-      id: String(p.id),
-      libraryId: "movie",
-      title: p.title,
-      meta: `${p.year ?? "—"} · 电影`,
-      poster: imageUrl(p.poster_path, "w500"),
-      year: p.year ?? undefined,
-      rating: p.rating ?? undefined,
-    })) ?? [],
-);
-
-const meta = computed(() => (collection.value ? [`${collection.value.parts.length} 部作品`] : []));
+const meta = computed(() => (collection.value ? [`${parts.value.length} 部作品`] : []));
 </script>
 
 <template>
@@ -36,8 +26,8 @@ const meta = computed(() => (collection.value ? [`${collection.value.parts.lengt
 
     <DetailHero
       :title="collection.title"
-      :poster="imageUrl(collection.poster_path, 'w500')"
-      :backdrop="imageUrl(collection.backdrop_path, 'w1280')"
+      :poster="collection.poster_path ?? undefined"
+      :backdrop="collection.backdrop_path ?? undefined"
       :meta="meta"
       :overview="collection.overview"
       :show-actions="false"
@@ -45,7 +35,7 @@ const meta = computed(() => (collection.value ? [`${collection.value.parts.lengt
 
     <section class="parts">
       <h2 class="section-title">包含作品</h2>
-      <div class="grid">
+      <div v-if="parts.length" class="grid">
         <MediaCard
           v-for="(item, i) in parts"
           :key="item.id"
@@ -54,11 +44,12 @@ const meta = computed(() => (collection.value ? [`${collection.value.parts.lengt
           :variant="(i % 2) as 0 | 1"
         />
       </div>
+      <p v-else class="empty-state">该合集暂无可见成员。</p>
     </section>
   </main>
 
   <main v-else class="detail-missing">
-    <p>未找到该系列</p>
+    <p>未找到该合集，或后端尚未提供该合集详情。</p>
     <RouterLink to="/" class="link">返回首页</RouterLink>
   </main>
 </template>
@@ -80,6 +71,12 @@ const meta = computed(() => (collection.value ? [`${collection.value.parts.lengt
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: var(--fbz-space-5) var(--fbz-space-4);
+}
+
+.empty-state {
+  margin: 0;
+  color: var(--fbz-color-text-muted);
+  font-size: var(--fbz-font-size-sm);
 }
 
 .link {

@@ -2,7 +2,6 @@
 import { useThemeStore } from "@/stores/theme.ts";
 import { useLibraryStore } from "@/stores/library.ts";
 import { useUiStore } from "@/stores/ui.ts";
-import { libraryCovers } from "@/service/modules/tmdb.ts";
 
 const route = useRoute();
 const themeStore = useThemeStore();
@@ -34,6 +33,10 @@ const pageMap: Record<string, { title: string; desc: string }> = {
     title: "媒体库管理",
     desc: "配置搜刮引擎、配置磁盘文件路径，或调整自动扫码与入库通知任务。",
   },
+  "admin-photos": {
+    title: "家庭相册",
+    desc: "按拍摄时间浏览家庭库照片时间线，查看 EXIF 拍摄信息与缩略图。",
+  },
   "admin-transcode": {
     title: "转码设置",
     desc: "配置硬件加速、转码质量和流媒体输出参数。",
@@ -52,7 +55,11 @@ const pageMap: Record<string, { title: string; desc: string }> = {
   },
   "admin-plugins": {
     title: "插件设置",
-    desc: "安装、配置和管理系统插件扩展。",
+    desc: "查看真实插件包、运行状态、配置和执行审计。",
+  },
+  "admin-scheduled-tasks": {
+    title: "任务计划",
+    desc: "查看后端调度器注册的计划任务、运行历史，并按需手动触发。",
   },
   "admin-metadata-mgr": {
     title: "元数据管理",
@@ -124,13 +131,6 @@ function getLibVisuals(kind: string) {
   return libTypeVisuals[kind] ?? libTypeVisuals.movie;
 }
 
-/** 各库封面剧照（取最新入库的前 4 张 backdrop） */
-const coverMap = computed(() => libraryCovers());
-
-function getLibCover(libId: string): string | undefined {
-  return coverMap.value[libId]?.[0];
-}
-
 function handleEditLibrary(lib: any) {
   uiStore.openLibraryEditor(lib.id);
 }
@@ -138,6 +138,13 @@ function handleEditLibrary(lib: any) {
 function handleAddLibrary() {
   uiStore.openLibraryEditor(null);
 }
+
+// 库管理视图：挂载时拉取真实媒体库列表；失败时由 store 暴露错误状态。
+onMounted(() => {
+  if (route.name === "admin-libraries" && !libraryStore.loaded) {
+    void libraryStore.loadFromBackend();
+  }
+});
 </script>
 
 <template>
@@ -164,14 +171,14 @@ function handleAddLibrary() {
             v-for="lib in libraryStore.libraries"
             :key="lib.id"
             class="lib-preview-card"
-            :class="{ 'has-cover': getLibCover(lib.id) }"
             @click="handleEditLibrary(lib)"
+            @contextmenu.prevent="
+              uiStore.openLibraryContextMenu($event.clientX, $event.clientY, {
+                id: lib.id,
+                name: lib.name,
+              })
+            "
           >
-            <!-- Cover backdrop strip -->
-            <div class="card-cover" v-if="getLibCover(lib.id)">
-              <img :src="getLibCover(lib.id)" alt="" class="cover-img" loading="lazy" />
-              <div class="cover-gradient" />
-            </div>
             <div class="card-accent-bar" :style="{ background: getLibVisuals(lib.kind).accent }" />
             <div class="card-content">
               <div class="card-top">
@@ -217,9 +224,7 @@ function handleAddLibrary() {
                     d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
                   />
                 </svg>
-                <span class="path-val">{{
-                  (lib as any).paths?.[0] || `/media/nas/${lib.name}`
-                }}</span>
+                <span class="path-val">{{ lib.paths?.[0] || "未配置路径" }}</span>
                 <svg
                   viewBox="0 0 24 24"
                   width="14"
@@ -394,6 +399,8 @@ function handleAddLibrary() {
     <AdminMetadata v-else-if="route.name === 'admin-metadata'" />
 
     <!-- 转码设置 -->
+    <AdminPhotos v-else-if="route.name === 'admin-photos'" />
+
     <AdminTranscode v-else-if="route.name === 'admin-transcode'" />
 
     <!-- 用户管理 -->
@@ -405,6 +412,9 @@ function handleAddLibrary() {
 
     <!-- 插件设置 -->
     <AdminPlugins v-else-if="route.name === 'admin-plugins'" />
+
+    <!-- 任务计划 -->
+    <AdminScheduledTasks v-else-if="route.name === 'admin-scheduled-tasks'" />
 
     <!-- 元数据管理 -->
     <AdminMetadataMgr v-else-if="route.name === 'admin-metadata-mgr'" />
@@ -524,33 +534,6 @@ function handleAddLibrary() {
       );
       z-index: 1;
     }
-  }
-
-  &.has-cover {
-    .lib-name,
-    .num {
-      color: #ffffff;
-      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-    }
-    .lib-badge,
-    .lbl,
-    .path-val,
-    .path-icon {
-      color: rgba(255, 255, 255, 0.7);
-      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-    }
-    .card-bottom {
-      border-top-color: rgba(255, 255, 255, 0.1);
-    }
-    .lib-icon-container {
-      background: rgba(10, 10, 11, 0.6);
-      backdrop-filter: blur(4px);
-      border-color: rgba(255, 255, 255, 0.1);
-    }
-  }
-
-  &.has-cover .card-accent-bar {
-    display: none;
   }
 
   .card-accent-bar {

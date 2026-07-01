@@ -34,6 +34,24 @@ pub async fn ensure_bootstrap_admin(
     }
 
     let mut tx = pool.begin().await?;
+    insert_owner_admin(&mut tx, username, password).await?;
+    tx.commit().await?;
+
+    Ok(BootstrapAdminOutcome::Created)
+}
+
+/// 在给定事务内 upsert `Owner` 角色并插入一个拥有该角色的管理员用户。
+///
+/// env bootstrap（[`ensure_bootstrap_admin`]）与 HTTP `POST /api/setup` 共用此函数，
+/// 保证两条建首个管理员的通道行为一致。调用方负责事务的开启/提交与并发锁定语义
+/// （setup 通道需在同一事务内先确认"用户数为 0"）。`username_normalized` 的唯一约束
+/// 兜底并发，命中冲突时由调用方转成 409。
+pub async fn insert_owner_admin(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    username: &str,
+    password: &str,
+) -> Result<(), sqlx::Error> {
+    let username_normalized = normalize_username(username);
     let role_id = sqlx::query_scalar::<_, i64>(
         r#"
         insert into roles (name, name_normalized, description, is_builtin)
@@ -44,7 +62,7 @@ pub async fn ensure_bootstrap_admin(
         returning id
         "#,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     let password_hash = PasswordService.hash_password(password);
 
@@ -68,15 +86,13 @@ pub async fn ensure_bootstrap_admin(
     .bind(password_hash)
     .bind(username.trim())
     .bind(role_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
-
-    Ok(BootstrapAdminOutcome::Created)
+    Ok(())
 }
 
-fn normalize_username(username: &str) -> String {
+pub fn normalize_username(username: &str) -> String {
     username.trim().to_ascii_lowercase()
 }
 

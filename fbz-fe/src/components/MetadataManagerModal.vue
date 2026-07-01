@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { useUiStore } from "@/stores/ui.ts";
-import { imageUrl } from "@/service/modules/tmdb.ts";
+import { queueItemMetadataRefresh } from "@/service/modules/admin.ts";
+import { useBodyScrollLock } from "@/composables/useBodyScrollLock.ts";
 
 const uiStore = useUiStore();
 const { metadataManager } = storeToRefs(uiStore);
+useBodyScrollLock(() => metadataManager.value.open);
 
 const activeTab = ref("basic"); // basic | poster | fanart
 const localPosterUpload = ref<string | null>(null);
 const localFanartUpload = ref<string | null>(null);
+const saving = ref(false);
 
 // Form Fields
 const form = ref({
@@ -44,58 +47,13 @@ watch(
   { immediate: true },
 );
 
-// Mock Online Posters from TMDB
-const mockOnlinePosters = computed(() => {
+const availablePosters = computed(() => {
   const item = metadataManager.value.item;
   if (!item) return [];
-  // Return some realistic dummy image URLs based on item poster or placeholders
-  const base = item.poster || "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=500";
-  return [
-    { id: "p1", url: base, label: "TMDB 官方 (中文 - 优先)", selected: !localPosterUpload.value },
-    {
-      id: "p2",
-      url: "https://images.unsplash.com/photo-1440404653325-ab127d49abc1?w=500",
-      label: "TMDB 官方 (英文)",
-      selected: false,
-    },
-    {
-      id: "p3",
-      url: "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500",
-      label: "FanArt 社区精选",
-      selected: false,
-    },
-    {
-      id: "p4",
-      url: "https://images.unsplash.com/photo-1478720143023-ac1c12bccb5b?w=500",
-      label: "本地磁盘扫描",
-      selected: false,
-    },
-  ];
+  return item.poster ? [{ id: "current", url: item.poster, label: "当前本地缓存海报" }] : [];
 });
 
-// Mock Online Fanarts
-const mockOnlineFanarts = computed(() => {
-  return [
-    {
-      id: "f1",
-      url: "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=1080",
-      label: "TMDB 原创背景图 1",
-      selected: !localFanartUpload.value,
-    },
-    {
-      id: "f2",
-      url: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=1080",
-      label: "电影剧照原图 2",
-      selected: false,
-    },
-    {
-      id: "f3",
-      url: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1080",
-      label: "极简艺术背景图 3",
-      selected: false,
-    },
-  ];
-});
+const availableFanarts = computed(() => []);
 
 const selectedPosterId = ref("p1");
 const selectedFanartId = ref("f1");
@@ -111,49 +69,25 @@ function selectFanart(id: string) {
 }
 
 function triggerPosterUpload() {
-  const url = prompt(
-    "请输入您想使用的本地海报 URL 或占位路径:",
-    "https://images.unsplash.com/photo-1485846234645-a62644f84728?w=500",
-  );
-  if (url) {
-    localPosterUpload.value = url;
-    selectedPosterId.value = "";
-  }
+  uiStore.showToast("后端尚未开放手动上传海报接口。", "warning");
 }
 
 function triggerFanartUpload() {
-  const url = prompt(
-    "请输入您想使用的本地背景图 URL 或占位路径:",
-    "https://images.unsplash.com/photo-1517604931442-7e0c8ed2963c?w=1080",
-  );
-  if (url) {
-    localFanartUpload.value = url;
-    selectedFanartId.value = "";
-  }
+  uiStore.showToast("后端尚未开放手动上传背景图接口。", "warning");
 }
 
-function handleSave() {
+async function handleSave() {
   if (!metadataManager.value.item) return;
-
-  // Apply visual changes locally
-  const item = metadataManager.value.item;
-  item.title = form.value.title;
-  item.year = form.value.year;
-  item.rating = form.value.rating;
-  item.genre = form.value.genres;
-  item.meta = `${form.value.year} · ${form.value.genres}`;
-
-  if (localPosterUpload.value) {
-    item.poster = localPosterUpload.value;
-  } else {
-    const selectedObj = mockOnlinePosters.value.find((p) => p.id === selectedPosterId.value);
-    if (selectedObj) {
-      item.poster = selectedObj.url;
-    }
+  saving.value = true;
+  try {
+    await queueItemMetadataRefresh(metadataManager.value.item.id, "manual-metadata-manager");
+    uiStore.showToast("已加入元数据刷新队列。字段编辑和图片选择需等待后端写接口开放。", "success");
+    uiStore.closeMetadataManager();
+  } catch {
+    uiStore.showToast("元数据刷新入队失败，请确认当前账号具备管理权限。", "error");
+  } finally {
+    saving.value = false;
   }
-
-  uiStore.showToast("元数据更新成功！已将信息同步到本地 NFO 文件并刷新图片缓存。", "success");
-  uiStore.closeMetadataManager();
 }
 
 useEventListener(window, "keydown", (e) => {
@@ -245,7 +179,13 @@ useEventListener(window, "keydown", (e) => {
             <div class="form-row">
               <div class="form-group flex-2">
                 <label for="meta-title">影片名称 (Title)</label>
-                <input id="meta-title" v-model="form.title" type="text" class="control-input" />
+                <input
+                  id="meta-title"
+                  v-model="form.title"
+                  type="text"
+                  class="control-input"
+                  readonly
+                />
               </div>
               <div class="form-group flex-1">
                 <label style="opacity: 0" for="meta-lock">.</label>
@@ -267,6 +207,7 @@ useEventListener(window, "keydown", (e) => {
                   v-model="form.originalTitle"
                   type="text"
                   class="control-input"
+                  readonly
                 />
               </div>
               <div class="form-group flex-half">
@@ -276,6 +217,7 @@ useEventListener(window, "keydown", (e) => {
                   v-model.number="form.year"
                   type="number"
                   class="control-input"
+                  readonly
                 />
               </div>
               <div class="form-group flex-half">
@@ -286,6 +228,7 @@ useEventListener(window, "keydown", (e) => {
                   type="number"
                   step="0.1"
                   class="control-input"
+                  readonly
                 />
               </div>
             </div>
@@ -299,11 +242,18 @@ useEventListener(window, "keydown", (e) => {
                   type="text"
                   placeholder="用逗号分隔，如：科幻, 冒险, 动作"
                   class="control-input"
+                  readonly
                 />
               </div>
               <div class="form-group">
                 <label for="meta-tagline">一句话宣传语 (Tagline)</label>
-                <input id="meta-tagline" v-model="form.tagline" type="text" class="control-input" />
+                <input
+                  id="meta-tagline"
+                  v-model="form.tagline"
+                  type="text"
+                  class="control-input"
+                  readonly
+                />
               </div>
             </div>
 
@@ -314,13 +264,19 @@ useEventListener(window, "keydown", (e) => {
                 v-model="form.overview"
                 rows="4"
                 class="control-textarea"
+                readonly
               />
             </div>
 
             <div class="form-row">
               <div class="form-group">
                 <label for="meta-lang">海报语言偏好</label>
-                <select id="meta-lang" v-model="form.posterLanguage" class="control-select">
+                <select
+                  id="meta-lang"
+                  v-model="form.posterLanguage"
+                  class="control-select"
+                  disabled
+                >
                   <option value="zh">优先中文 (CN)</option>
                   <option value="en">优先英文 (EN)</option>
                   <option value="original">使用原产国语言</option>
@@ -361,7 +317,7 @@ useEventListener(window, "keydown", (e) => {
 
               <!-- Online Catalog Cards -->
               <div
-                v-for="p in mockOnlinePosters"
+                v-for="p in availablePosters"
                 :key="p.id"
                 class="asset-card"
                 :class="{ active: selectedPosterId === p.id }"
@@ -410,7 +366,7 @@ useEventListener(window, "keydown", (e) => {
 
               <!-- Online Fanart Cards -->
               <div
-                v-for="f in mockOnlineFanarts"
+                v-for="f in availableFanarts"
                 :key="f.id"
                 class="asset-card wide-card"
                 :class="{ active: selectedFanartId === f.id }"
@@ -437,7 +393,9 @@ useEventListener(window, "keydown", (e) => {
           <button class="footer-btn secondary" type="button" @click="uiStore.closeMetadataManager">
             取消
           </button>
-          <button class="footer-btn primary" type="button" @click="handleSave">应用并保存</button>
+          <button class="footer-btn primary" type="button" :disabled="saving" @click="handleSave">
+            {{ saving ? "正在入队..." : "刷新元数据" }}
+          </button>
         </footer>
       </div>
     </div>

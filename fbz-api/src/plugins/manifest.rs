@@ -40,6 +40,7 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[
     "media.download.started",
     "metadata.refresh.completed",
     "metadata.refresh.failed",
+    "metadata.provider.query",
     "playback.started",
     "playback.stopped",
     "scheduler.tick",
@@ -1413,7 +1414,9 @@ mod tests {
 
     #[test]
     fn hook_event_database_constraint_tracks_supported_events() {
-        let migration = include_str!("../../migrations/0019_plugin_hook_events.sql");
+        // Migration 0078 re-defines the allow-list constraint with the current
+        // full event set (0019 was the original; later migrations extend it).
+        let migration = include_str!("../../migrations/0078_metadata_provider_query_hook.sql");
 
         assert!(migration.contains("plugin_hooks_event_key_allowed"));
         for event in supported_plugin_hook_events() {
@@ -1423,6 +1426,88 @@ mod tests {
                 "migration is missing hook event {event}"
             );
         }
+    }
+
+    // Live-DB smoke: validates migration 0078's dynamic drop+re-add of the
+    // plugin_hooks event_key allow-list against the real migrated schema. The
+    // migration finds the prior constraint by signature and re-adds it with
+    // `metadata.provider.query` included; a static string check cannot prove the
+    // dynamic DO block actually landed the new constraint. This inserts a hook
+    // at the new event (must be accepted) and a hook at a bogus event (must be
+    // rejected by the DB CHECK), then cleans up via the package cascade.
+    //   cargo test -- --ignored hook_event_constraint_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn hook_event_constraint_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        // Insert a minimal, distinctly-named package so cleanup never touches
+        // real plugin rows. The hook FK cascades on package delete.
+        let package_id: i64 = sqlx::query_scalar(
+            r#"
+            insert into plugin_packages (
+                plugin_id, package_version, api_version, runtime, name,
+                entrypoint, package_path, manifest, manifest_hash,
+                permission_fingerprint, package_status
+            )
+            values (
+                'dev.fbz.metadata-hook-smoke', '0.0.0-smoke', '1', 'http',
+                'Metadata Hook Smoke', 'server.mjs', '/tmp/metadata-hook-smoke',
+                '{}'::jsonb, decode(repeat('00', 32), 'hex'),
+                decode(repeat('00', 32), 'hex'), 'pending_approval'
+            )
+            on conflict (plugin_id, package_version) do update
+                set updated_at = now()
+            returning id
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert smoke plugin package");
+
+        // The new event must satisfy the re-added 0078 constraint.
+        sqlx::query(
+            r#"
+            insert into plugin_hooks (package_id, event_key, handler)
+            values ($1, 'metadata.provider.query', 'onQuery')
+            on conflict (package_id, event_key, handler) do nothing
+            "#,
+        )
+        .bind(package_id)
+        .execute(&pool)
+        .await
+        .expect("the metadata.provider.query event must satisfy the live constraint");
+
+        // A bogus event must still be rejected by the DB CHECK constraint.
+        let bogus = sqlx::query(
+            r#"
+            insert into plugin_hooks (package_id, event_key, handler)
+            values ($1, 'metadata.provider.bogus', 'onBogus')
+            "#,
+        )
+        .bind(package_id)
+        .execute(&pool)
+        .await;
+        assert!(
+            bogus.is_err(),
+            "an unknown event_key must be rejected by plugin_hooks_event_key_allowed"
+        );
+
+        // Cleanup: deleting the package cascades to its hooks.
+        sqlx::query("delete from plugin_packages where id = $1")
+            .bind(package_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke plugin package");
     }
 
     #[test]

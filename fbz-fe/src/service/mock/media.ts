@@ -1,9 +1,9 @@
 import type { MediaItem, MediaLibrary } from "@/types/media.ts";
 
 /**
- * 媒体库元信息 + 无 TMDB 数据时的占位条目（如音乐库）。
- * 影视类库的真实数据来自 service/modules/tmdb.ts；这里只保留库定义与兜底占位。
- * 真实接入后端后，由 service 层返回即可。
+ * 设计态 mock：媒体库元信息 + 无 TMDB 数据时的占位条目（如音乐库）。**非真实后端。**
+ * 影视类库的占位数据来自 service/mock/tmdb.ts；这里只保留库定义与兜底占位。
+ * 真实接入后端后，由 service/modules 层返回即可。
  */
 
 export const libraries: MediaLibrary[] = [

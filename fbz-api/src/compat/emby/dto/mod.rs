@@ -176,6 +176,8 @@ pub struct ServerConfigurationSource {
     pub cache_path: String,
     pub metadata_path: String,
     pub simultaneous_stream_limit: i32,
+    /// 是否已存在任意用户。映射为 `IsStartupWizardCompleted`，使初始化状态随用户数动态变化。
+    pub has_users: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -346,7 +348,7 @@ impl From<ServerConfigurationSource> for ServerConfigurationDto {
             enable_auto_update: false,
             log_file_retention_days: 3,
             run_at_startup: false,
-            is_startup_wizard_completed: true,
+            is_startup_wizard_completed: source.has_users,
             cache_path: source.cache_path,
         }
     }
@@ -973,7 +975,11 @@ impl LibraryOptionsResultDto {
             LibraryImageOptionDto::new("Logo", 1),
             LibraryImageOptionDto::new("Thumb", 1),
         ];
-        let content_types = ["movies", "tvshows", "music", "mixed"];
+        // 由单一事实源派生，新增库类型自动出现在 Emby 库选项里，无需改这里。
+        let content_types: Vec<&'static str> = crate::media_types::LibraryType::ALL
+            .iter()
+            .map(|kind| kind.collection_type())
+            .collect();
 
         Self {
             metadata_savers: Vec::new(),
@@ -1402,6 +1408,12 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<i32>,
     pub production_year: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premiere_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
     pub image_tags: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backdrop_image_tags: Vec<String>,
@@ -1409,8 +1421,27 @@ pub struct BaseItemDto {
     pub collection_type: Option<String>,
     pub user_data: Option<UserItemDataDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<BaseItemPersonDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_sources: Vec<MediaSourceDto>,
     pub chapters: Vec<ChapterInfoDto>,
+}
+
+/// 条目关联人物（Emby `BaseItemPerson` 形状）。`Role` 为角色名（演员）或职务描述，
+/// `Type` 为 Actor/Director/Writer/... `Id` 为 people 表 public_id。前端据 Type 派生
+/// 演职员行与导演/主创字段。
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct BaseItemPersonDto {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    #[serde(rename = "Type")]
+    pub person_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_tag: Option<String>,
+    pub sort_order: i32,
 }
 
 impl From<BaseItemSource> for BaseItemDto {
@@ -1427,10 +1458,14 @@ impl From<BaseItemSource> for BaseItemDto {
             container: None,
             bitrate: None,
             production_year: source.production_year,
+            overview: None,
+            premiere_date: None,
+            end_date: None,
             image_tags: BTreeMap::new(),
             backdrop_image_tags: Vec::new(),
             collection_type: None,
             user_data: None,
+            people: Vec::new(),
             media_sources: Vec::new(),
             chapters: Vec::new(),
         }
@@ -1818,6 +1853,7 @@ mod tests {
             cache_path: "./var/artwork".to_owned(),
             metadata_path: "./var/metadata".to_owned(),
             simultaneous_stream_limit: 3,
+            has_users: true,
         });
 
         let value = serde_json::to_value(dto).unwrap();

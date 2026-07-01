@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/stores/auth.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import { deleteUserAvatar, uploadUserAvatar } from "@/service/modules/users.ts";
 
 const authStore = useAuthStore();
 const uiStore = useUiStore();
@@ -16,6 +17,58 @@ const confirmPassword = ref("");
 const formLanguage = ref(authStore.language);
 const formAutoSub = ref(authStore.autoSubtitles);
 const formAudioPref = ref(authStore.audioPreference);
+
+/* ---------- 头像上传 ---------- */
+const avatarInput = ref<HTMLInputElement>();
+const avatarBusy = ref(false);
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+
+function pickAvatar() {
+  avatarInput.value?.click();
+}
+
+async function onAvatarChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ""; // 允许重复选同一文件
+  if (!file) return;
+  if (!authStore.userId) {
+    uiStore.showToast("请先登录后再上传头像。", "warning");
+    return;
+  }
+  if (!file.type.startsWith("image/")) {
+    uiStore.showToast("请选择图片文件（JPEG / PNG / WebP / GIF）。", "warning");
+    return;
+  }
+  if (file.size > MAX_AVATAR_BYTES) {
+    uiStore.showToast("头像不能超过 2 MB。", "warning");
+    return;
+  }
+  avatarBusy.value = true;
+  try {
+    await uploadUserAvatar(authStore.userId, file);
+    authStore.bumpAvatarVersion();
+    uiStore.showToast("头像已更新。", "success");
+  } catch {
+    uiStore.showToast("头像上传失败，请稍后再试。", "error");
+  } finally {
+    avatarBusy.value = false;
+  }
+}
+
+async function removeAvatar() {
+  if (!authStore.userId || avatarBusy.value) return;
+  avatarBusy.value = true;
+  try {
+    await deleteUserAvatar(authStore.userId);
+    authStore.bumpAvatarVersion();
+    uiStore.showToast("已恢复默认头像。", "success");
+  } catch {
+    uiStore.showToast("恢复默认头像失败，请稍后再试。", "error");
+  } finally {
+    avatarBusy.value = false;
+  }
+}
 
 const languageOptions = [
   { label: "简体中文 (Chinese Simplified)", value: "zh-CN" },
@@ -73,12 +126,35 @@ function handlePasswordChange() {
         <div class="card-body">
           <p class="settings-hint">更新您的头像昵称、系统用户名和用于找回密码的电子邮箱。</p>
           <div class="profile-avatar-row">
-            <div class="profile-avatar-large">
-              {{ formNickname.charAt(0).toUpperCase() }}
-            </div>
+            <BaseAvatar
+              :user-id="authStore.userId"
+              :name="formNickname || authStore.username"
+              :version="authStore.avatarVersion"
+              :size="60"
+            />
             <div class="avatar-meta">
               <span class="avatar-title">系统头像</span>
-              <span class="avatar-desc">根据昵称的首字符自动生成</span>
+              <span class="avatar-desc">支持 JPEG / PNG / WebP / GIF，不超过 2 MB。</span>
+              <div class="avatar-actions">
+                <button type="button" class="avatar-btn" :disabled="avatarBusy" @click="pickAvatar">
+                  {{ avatarBusy ? "处理中…" : "上传头像" }}
+                </button>
+                <button
+                  type="button"
+                  class="avatar-btn ghost"
+                  :disabled="avatarBusy"
+                  @click="removeAvatar"
+                >
+                  恢复默认
+                </button>
+              </div>
+              <input
+                ref="avatarInput"
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif"
+                class="avatar-file-input"
+                @change="onAvatarChange"
+              />
             </div>
           </div>
 
@@ -289,23 +365,10 @@ function handlePasswordChange() {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--fbz-color-line-soft);
 
-  .profile-avatar-large {
-    width: 60px;
-    height: 60px;
-    border-radius: 50%;
-    background: var(--fbz-color-brand-500);
-    color: #07120a;
-    font-weight: 800;
-    font-size: 24px;
-    display: grid;
-    place-content: center;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  }
-
   .avatar-meta {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
 
     .avatar-title {
       font-size: var(--fbz-font-size-sm);
@@ -317,6 +380,49 @@ function handlePasswordChange() {
       font-size: var(--fbz-font-size-xs);
       color: var(--fbz-color-text-muted);
     }
+  }
+
+  .avatar-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  .avatar-btn {
+    height: 30px;
+    padding: 0 14px;
+    border-radius: var(--fbz-radius-control);
+    border: 1px solid transparent;
+    background: var(--fbz-color-brand-500);
+    color: #07120a;
+    font-size: var(--fbz-font-size-xs);
+    font-weight: 700;
+    cursor: pointer;
+    transition: all var(--fbz-motion-fast);
+
+    &:hover:not(:disabled) {
+      background: var(--fbz-color-brand-600);
+    }
+
+    &:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    &.ghost {
+      background: var(--fbz-color-panel);
+      border-color: var(--fbz-color-line);
+      color: var(--fbz-color-text-soft);
+
+      &:hover:not(:disabled) {
+        background: var(--fbz-color-panel-elevated);
+        color: var(--fbz-color-text);
+      }
+    }
+  }
+
+  .avatar-file-input {
+    display: none;
   }
 }
 

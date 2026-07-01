@@ -57,7 +57,8 @@ function getToastIcon(type: string) {
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  background: rgba(20, 20, 22, 0.85);
+  /* 用随主题翻转的 panel token，避免白主题下深底 + 深字看不清 */
+  background: color-mix(in srgb, var(--fbz-color-panel-elevated) 92%, transparent);
   backdrop-filter: blur(16px);
   border: 1px solid var(--fbz-color-line);
   border-radius: 6px;

@@ -1,90 +1,28 @@
 <script setup lang="ts">
 import { useUiStore } from "@/stores/ui.ts";
+import { embyRequest } from "@/service/request.ts";
 
 const uiStore = useUiStore();
+
+interface LogFileDto {
+  Name: string;
+  Size: number;
+  DateCreated: string;
+  DateModified: string;
+}
 
 interface LogEntry {
   id: string;
   time: string;
-  level: "info" | "success" | "warning" | "error";
+  level: "info" | "warning" | "error";
   category: string;
   message: string;
 }
 
-const logs = ref<LogEntry[]>([
-  {
-    id: "1",
-    time: "13:10:02",
-    level: "info",
-    category: "SYSTEM",
-    message: "Fbz Media Server v0.1.0 starting up...",
-  },
-  {
-    id: "2",
-    time: "13:10:03",
-    level: "info",
-    category: "DATABASE",
-    message: "Initializing SQLite database connection...",
-  },
-  {
-    id: "3",
-    time: "13:10:04",
-    level: "success",
-    category: "DATABASE",
-    message: "Database schema is up-to-date. Loaded 5 tables.",
-  },
-  {
-    id: "4",
-    time: "13:10:05",
-    level: "info",
-    category: "SCRAPER",
-    message: "Registering TMDB metadata provider with API key token...",
-  },
-  {
-    id: "5",
-    time: "13:10:06",
-    level: "success",
-    category: "PLUGINS",
-    message: "Loaded 3 system plugins: [AutoSubtitles, WebhookNotifier, PlayerVlc]",
-  },
-  {
-    id: "6",
-    time: "13:10:08",
-    level: "info",
-    category: "LIBRARY",
-    message: "Scanning library: 电影 (Movie)...",
-  },
-  {
-    id: "7",
-    time: "13:10:12",
-    level: "success",
-    category: "SCRAPER",
-    message: "Successfully scraped metadata for '流浪地球 2' from TMDB (ID: 1040148)",
-  },
-  {
-    id: "8",
-    time: "13:10:15",
-    level: "warning",
-    category: "TRANSCODER",
-    message: "Hardware acceleration: NVENC init failed, falling back to VAAPI/CPU transcoding.",
-  },
-  {
-    id: "9",
-    time: "13:10:20",
-    level: "info",
-    category: "NETWORK",
-    message: "Web UI listener bound to http://0.0.0.0:8096",
-  },
-  {
-    id: "10",
-    time: "13:12:44",
-    level: "info",
-    category: "SESSION",
-    message: "User Admin logged in from 192.168.1.5",
-  },
-]);
-
-const currentLevelFilter = ref<"all" | "info" | "success" | "warning" | "error">("all");
+const logs = ref<LogEntry[]>([]);
+const loading = ref(false);
+const loadError = ref<string | null>(null);
+const currentLevelFilter = ref<"all" | "info" | "warning" | "error">("all");
 const searchQuery = ref("");
 const autoScroll = ref(true);
 const terminalBody = ref<HTMLElement | null>(null);
@@ -113,79 +51,36 @@ function scrollToBottom() {
 watch(() => logs.value.length, scrollToBottom);
 watch(filteredLogs, scrollToBottom);
 
-const logCategories = ["SCRAPER", "TRANSCODER", "LIBRARY", "SESSION", "DISK", "SYSTEM"];
-const logMessages = {
-  info: [
-    "Scanning folder /media/nas/电影/科幻 for new items...",
-    "Transcoding session stream-4 initialized.",
-    "Checking for updates for TMDB Scraper plugin...",
-    "Incoming connection from client: AppleTV / Infuse.",
-    "Disk controller checked partitions: /dev/sdb1 is healthy.",
-    "Background cache cleanup routine scheduled.",
-  ],
-  success: [
-    "Successfully matching metadata for '蜘蛛侠：纵横宇宙' (ID: 569094).",
-    "Transcoding chunk 45 written to memory buffer.",
-    "Database backup successfully saved to /media/backups/db-backup.sql.",
-    "Plugin 'AutoSubtitles' updated to version 1.2.4.",
-    "Completed physical path rescan in 12.4 seconds.",
-  ],
-  warning: [
-    "TMDB API rate-limit threshold reached 80%. Delaying requests by 500ms.",
-    "Bitrate exceeds Wi-Fi bandwidth for user Alan (suggesting transcode).",
-    "Missing NFO metadata file for movie /media/nas/电影/未知影片.mp4.",
-    "Subtitles download failed for 'Oppenheimer' (language: en). Status: 404.",
-    "System memory usage exceeded 85%.",
-  ],
-  error: [
-    "Failed to write metadata cache for movie ID 440212. Read-only filesystem?",
-    "Transcoding engine error: Codec h264_nvenc device not found.",
-    "Unable to connect to subtitle indexer opensubtitles.org. Timeout.",
-    "Failed to start filesystem monitor on /media/remote_share: Connection refused.",
-    "Critical Exception: Database lock acquisition timeout.",
-  ],
-};
+function nowTime(): string {
+  return new Date().toTimeString().split(" ")[0] ?? "";
+}
 
-let intervalId: any = null;
+async function refreshLogs() {
+  loading.value = true;
+  loadError.value = null;
+  try {
+    const { data } = await embyRequest.get<LogFileDto[]>("/System/Logs");
+    logs.value = data.map((file) => ({
+      id: file.Name,
+      time: file.DateModified?.split("T")[1]?.slice(0, 8) || nowTime(),
+      level: "info",
+      category: "SYSTEM",
+      message: `${file.Name} · ${file.Size} bytes · modified ${file.DateModified}`,
+    }));
+  } catch {
+    logs.value = [];
+    loadError.value = "无法读取后端日志列表，请检查登录状态与服务器连接。";
+  } finally {
+    loading.value = false;
+    scrollToBottom();
+  }
+}
 
-onMounted(() => {
-  scrollToBottom();
-
-  intervalId = setInterval(() => {
-    const rand = Math.random();
-    let level: "info" | "success" | "warning" | "error" = "info";
-    if (rand > 0.9) level = "error";
-    else if (rand > 0.65) level = "warning";
-    else if (rand > 0.35) level = "success";
-
-    const messages = logMessages[level];
-    const message = messages[Math.floor(Math.random() * messages.length)];
-    const category = logCategories[Math.floor(Math.random() * logCategories.length)];
-
-    const now = new Date();
-    const time = now.toTimeString().split(" ")[0];
-
-    logs.value.push({
-      id: String(Date.now() + Math.random()),
-      time,
-      level,
-      category,
-      message,
-    });
-
-    if (logs.value.length > 150) {
-      logs.value.shift();
-    }
-  }, 2500);
-});
-
-onBeforeUnmount(() => {
-  if (intervalId) clearInterval(intervalId);
-});
+onMounted(refreshLogs);
 
 function clearLogs() {
   logs.value = [];
-  uiStore.showToast("系统控制台日志已清空。", "info");
+  uiStore.showToast("日志面板已清空。", "info");
 }
 
 function copyLogs() {
@@ -266,6 +161,17 @@ function copyLogs() {
           <button
             type="button"
             class="action-icon-btn"
+            title="刷新日志列表"
+            aria-label="刷新日志列表"
+            :disabled="loading"
+            @click="refreshLogs"
+          >
+            ↻
+          </button>
+
+          <button
+            type="button"
+            class="action-icon-btn"
             title="复制日志"
             aria-label="复制当前过滤日志"
             @click="copyLogs"
@@ -291,7 +197,15 @@ function copyLogs() {
       </header>
 
       <div ref="terminalBody" class="terminal-body">
-        <div v-if="filteredLogs.length > 0" class="terminal-lines">
+        <div v-if="loading" class="terminal-empty">
+          <span class="empty-glow">⌛</span>
+          <span class="text">正在读取后端日志列表...</span>
+        </div>
+        <div v-else-if="loadError" class="terminal-empty">
+          <span class="empty-glow">!</span>
+          <span class="text">{{ loadError }}</span>
+        </div>
+        <div v-else-if="filteredLogs.length > 0" class="terminal-lines">
           <div
             v-for="log in filteredLogs"
             :key="log.id"
@@ -305,13 +219,15 @@ function copyLogs() {
           </div>
         </div>
         <div v-else class="terminal-empty">
-          <span class="empty-glow">⚡</span>
-          <span class="text">暂无符合过滤条件的系统日志输出</span>
+          <span class="empty-glow">∅</span>
+          <span class="text"
+            >后端未暴露磁盘日志文件；FBZ 日志由 stdout/stderr 输出到容器或服务管理器。</span
+          >
         </div>
       </div>
 
       <footer class="terminal-footer">
-        <span>实时连接: ACTIVE</span>
+        <span>后端日志接口: {{ loadError ? "ERROR" : loading ? "LOADING" : "OK" }}</span>
         <span class="spacer" />
         <span>已显示: {{ filteredLogs.length }} / {{ logs.length }} 条</span>
       </footer>

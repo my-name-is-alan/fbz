@@ -4,12 +4,30 @@ import { useAuthStore } from "@/stores/auth.ts";
 const router = useRouter();
 const authStore = useAuthStore();
 
+// 列表内头像的缓存键：进页面时固定一次即可（他人头像不在本会话内频繁变动）。
+const avatarCacheKey = Date.now();
+
+// 进入用户管理页时从后端拉取真实用户列表。
+onMounted(() => {
+  authStore.loadUsers();
+});
+
 function openCreateUser() {
   router.push("/admin/users/create");
 }
 
 function openEditUser(userId: string) {
   router.push(`/admin/users/${userId}`);
+}
+
+function formatLastLogin(value: string | null): string {
+  if (!value) return "从未登录";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 </script>
 
@@ -28,23 +46,30 @@ function openEditUser(userId: string) {
         :class="{ disabled: !user.active }"
       >
         <div class="user-card-top">
-          <div
-            class="user-avatar-circle"
-            :style="{
-              background: user.active
-                ? 'var(--fbz-color-brand-500)'
-                : 'var(--fbz-color-text-disabled)',
-            }"
-          >
-            {{ user.username.charAt(0).toUpperCase() }}
-          </div>
+          <BaseAvatar
+            :user-id="user.id"
+            :name="user.displayName || user.username"
+            :version="avatarCacheKey"
+            :size="44"
+            :class="{ 'is-disabled': !user.active }"
+          />
           <div class="user-meta-info">
             <div class="username-row">
               <span class="username">{{ user.username }}</span>
               <span class="role-badge" :class="user.role">{{ user.roleLabel }}</span>
             </div>
-            <p class="desc-text">{{ user.desc }}</p>
+            <p class="desc-text">
+              {{ user.displayName || user.desc }}
+            </p>
           </div>
+        </div>
+        <div class="user-facts">
+          <span>设备 {{ user.deviceCount }}</span>
+          <span>会话 {{ user.activeSessionCount }}</span>
+          <span>{{ user.allowDownload ? "允许下载" : "禁止下载" }}</span>
+          <span>{{ user.allowTranscode ? "允许转码" : "禁止转码" }}</span>
+          <span>{{ user.allowNewDeviceLogin ? "允许新设备" : "锁定新设备" }}</span>
+          <span>最近 {{ formatLastLogin(user.lastLoginAt) }}</span>
         </div>
         <div class="user-card-footer">
           <button
@@ -61,7 +86,6 @@ function openEditUser(userId: string) {
           <button
             class="action-btn danger-btn"
             type="button"
-            :disabled="user.username === 'admin'"
             @click="authStore.deleteUser(user.id)"
           >
             删除
@@ -147,16 +171,9 @@ function openEditUser(userId: string) {
     display: flex;
     gap: 14px;
 
-    .user-avatar-circle {
-      width: 44px;
-      height: 44px;
-      border-radius: 50%;
-      color: #07120a;
-      display: grid;
-      place-content: center;
-      font-weight: 800;
-      font-size: 18px;
-      flex-shrink: 0;
+    .base-avatar.is-disabled {
+      filter: grayscale(1);
+      opacity: 0.6;
     }
 
     .user-meta-info {
@@ -262,6 +279,22 @@ function openEditUser(userId: string) {
         }
       }
     }
+  }
+}
+
+.user-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+
+  span {
+    border: 1px solid var(--fbz-color-line);
+    border-radius: 4px;
+    padding: 2px 6px;
+    background: var(--fbz-color-panel);
+    color: var(--fbz-color-text-muted);
+    font-size: 10px;
+    font-weight: 700;
   }
 }
 </style>

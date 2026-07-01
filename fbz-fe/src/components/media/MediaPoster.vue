@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
+import { mediaImageSrcSet } from "@/service/request.ts";
 
 /**
  * 媒体海报 —— 有 src 时显示真实图，加载中展示骨架屏，加载失败或无 src 时渲染精美的 placeholder 反馈。
@@ -21,6 +22,16 @@ const props = withDefaults(defineProps<Props>(), {
 
 const isLoaded = ref(false);
 const hasError = ref(false);
+
+const responsiveWidths = computed(() =>
+  props.ratio === "wide" ? [480, 768, 1280, 1920] : [185, 342, 500, 780],
+);
+const srcset = computed(() => mediaImageSrcSet(props.src, responsiveWidths.value));
+const sizes = computed(() =>
+  props.ratio === "wide"
+    ? "(max-width: 600px) 100vw, (max-width: 1200px) 80vw, 1280px"
+    : "(max-width: 600px) 32vw, (max-width: 1200px) 18vw, 220px",
+);
 
 watch(
   () => props.src,
@@ -48,15 +59,19 @@ function onError() {
 <template>
   <div class="media-poster" :class="[`is-${props.ratio}`, { 'is-alt': props.variant === 1 }]">
     <!-- 真实图片，加载成功后淡入显示 -->
-    <img
-      v-if="props.src && !hasError"
-      :src="props.src"
-      :alt="props.title"
-      loading="lazy"
-      @load="onLoad"
-      @error="onError"
-      :class="{ 'is-hidden': !isLoaded }"
-    />
+    <picture v-if="props.src && !hasError">
+      <source :srcset="srcset" :sizes="sizes" />
+      <img
+        :src="props.src"
+        :srcset="srcset"
+        :sizes="sizes"
+        :alt="props.title"
+        loading="lazy"
+        @load="onLoad"
+        @error="onError"
+        :class="{ 'is-hidden': !isLoaded }"
+      />
+    </picture>
 
     <!-- 加载中的骨架屏占位 -->
     <div v-if="props.src && !isLoaded && !hasError" class="shimmer-overlay" />
@@ -110,10 +125,14 @@ function onError() {
     background: var(--fbz-color-panel-strong);
   }
 
+  picture,
   img {
     display: block;
     width: 100%;
     height: 100%;
+  }
+
+  img {
     object-fit: cover;
     opacity: 1;
     transition: opacity 0.3s ease;

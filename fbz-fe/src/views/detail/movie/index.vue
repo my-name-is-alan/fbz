@@ -1,99 +1,99 @@
 <script setup lang="ts">
-import type { MovieDetail } from "@/types/media.ts";
-import {
-  findCatalogItem,
-  getMovieDetail,
-  imageUrl,
-  refToItem,
-  versionsFor,
-} from "@/service/modules/tmdb.ts";
+import type { DetailViewModel } from "@/service/modules/detail.ts";
+import { loadMovieDetail } from "@/service/modules/detail.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
+import { useUiStore } from "@/stores/ui.ts";
 
 const route = useRoute();
 const playback = usePlaybackStore();
-const id = computed(() => Number(route.params.id));
+const uiStore = useUiStore();
+const routeId = computed(() => String(route.params.id));
 
-const item = computed(() => findCatalogItem("movie", id.value));
-const detail = ref<MovieDetail>();
+const detail = ref<DetailViewModel>();
 
 watch(
-  id,
+  routeId,
   async (v) => {
-    detail.value = await getMovieDetail(v);
+    detail.value = await loadMovieDetail(v);
   },
   { immediate: true },
 );
 
-const versions = computed(() => versionsFor(id.value));
-
-const meta = computed(() => {
-  const it = item.value;
-  if (!it) return [];
-  const runtime = detail.value?.runtime
-    ? `${Math.floor(detail.value.runtime / 60)}h ${detail.value.runtime % 60}m`
-    : "";
-  return [String(it.year ?? "—"), runtime, ...it.genres].filter(Boolean);
-});
-
-const directors = computed(() => detail.value?.directors.map((d) => d.name).join("、") ?? "");
-const similar = computed(() => detail.value?.similar.map(refToItem) ?? []);
-
 function playMovie() {
-  const movie = item.value;
+  const movie = detail.value;
   if (!movie) return;
 
   playback.open({
     type: "movie",
-    id: String(movie.id),
+    id: movie.id,
     title: movie.title,
-    subtitle: meta.value.join(" · "),
-    poster: imageUrl(movie.poster_path, "w500"),
-    backdrop: imageUrl(movie.backdrop_path, "w1280"),
-    tags: versions.value[0]?.tags,
-    duration: detail.value?.runtime ? detail.value.runtime * 60 : 108 * 60,
+    subtitle: movie.meta.join(" · "),
+    poster: movie.poster,
+    backdrop: movie.backdrop,
+    tags: movie.versions[0]?.tags,
+    duration: movie.runtimeSeconds ?? 108 * 60,
+  });
+}
+
+/** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
+function editMetadata() {
+  const movie = detail.value;
+  if (!movie) return;
+  const yearSeg = movie.meta.find((m) => /^\d{4}$/.test(m));
+  uiStore.openMetadataManager({
+    id: movie.id,
+    libraryId: "movie",
+    detailType: "movie",
+    title: movie.title,
+    meta: movie.meta.join(" · "),
+    poster: movie.poster,
+    year: yearSeg ? Number(yearSeg) : undefined,
+    rating: movie.rating ?? undefined,
+    isFavorite: false,
   });
 }
 </script>
 
 <template>
-  <main v-if="item" class="detail-view">
-    <PageHeader :title="item.title" fallback="/library/movie" />
+  <main v-if="detail" class="detail-view">
+    <PageHeader :title="detail.title" fallback="/library/movie" />
 
     <DetailHero
-      :title="item.title"
-      :poster="imageUrl(item.poster_path, 'w500')"
-      :backdrop="imageUrl(item.backdrop_path, 'w1280')"
-      :meta="meta"
-      :tagline="detail?.tagline"
-      :overview="item.overview"
-      :rating="item.rating"
-      :versions="versions"
+      :title="detail.title"
+      :poster="detail.poster"
+      :backdrop="detail.backdrop"
+      :meta="detail.meta"
+      :tagline="detail.tagline"
+      :overview="detail.overview"
+      :rating="detail.rating"
+      :versions="detail.versions"
       @play="playMovie"
     >
       <template #extra>
         <dl class="facts">
-          <div v-if="directors" class="fact">
+          <div v-if="detail.directors" class="fact">
             <dt>导演</dt>
-            <dd>{{ directors }}</dd>
+            <dd>{{ detail.directors }}</dd>
           </div>
-          <div v-if="detail && detail.original_title !== item.title" class="fact">
+          <div v-if="detail.originalTitle" class="fact">
             <dt>原名</dt>
-            <dd>{{ detail.original_title }}</dd>
+            <dd>{{ detail.originalTitle }}</dd>
           </div>
-          <div v-if="detail?.collection_id" class="fact">
+          <div v-if="detail.collectionId" class="fact">
             <dt>所属系列</dt>
             <dd>
-              <RouterLink :to="`/collection/${detail.collection_id}`" class="link">
-                {{ detail.collection_name }}
+              <RouterLink :to="`/collection/${detail.collectionId}`" class="link">
+                {{ detail.collectionName }}
               </RouterLink>
             </dd>
           </div>
         </dl>
+        <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
       </template>
     </DetailHero>
 
-    <CastRow v-if="detail" :cast="detail.cast" />
-    <SimilarRow :items="similar" />
+    <CastRow :cast="detail.cast" />
+    <SimilarRow :items="detail.similar" />
   </main>
 
   <main v-else class="detail-missing">
@@ -132,6 +132,26 @@ function playMovie() {
 
   &:hover {
     text-decoration: underline;
+  }
+}
+
+.edit-meta-btn {
+  margin-top: var(--fbz-space-3);
+  height: 34px;
+  padding: 0 16px;
+  border-radius: var(--fbz-radius-control);
+  border: 1px solid var(--fbz-color-line);
+  background: var(--fbz-color-panel-strong);
+  color: var(--fbz-color-text-soft);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--fbz-motion-fast);
+
+  &:hover {
+    border-color: var(--fbz-color-brand-500);
+    color: var(--fbz-color-brand-500);
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 6%, transparent);
   }
 }
 

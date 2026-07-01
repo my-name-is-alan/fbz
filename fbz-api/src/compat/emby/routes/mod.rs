@@ -97,6 +97,14 @@ pub fn router() -> Router<AppState> {
         )
         .route("/emby/System/WakeOnLanInfo", get(system::wake_on_lan_info))
         .route("/System/WakeOnLanInfo", get(system::wake_on_lan_info))
+        .route("/emby/System/Logs", get(system::system_logs))
+        .route("/System/Logs", get(system::system_logs))
+        .route("/emby/System/Logs/Log", get(system::system_log))
+        .route("/System/Logs/Log", get(system::system_log))
+        .route("/emby/System/Restart", post(system::system_restart))
+        .route("/System/Restart", post(system::system_restart))
+        .route("/emby/System/Shutdown", post(system::system_shutdown))
+        .route("/System/Shutdown", post(system::system_shutdown))
         .route(
             "/emby/System/ActivityLog/Entries",
             get(activity_log::activity_log_entries),
@@ -1684,12 +1692,24 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Collections", post(collections::create_collection))
         .route(
+            "/emby/Collections/{collection_id}",
+            get(collections::collection_detail),
+        )
+        .route(
+            "/Collections/{collection_id}",
+            get(collections::collection_detail),
+        )
+        .route(
             "/emby/Collections/{collection_id}/Items",
-            post(collections::add_collection_items).delete(collections::remove_collection_items),
+            get(collections::collection_items)
+                .post(collections::add_collection_items)
+                .delete(collections::remove_collection_items),
         )
         .route(
             "/Collections/{collection_id}/Items",
-            post(collections::add_collection_items).delete(collections::remove_collection_items),
+            get(collections::collection_items)
+                .post(collections::add_collection_items)
+                .delete(collections::remove_collection_items),
         )
         .route(
             "/emby/Collections/{collection_id}/Items/Delete",
@@ -2764,5 +2784,39 @@ mod tests {
         assert!(routes.contains("get(connect::connect_pending)"));
         assert!(routes.contains("post(connect::connect_link_user)"));
         assert!(routes.contains("delete(connect::connect_unlink_user)"));
+    }
+
+    #[test]
+    fn system_logs_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/System/Logs\"",
+            "\"/System/Logs\"",
+            "\"/emby/System/Logs/Log\"",
+            "\"/System/Logs/Log\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+
+        assert!(routes.contains("get(system::system_logs)"));
+        assert!(routes.contains("get(system::system_log)"));
+    }
+
+    #[test]
+    fn system_power_control_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+
+        for route in [
+            "\"/emby/System/Restart\"",
+            "\"/System/Restart\"",
+            "\"/emby/System/Shutdown\"",
+            "\"/System/Shutdown\"",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+
+        assert!(routes.contains("post(system::system_restart)"));
+        assert!(routes.contains("post(system::system_shutdown)"));
     }
 }

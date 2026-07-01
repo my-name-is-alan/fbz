@@ -9,6 +9,7 @@ const drawerOpen = ref(false);
 
     <RouterView />
     <PlaybackOverlay />
+    <MusicPlayerBar />
   </div>
 </template>
 

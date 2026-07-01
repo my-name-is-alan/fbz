@@ -370,8 +370,8 @@ const PLUGIN_PERMISSION_CAPABILITIES: &[PluginPermissionCapability] = &[
         key: "metadata.read",
         category: "metadata",
         risk_level: "medium",
-        description: "Reserved for future read-only metadata provider and enrichment APIs.",
-        manifest_features: &[],
+        description: "Read the scrape context and act as a metadata-provider source via the metadata.provider.query hook.",
+        manifest_features: &["metadata.provider.query"],
     },
     PluginPermissionCapability {
         key: "metadata.write",

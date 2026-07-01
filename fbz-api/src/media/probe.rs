@@ -457,6 +457,32 @@ impl ProbeService {
             .map_err(ProbeError::Database)?;
         }
 
+        // 阶段 5（recognition design §10）：用 ffprobe 实测的 video stream 校正文件名识别的
+        // 画质标签（实测优先）。取首个 video stream 的 height → 标准分辨率、codec → 归一编码。
+        // 实测缺失时保留文件名标签（coalesce），不清空。
+        let video = result.streams.iter().find(|s| s.stream_type == "video");
+        if let Some(video) = video {
+            let measured_resolution = video
+                .height
+                .and_then(crate::media_types::resolution_from_height);
+            let measured_codec = video.codec.as_deref().and_then(normalize_probe_video_codec);
+            sqlx::query(
+                r#"
+                update media_files
+                set resolution = coalesce($2, resolution),
+                    video_codec = coalesce($3, video_codec),
+                    updated_at = now()
+                where id = $1
+                "#,
+            )
+            .bind(media_file_id)
+            .bind(measured_resolution)
+            .bind(measured_codec)
+            .execute(&mut *tx)
+            .await
+            .map_err(ProbeError::Database)?;
+        }
+
         tx.commit().await.map_err(ProbeError::Database)
     }
 
@@ -860,6 +886,17 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// 把 ffprobe 原始视频 codec 名归一到与文件名识别词汇一致的标签（x265/x264/AV1）。
+/// 无法识别返回 None（保留文件名标签，不覆盖）。
+fn normalize_probe_video_codec(codec: &str) -> Option<&'static str> {
+    match codec.to_ascii_lowercase().as_str() {
+        "hevc" | "h265" | "h.265" | "x265" => Some("x265"),
+        "h264" | "h.264" | "avc" | "x264" => Some("x264"),
+        "av1" => Some("AV1"),
+        _ => None,
+    }
+}
+
 impl ProbeJobRequest {
     fn from_payload(payload: &Value) -> Result<Self, ProbeError> {
         let Some(value) = payload.get("mediaFileId") else {
@@ -968,6 +1005,16 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn normalize_probe_video_codec_aligns_with_filename_vocab() {
+        assert_eq!(normalize_probe_video_codec("hevc"), Some("x265"));
+        assert_eq!(normalize_probe_video_codec("H265"), Some("x265"));
+        assert_eq!(normalize_probe_video_codec("h264"), Some("x264"));
+        assert_eq!(normalize_probe_video_codec("avc"), Some("x264"));
+        assert_eq!(normalize_probe_video_codec("av1"), Some("AV1"));
+        assert_eq!(normalize_probe_video_codec("mpeg2video"), None);
+    }
 
     #[test]
     fn probe_job_request_accepts_numeric_or_string_media_file_ids() {

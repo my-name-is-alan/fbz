@@ -19,8 +19,9 @@ use crate::{
     admin,
     compat::emby,
     error::AppError,
-    plugins,
+    music, navigation, plugins, setup,
     state::{AppState, RuntimeReadinessSnapshot},
+    users,
 };
 
 #[derive(Serialize)]
@@ -54,6 +55,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .merge(admin::routes::router())
+        .merge(navigation::routes::router())
+        .merge(users::routes::router())
+        .merge(setup::routes::router())
+        .merge(music::routes::router())
         .merge(plugins::routes::router())
         .merge(plugins::host::router())
         .merge(emby::routes::router())
@@ -420,6 +425,34 @@ mod tests {
                 )
                 .await
                 .expect("system configuration request should succeed");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+    }
+
+    #[tokio::test]
+    async fn emby_system_power_control_aliases_exist() {
+        let app = build_router(AppState::for_tests(Config::default()));
+
+        for uri in [
+            "/emby/System/Restart",
+            "/System/Restart",
+            "/emby/System/Shutdown",
+            "/System/Shutdown",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("x-emby-token", "test-token")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("system power control request should succeed");
 
             assert_ne!(response.status(), StatusCode::NOT_FOUND);
             assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);

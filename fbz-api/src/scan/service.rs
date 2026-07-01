@@ -15,9 +15,18 @@ use tracing::warn;
 use crate::{
     db::DbPool,
     jobs::{ExpiredJobMessages, expire_stale_running_jobs, mark_job_failed},
+    media::audio_tags::AudioTags,
+    media::photo::MEDIA_PHOTO_JOB_TYPE,
     media::probe::MEDIA_PROBE_JOB_TYPE,
+    media_types::{ItemType, LibraryType, MediaCategory},
     metadata::service::METADATA_REFRESH_JOB_TYPE,
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
+    recognition::{
+        recognize,
+        repository::RecognitionRepository,
+        rules::RuleSet,
+        types::{Confidence, RecognitionInput, RecognizedKind},
+    },
 };
 
 const SCAN_WORKER_ID: &str = "fbz-api-inline-scan";
@@ -95,6 +104,7 @@ pub struct ScanRunSummary {
     pub updated_files: usize,
     pub metadata_refresh_jobs: i64,
     pub probe_jobs: i64,
+    pub photo_jobs: i64,
     pub missing_items: i64,
     pub missing_mark_skipped: bool,
     pub has_more: bool,
@@ -181,6 +191,11 @@ impl ScanService {
         Self { pool }
     }
 
+    /// 识别词仓库句柄（共享同一连接池），用于扫描前加载编译 RuleSet。
+    fn recognition_repository(&self) -> RecognitionRepository {
+        RecognitionRepository::new(self.pool.clone())
+    }
+
     pub async fn run_scan_job(&self, job_id: &str) -> Result<ScanRunSummary, ScanError> {
         let Some(job) = self.claim_scan_job(Some(job_id)).await? else {
             return Err(ScanError::JobNotFound);
@@ -243,6 +258,7 @@ impl ScanService {
                     updated_files: summary.updated_files,
                     metadata_refresh_jobs: summary.metadata_refresh_jobs,
                     probe_jobs: summary.probe_jobs,
+                    photo_jobs: summary.photo_jobs,
                     missing_items: summary.missing_items,
                     missing_mark_skipped: summary.missing_mark_skipped,
                     has_more: summary.has_more,
@@ -334,28 +350,72 @@ impl ScanService {
         request: &ScanJobRequest,
     ) -> Result<PartialScanSummary, ScanError> {
         let target = self.load_library_target(&request.library_id).await?;
-        let page =
-            discover_media_files(target.paths.clone(), request.cursor.clone(), MAX_SCAN_FILES)
-                .await?;
+        // 解析库类型一次，全程复用作分类先验。未知值退化为 Mixed（最宽容）。
+        let library_type = LibraryType::parse(&target.library_type).unwrap_or(LibraryType::Mixed);
+        // 加载该库 + 全局识别词规则，编译为 RuleSet（坏正则跳过，design §3 不阻断）。
+        // 加载失败（如表缺失）用空规则集兜底，识别仍走内置解析。
+        let (ruleset, skipped_rules) = self
+            .recognition_repository()
+            .load_ruleset_for_library(Some(&target.library_public_id))
+            .await
+            .unwrap_or_else(|err| {
+                warn!(error = %err, "failed to load recognition rules; using built-in parsing only");
+                RuleSet::compile(Vec::new())
+            });
+        if !skipped_rules.is_empty() {
+            warn!(
+                skipped = ?skipped_rules,
+                "skipped invalid recognition rules during ruleset compile"
+            );
+        }
+        let page = discover_media_files(
+            target.paths.clone(),
+            request.cursor.clone(),
+            MAX_SCAN_FILES,
+            library_type,
+        )
+        .await?;
         let mut summary = PartialScanSummary::default();
         let mut touched_media_item_ids = Vec::new();
         let mut probe_media_file_ids = Vec::new();
+        let mut photo_media_item_ids = Vec::new();
+        // 音乐 artist/album 容器 id：新建 track 时收集，扫描末尾一并入队元数据刷新，
+        // 让 Spotify 富化专辑封面/年份（容器本身无文件、不会经 track 路径入队）。
+        let mut music_container_ids = Vec::new();
 
         for file in page.files {
-            if !is_supported_media_file(&file.path) {
+            if !is_supported_media_file(&file.path, library_type) {
                 continue;
             }
 
-            let item_type = item_type_for_file(&target.library_type, &file.path);
-            let title = title_from_path(&file.path);
             let path_string = file.path.to_string_lossy().into_owned();
             let normalized_path = normalize_path(&path_string);
             let path_hash = sha256(normalized_path.as_bytes());
-            let library_path_id = target
+            let matched_root = target
                 .paths
                 .iter()
-                .find(|library_path| file.path.starts_with(&library_path.path))
-                .map(|library_path| library_path.id);
+                .find(|library_path| file.path.starts_with(&library_path.path));
+            let library_path_id = matched_root.map(|library_path| library_path.id);
+
+            // 阶段 3：用识别核心解析文件名 + 目录链。Low 置信度退化为裸文件名标题（零回归）。
+            let recognized = recognize_scan_file(
+                &file.path,
+                matched_root.map(|p| p.path.as_path()),
+                library_type,
+                &ruleset,
+            );
+            let item_type = recognized.item_type;
+            // 音乐 track：读文件自带标签（ID3/Vorbis/MP4），用标签覆盖文件名识别结果，
+            // 并据此 find-or-create artist→album 容器。非 track 不读（省 IO）。
+            let audio_tags = if recognized.kind == ItemType::Track {
+                read_audio_tags(file.path.clone()).await?
+            } else {
+                AudioTags::default()
+            };
+            let title = match audio_tags.title.as_deref() {
+                Some(tag_title) => tag_title.to_owned(),
+                None => recognized.title.clone(),
+            };
 
             let mut tx = self.pool.begin().await.map_err(ScanError::Database)?;
             let existing_file = sqlx::query(
@@ -384,27 +444,92 @@ impl ScanService {
                 existing.media_item_id
             } else {
                 summary.created_items += 1;
+                // 层级归组（design §8）：episode 落库前 find-or-create series→season 容器，
+                // parent_id 指向 season（无季号时指向 series）。非 episode 无父链。
+                let parent_id = if recognized.kind == ItemType::Episode {
+                    Self::ensure_episode_parent(
+                        &mut tx,
+                        target.library_id,
+                        &title,
+                        recognized.season,
+                    )
+                    .await?
+                } else if recognized.kind == ItemType::Track {
+                    // 音乐归组：artist → album 容器，track.parent_id 指向 album（无专辑名时
+                    // 指向 artist）。同时收集容器 id 供入队富化、写一条 artist 人物关联
+                    // （读取侧 raw_artists 双路命中）。
+                    let parent =
+                        Self::ensure_music_parent(&mut tx, target.library_id, &audio_tags).await?;
+                    music_container_ids.extend(parent.container_ids());
+                    Some(parent.track_parent_id())
+                } else {
+                    None
+                };
+                // track：年份/序号取自标签（缺失回退识别结果）。track 号→index_number，
+                // 碟号→parent_index_number，episode_number 留空。非 track 维持原行为
+                // （index_number 复用 episode 号，零回归）。
+                let is_track = recognized.kind == ItemType::Track;
+                let production_year = if is_track {
+                    audio_tags.year.or(recognized.year)
+                } else {
+                    recognized.year
+                };
+                let episode_number = if is_track { None } else { recognized.episode };
+                let index_number = if is_track {
+                    audio_tags.track_number.map(|n| n as i32)
+                } else {
+                    recognized.episode
+                };
+                let parent_index_number = if is_track {
+                    audio_tags.disc_number.map(|n| n as i32)
+                } else {
+                    None
+                };
                 sqlx::query_scalar::<_, i64>(
                     r#"
                     insert into media_items (
                         library_id,
+                        parent_id,
                         item_type,
                         title,
                         sort_title,
+                        original_title,
+                        production_year,
+                        season_number,
+                        episode_number,
+                        index_number,
+                        parent_index_number,
                         metadata_status,
                         scan_status
                     )
-                    values ($1, $2, $3, $3, 'pending', 'scanned')
+                    values ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, 'pending', 'scanned')
                     returning id
                     "#,
                 )
                 .bind(target.library_id)
+                .bind(parent_id)
                 .bind(item_type)
                 .bind(&title)
+                .bind(recognized.original_title.as_deref())
+                .bind(production_year)
+                .bind(recognized.season)
+                .bind(episode_number)
+                .bind(index_number)
+                .bind(parent_index_number)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(ScanError::Database)?
             };
+
+            // 写显式外部 id（`{tmdb-XXX}` 等）到 media_external_ids，供刮削直接按 id 匹配。
+            // on conflict do nothing：同 item 同 provider 已有则跳过；跨 item 同 id 冲突也忽略。
+            Self::write_external_ids(&mut tx, media_item_id, &recognized.external_ids).await?;
+
+            // 音乐 track：新条目写一条 artist 人物关联（读取侧 raw_artists 经 media_item_people
+            // role_type='artist' 命中）。仅新建时写，避免重复扫描反复 upsert。
+            if existing_file.is_none() && recognized.kind == ItemType::Track {
+                Self::link_track_artist(&mut tx, media_item_id, &audio_tags).await?;
+            }
 
             if existing_file
                 .as_ref()
@@ -444,7 +569,12 @@ impl ScanService {
                     last_seen_at,
                     is_primary,
                     is_strm,
-                    strm_target
+                    strm_target,
+                    resolution,
+                    source,
+                    video_codec,
+                    audio_codec,
+                    hdr
                 )
                 values (
                     $1,
@@ -461,7 +591,12 @@ impl ScanService {
                     now(),
                     true,
                     $9,
-                    $10
+                    $10,
+                    $11,
+                    $12,
+                    $13,
+                    $14,
+                    $15
                 )
                 on conflict (path_hash) do update
                     set media_item_id = excluded.media_item_id,
@@ -474,6 +609,11 @@ impl ScanService {
                         last_seen_at = excluded.last_seen_at,
                         is_strm = excluded.is_strm,
                         strm_target = excluded.strm_target,
+                        resolution = excluded.resolution,
+                        source = excluded.source,
+                        video_codec = excluded.video_codec,
+                        audio_codec = excluded.audio_codec,
+                        hdr = excluded.hdr,
                         updated_at = now()
                 returning id
                 "#,
@@ -488,19 +628,30 @@ impl ScanService {
             .bind(scan_id)
             .bind(file.is_strm)
             .bind(file.strm_target)
+            .bind(recognized.quality.resolution.as_deref())
+            .bind(recognized.quality.source.as_deref())
+            .bind(recognized.quality.video_codec.as_deref())
+            .bind(recognized.quality.audio_codec.as_deref())
+            .bind(recognized.quality.hdr.as_deref())
             .fetch_one(&mut *tx)
             .await
             .map_err(ScanError::Database)?;
 
             tx.commit().await.map_err(ScanError::Database)?;
             touched_media_item_ids.push(media_item_id);
-            if !file.is_strm {
+            // 图片走 EXIF/缩略图提取队列；视频/音频走 ffprobe。strm 两者都不进。
+            if recognized.kind == ItemType::Photo {
+                photo_media_item_ids.push(media_item_id);
+            } else if !file.is_strm {
                 probe_media_file_ids.push(media_file_id);
             }
             summary.scanned_files += 1;
             summary.updated_files += 1;
         }
 
+        // 音乐 artist/album 容器并入刷新队列（去重交 queue_metadata_refresh_for_items
+        // 的 `select distinct` 处理）。容器本身无文件、不走 track 的 probe 路径。
+        touched_media_item_ids.extend(music_container_ids);
         summary.metadata_refresh_jobs = self
             .queue_metadata_refresh_for_items(
                 &touched_media_item_ids,
@@ -511,6 +662,12 @@ impl ScanService {
             .queue_probe_for_files(
                 &probe_media_file_ids,
                 &format!("scan updated files for library {}", request.library_id),
+            )
+            .await?;
+        summary.photo_jobs = self
+            .queue_photo_extraction_for_items(
+                &photo_media_item_ids,
+                &format!("scan found photos for library {}", request.library_id),
             )
             .await?;
 
@@ -593,6 +750,7 @@ impl ScanService {
             "updatedFiles": summary.updated_files,
             "metadataRefreshJobs": summary.metadata_refresh_jobs,
             "probeJobs": summary.probe_jobs,
+            "photoJobs": summary.photo_jobs,
             "missingItems": summary.missing_items,
             "missingMarkSkipped": summary.missing_mark_skipped,
             "hasMore": summary.has_more,
@@ -654,7 +812,7 @@ impl ScanService {
                   on ti.id = mi.id
                 where mi.is_deleted = false
                   and mi.metadata_status in ('pending', 'failed')
-                  and mi.item_type in ('movie', 'series', 'episode')
+                  and mi.item_type in ('movie', 'series', 'episode', 'album', 'artist')
                   and not exists (
                       select 1
                       from jobs j
@@ -762,6 +920,390 @@ impl ScanService {
         .fetch_one(&self.pool)
         .await
         .map_err(ScanError::Database)
+    }
+
+    /// 为新发现的图片条目入队 EXIF/缩略图提取 job。键在 media_item_id，
+    /// 已有同条目未完成 job 时跳过（去重），仿照 probe 入队语义。
+    async fn queue_photo_extraction_for_items(
+        &self,
+        media_item_ids: &[i64],
+        reason: &str,
+    ) -> Result<i64, ScanError> {
+        if media_item_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let payload_reason = json!(reason);
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            with target_items as (
+                select distinct unnest($1::bigint[]) as media_item_id
+            ),
+            eligible_items as (
+                select mi.id as media_item_id
+                from media_items mi
+                join target_items ti on ti.media_item_id = mi.id
+                where mi.is_deleted = false
+                  and mi.item_type = 'photo'
+                  and mi.scan_status <> 'missing'
+                  and not exists (
+                      select 1
+                      from jobs j
+                      where j.job_type = $2
+                        and j.status in ('queued', 'running', 'failed')
+                        and j.attempts < j.max_attempts
+                        and j.payload->>'mediaItemId' = mi.id::text
+                  )
+            ),
+            inserted as (
+                insert into jobs (
+                    job_type,
+                    status,
+                    queue_name,
+                    priority,
+                    payload
+                )
+                select
+                    $2,
+                    'queued',
+                    'photo',
+                    -3,
+                    jsonb_build_object(
+                        'mediaItemId', eligible_items.media_item_id,
+                        'reason', $3::jsonb
+                    )
+                from eligible_items
+                on conflict do nothing
+                returning id
+            )
+            select count(*)::bigint from inserted
+            "#,
+        )
+        .bind(media_item_ids)
+        .bind(MEDIA_PHOTO_JOB_TYPE)
+        .bind(payload_reason)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(ScanError::Database)
+    }
+
+    /// 写显式外部 provider id 到 media_external_ids（`{tmdb-XXX}` 等，刮削按 id 直查）。
+    /// 各 provider 至多一行；`on conflict do nothing` 兜住同 item 重复与跨 item 同 id 冲突。
+    async fn write_external_ids(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        media_item_id: i64,
+        external_ids: &crate::recognition::types::ExternalIds,
+    ) -> Result<(), ScanError> {
+        if external_ids.is_empty() {
+            return Ok(());
+        }
+        let pairs = [
+            ("tmdb", external_ids.tmdb.as_deref()),
+            ("imdb", external_ids.imdb.as_deref()),
+            ("tvdb", external_ids.tvdb.as_deref()),
+        ];
+        for (provider, value) in pairs {
+            let Some(value) = value else { continue };
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            sqlx::query(
+                r#"
+                insert into media_external_ids (media_item_id, provider, external_id)
+                values ($1, $2, $3)
+                on conflict do nothing
+                "#,
+            )
+            .bind(media_item_id)
+            .bind(provider)
+            .bind(value)
+            .execute(&mut **tx)
+            .await
+            .map_err(ScanError::Database)?;
+        }
+        Ok(())
+    }
+
+    /// 层级归组（design §8）：为一个 episode find-or-create series→season 容器，
+    /// 返回应作其 parent 的 media_item id（有季号 → season 容器；无季号 → series 容器）。
+    ///
+    /// 并发安全：series/season 容器靠迁移 0083 的部分唯一索引去重，用 `on conflict do nothing`
+    /// + 回查保证同名 series / 同季 season 只一个容器（design §8 最高风险点）。
+    /// 容器建为 `is_virtual=true`，待 provider 富化。
+    async fn ensure_episode_parent(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        library_id: i64,
+        series_title: &str,
+        season: Option<i32>,
+    ) -> Result<Option<i64>, ScanError> {
+        // 1) series 容器：(library_id, 规范化 title) 去重。
+        let series_id = Self::find_or_create_series(tx, library_id, series_title).await?;
+
+        // 无季号：episode 直接挂 series。
+        let Some(season_number) = season else {
+            return Ok(Some(series_id));
+        };
+
+        // 2) season 容器：(series_id, season_number) 去重。
+        let season_id =
+            Self::find_or_create_season(tx, library_id, series_id, season_number).await?;
+        Ok(Some(season_id))
+    }
+
+    async fn find_or_create_series(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        library_id: i64,
+        series_title: &str,
+    ) -> Result<i64, ScanError> {
+        // on conflict do nothing 命中部分唯一索引；未插入时回查既有容器。
+        let inserted = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into media_items (
+                library_id, item_type, title, sort_title, is_virtual,
+                metadata_status, scan_status
+            )
+            values ($1, 'series', $2, $2, true, 'pending', 'scanned')
+            on conflict do nothing
+            returning id
+            "#,
+        )
+        .bind(library_id)
+        .bind(series_title)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(ScanError::Database)?;
+        if let Some(id) = inserted {
+            return Ok(id);
+        }
+        // 已存在：回查（规范化 title 比较，与唯一索引一致）。
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            select id from media_items
+            where library_id = $1
+              and item_type = 'series'
+              and is_deleted = false
+              and lower(btrim(title)) = lower(btrim($2))
+            limit 1
+            "#,
+        )
+        .bind(library_id)
+        .bind(series_title)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(ScanError::Database)
+    }
+
+    async fn find_or_create_season(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        library_id: i64,
+        series_id: i64,
+        season_number: i32,
+    ) -> Result<i64, ScanError> {
+        let title = if season_number == 0 {
+            "Specials".to_owned()
+        } else {
+            format!("Season {season_number}")
+        };
+        let inserted = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into media_items (
+                library_id, parent_id, item_type, title, sort_title,
+                season_number, is_virtual, metadata_status, scan_status
+            )
+            values ($1, $2, 'season', $3, $3, $4, true, 'pending', 'scanned')
+            on conflict do nothing
+            returning id
+            "#,
+        )
+        .bind(library_id)
+        .bind(series_id)
+        .bind(&title)
+        .bind(season_number)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(ScanError::Database)?;
+        if let Some(id) = inserted {
+            return Ok(id);
+        }
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            select id from media_items
+            where parent_id = $1
+              and item_type = 'season'
+              and is_deleted = false
+              and season_number = $2
+            limit 1
+            "#,
+        )
+        .bind(series_id)
+        .bind(season_number)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(ScanError::Database)
+    }
+
+    /// 音乐归组（仿 [`Self::ensure_episode_parent`]）：find-or-create artist → album 容器，
+    /// 返回 track 应挂的 parent_id：有专辑名时指向 album，否则指向 artist（散曲直接挂歌手）。
+    /// artist 名取 album_artist 优先、artist 兜底、都无则 "Unknown Artist"，与
+    /// [`music_artist_name`] / [`Self::link_track_artist`] 取值一致。
+    async fn ensure_music_parent(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        library_id: i64,
+        tags: &AudioTags,
+    ) -> Result<MusicParent, ScanError> {
+        let artist_name = music_artist_name(tags);
+        let artist_id = Self::find_or_create_artist(tx, library_id, &artist_name).await?;
+
+        let Some(album_name) = tags
+            .album
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            return Ok(MusicParent {
+                artist_id,
+                album_id: None,
+            });
+        };
+        let album_id = Self::find_or_create_album(tx, library_id, artist_id, album_name).await?;
+        Ok(MusicParent {
+            artist_id,
+            album_id: Some(album_id),
+        })
+    }
+
+    async fn find_or_create_artist(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        library_id: i64,
+        artist_title: &str,
+    ) -> Result<i64, ScanError> {
+        // on conflict do nothing 命中 uq_media_items_artist_container；未插入时回查既有容器。
+        let inserted = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into media_items (
+                library_id, item_type, title, sort_title, is_virtual,
+                metadata_status, scan_status
+            )
+            values ($1, 'artist', $2, $2, true, 'pending', 'scanned')
+            on conflict do nothing
+            returning id
+            "#,
+        )
+        .bind(library_id)
+        .bind(artist_title)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(ScanError::Database)?;
+        if let Some(id) = inserted {
+            return Ok(id);
+        }
+        // 已存在：回查（规范化 title 比较，与唯一索引一致）。
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            select id from media_items
+            where library_id = $1
+              and item_type = 'artist'
+              and is_deleted = false
+              and lower(btrim(title)) = lower(btrim($2))
+            limit 1
+            "#,
+        )
+        .bind(library_id)
+        .bind(artist_title)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(ScanError::Database)
+    }
+
+    async fn find_or_create_album(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        library_id: i64,
+        artist_id: i64,
+        album_title: &str,
+    ) -> Result<i64, ScanError> {
+        // on conflict do nothing 命中 uq_media_items_album_container（按 artist 下专辑名去重）。
+        let inserted = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into media_items (
+                library_id, parent_id, item_type, title, sort_title, is_virtual,
+                metadata_status, scan_status
+            )
+            values ($1, $2, 'album', $3, $3, true, 'pending', 'scanned')
+            on conflict do nothing
+            returning id
+            "#,
+        )
+        .bind(library_id)
+        .bind(artist_id)
+        .bind(album_title)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(ScanError::Database)?;
+        if let Some(id) = inserted {
+            return Ok(id);
+        }
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            select id from media_items
+            where parent_id = $1
+              and item_type = 'album'
+              and is_deleted = false
+              and lower(btrim(title)) = lower(btrim($2))
+            limit 1
+            "#,
+        )
+        .bind(artist_id)
+        .bind(album_title)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(ScanError::Database)
+    }
+
+    /// 给 track 写一条 artist 人物关联（people upsert + media_item_people）。读取侧
+    /// `raw_artists` 经 `media_item_people.role_type='artist'` join `people` 命中。
+    /// 仿 [`crate::metadata::write::replace_item_people`] 的 people upsert。
+    async fn link_track_artist(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        media_item_id: i64,
+        tags: &AudioTags,
+    ) -> Result<(), ScanError> {
+        let artist_name = music_artist_name(tags);
+        let name_normalized = artist_name.trim().to_lowercase();
+        let pinyin = crate::text::pinyin::pinyin_keys(&artist_name);
+        let person_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into people (name, name_normalized, pinyin_full, pinyin_initials)
+            values ($1, $2, $3, $4)
+            on conflict (name_normalized) do update
+                set name = people.name,
+                    pinyin_full = coalesce(excluded.pinyin_full, people.pinyin_full),
+                    pinyin_initials = coalesce(excluded.pinyin_initials, people.pinyin_initials),
+                    updated_at = now()
+            returning id
+            "#,
+        )
+        .bind(&artist_name)
+        .bind(&name_normalized)
+        .bind(pinyin.as_ref().map(|keys| keys.full.as_str()))
+        .bind(pinyin.as_ref().map(|keys| keys.initials.as_str()))
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(ScanError::Database)?;
+
+        sqlx::query(
+            r#"
+            insert into media_item_people (media_item_id, person_id, role_type)
+            values ($1, $2, 'artist')
+            on conflict do nothing
+            "#,
+        )
+        .bind(media_item_id)
+        .bind(person_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(ScanError::Database)?;
+        Ok(())
     }
 
     async fn mark_existing_file_seen(
@@ -961,6 +1503,7 @@ struct PartialScanSummary {
     updated_files: usize,
     metadata_refresh_jobs: i64,
     probe_jobs: i64,
+    photo_jobs: i64,
     missing_items: i64,
     missing_mark_skipped: bool,
     has_more: bool,
@@ -998,6 +1541,7 @@ fn scan_completed_event(
             "updatedFiles": summary.updated_files,
             "metadataRefreshJobs": summary.metadata_refresh_jobs,
             "probeJobs": summary.probe_jobs,
+            "photoJobs": summary.photo_jobs,
             "missingItems": summary.missing_items,
             "missingMarkSkipped": summary.missing_mark_skipped,
             "hasMore": summary.has_more,
@@ -1101,6 +1645,7 @@ async fn discover_media_files(
     paths: Vec<LibraryPathTarget>,
     cursor: Option<ScanCursor>,
     max_files: usize,
+    library_type: LibraryType,
 ) -> Result<ScanPage, ScanError> {
     tokio::task::spawn_blocking(move || {
         let mut traversal = ScanTraversal::new(paths, cursor)?;
@@ -1109,7 +1654,7 @@ async fn discover_media_files(
             let Some(path) = traversal.next_path()? else {
                 break;
             };
-            visit_scan_path(&path, &mut traversal, &mut files)?;
+            visit_scan_path(&path, &mut traversal, &mut files, library_type)?;
         }
 
         Ok(ScanPage {
@@ -1209,6 +1754,7 @@ fn visit_scan_path(
     path: &Path,
     traversal: &mut ScanTraversal,
     files: &mut Vec<ScanFile>,
+    library_type: LibraryType,
 ) -> Result<(), ScanError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -1220,7 +1766,7 @@ fn visit_scan_path(
     };
 
     if metadata.is_file() {
-        push_scan_file(path, metadata, files)?;
+        push_scan_file(path, metadata, files, library_type)?;
         return Ok(());
     }
 
@@ -1242,8 +1788,9 @@ fn push_scan_file(
     path: &Path,
     metadata: fs::Metadata,
     files: &mut Vec<ScanFile>,
+    library_type: LibraryType,
 ) -> Result<(), ScanError> {
-    if !is_supported_media_file(path) {
+    if !is_supported_media_file(path, library_type) {
         return Ok(());
     }
 
@@ -1270,47 +1817,14 @@ fn push_scan_file(
     Ok(())
 }
 
-fn is_supported_media_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "mkv"
-                    | "mp4"
-                    | "avi"
-                    | "mov"
-                    | "m4v"
-                    | "ts"
-                    | "strm"
-                    | "mp3"
-                    | "flac"
-                    | "m4a"
-                    | "wav"
-                    | "ogg"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn item_type_for_file(library_type: &str, path: &Path) -> &'static str {
-    match library_type {
-        "music" => "track",
-        _ if is_audio_file(path) => "track",
-        _ => "movie",
+/// 文件是否纳入扫描。视频/音频在任意库都收；图片只在家庭库（`homevideos`）收，
+/// 避免电影/剧集库里的海报、fanart 等图片被误当作媒体条目入库。
+fn is_supported_media_file(path: &Path, library_type: LibraryType) -> bool {
+    match MediaCategory::from_path(path) {
+        Some(MediaCategory::Video | MediaCategory::Audio) => true,
+        Some(MediaCategory::Photo) => library_type == LibraryType::HomeVideos,
+        None => false,
     }
-}
-
-fn is_audio_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "mp3" | "flac" | "m4a" | "wav" | "ogg"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn title_from_path(path: &Path) -> String {
@@ -1320,6 +1834,154 @@ fn title_from_path(path: &Path) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("Untitled")
         .to_owned()
+}
+
+/// 读音频文件自带标签。lofty 是同步阻塞 IO，放 spawn_blocking 避免占满 tokio 工作线程
+/// （与 [`discover_media_files`] 同样处理）。读取失败/无标签返回全 None（不阻断扫描）。
+async fn read_audio_tags(path: PathBuf) -> Result<AudioTags, ScanError> {
+    tokio::task::spawn_blocking(move || AudioTags::from_path(&path))
+        .await
+        .map_err(ScanError::Join)
+}
+
+/// 音乐归组用 artist 名：album_artist 优先（同一专辑跨曲目一致），artist 兜底，
+/// 都缺则 "Unknown Artist"（保证 track 总能挂到某个 artist 容器，不丢曲目）。
+fn music_artist_name(tags: &AudioTags) -> String {
+    tags.album_artist
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            tags.artist
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or("Unknown Artist")
+        .to_owned()
+}
+
+/// 音乐归组产出的容器 id（[`ScanService::ensure_music_parent`] 返回）。
+/// track 挂在 album（若有）否则 artist；两者都收集进 metadata 刷新队列，供 Spotify 富化
+/// 封面/年份（白名单见 `queue_metadata_refresh_for_items`）。
+struct MusicParent {
+    artist_id: i64,
+    album_id: Option<i64>,
+}
+
+impl MusicParent {
+    /// track 应挂的 parent_id：有专辑挂专辑，否则挂歌手。
+    fn track_parent_id(&self) -> i64 {
+        self.album_id.unwrap_or(self.artist_id)
+    }
+
+    /// 该归组涉及的容器 id（artist + album），供入队富化。
+    fn container_ids(&self) -> Vec<i64> {
+        match self.album_id {
+            Some(album_id) => vec![self.artist_id, album_id],
+            None => vec![self.artist_id],
+        }
+    }
+}
+
+/// 识别核心在扫描层的产出（映射为落库所需字段）。
+struct RecognizedScanFile {
+    /// 存储用 item_type 字符串（insert 绑定）。
+    item_type: &'static str,
+    /// item_type 的枚举形态（photo 路由判断用）。
+    kind: ItemType,
+    /// 标题（识别失败时退化为裸文件名）。
+    title: String,
+    original_title: Option<String>,
+    year: Option<i32>,
+    season: Option<i32>,
+    /// 单集集号（多集合并取首集，design §8 多集语义待确认，先存首集）。
+    episode: Option<i32>,
+    /// 文件名识别出的技术标签（阶段 5：落 media_files，probe 跑完后实测校正）。
+    quality: crate::recognition::types::QualityTags,
+    /// 显式外部 provider id（`{tmdb-XXX}` 等）：写入 media_external_ids，刮削直接按 id 匹配。
+    external_ids: crate::recognition::types::ExternalIds,
+}
+
+/// 对一个扫描文件跑识别核心，映射为落库字段。Low 置信度退化为裸文件名 + 扩展名分类（零回归）。
+fn recognize_scan_file(
+    path: &Path,
+    library_root: Option<&Path>,
+    library_type: LibraryType,
+    ruleset: &RuleSet,
+) -> RecognizedScanFile {
+    // 扩展名分类（photo/video/track 由扩展名决定，识别不覆盖这些）。
+    let classified = ItemType::classify(library_type, path);
+    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    // 祖先目录链（库根→文件之间的目录名，近→远）。
+    let ancestors = ancestor_dir_names(path, library_root);
+    let ancestor_refs: Vec<&str> = ancestors.iter().map(String::as_str).collect();
+
+    let input = RecognitionInput {
+        file_stem,
+        extension: extension.as_deref(),
+        ancestors: &ancestor_refs,
+    };
+    let recognized = recognize(&input, library_type, ruleset);
+
+    // item_type：photo/track/video 等由扩展名分类决定（识别不覆盖）；
+    // 仅当分类为视频类（movie 兜底）且识别高于 Low 时，用识别的 kind 细化 movie/series/episode。
+    let kind = if matches!(classified, ItemType::Movie)
+        && recognized.confidence > Confidence::Low
+        && matches!(
+            recognized.kind,
+            RecognizedKind::Movie | RecognizedKind::Series | RecognizedKind::Episode
+        ) {
+        recognized.kind.to_item_type()
+    } else {
+        classified
+    };
+
+    // 标题退化：识别 Low 或标题空 → 裸文件名（零回归保证）。
+    let title = if recognized.confidence == Confidence::Low || recognized.title.trim().is_empty() {
+        title_from_path(path)
+    } else {
+        recognized.title.clone()
+    };
+
+    RecognizedScanFile {
+        item_type: kind.as_str(),
+        kind,
+        title,
+        original_title: recognized.original_title,
+        year: recognized.year,
+        season: recognized.season,
+        episode: recognized.episodes.first().copied(),
+        quality: recognized.quality,
+        external_ids: recognized.external_ids,
+    }
+}
+
+/// 算出文件相对库根的祖先目录名链（近→远）。库根未知时取文件的直接父链（去盘符）。
+fn ancestor_dir_names(path: &Path, library_root: Option<&Path>) -> Vec<String> {
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    // 若有库根，只取库根之下的相对部分；否则取全部父目录名。
+    let relative = library_root
+        .and_then(|root| parent.strip_prefix(root).ok())
+        .unwrap_or(parent);
+    let mut names: Vec<String> = relative
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(os) => os.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    // components 是远→近，反转为近→远（design §4.1 约定）。
+    names.reverse();
+    names
 }
 
 fn normalize_path(path: &str) -> String {
@@ -1400,11 +2062,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn music_artist_name_prefers_album_artist() {
+        // album_artist 优先：保证同一专辑跨曲目归到同一 artist 容器。
+        let tags = AudioTags {
+            album_artist: Some("Various Artists".to_owned()),
+            artist: Some("Queen".to_owned()),
+            ..AudioTags::default()
+        };
+        assert_eq!(music_artist_name(&tags), "Various Artists");
+    }
+
+    #[test]
+    fn music_artist_name_falls_back_to_artist() {
+        let tags = AudioTags {
+            artist: Some("Queen".to_owned()),
+            ..AudioTags::default()
+        };
+        assert_eq!(music_artist_name(&tags), "Queen");
+    }
+
+    #[test]
+    fn music_artist_name_defaults_when_blank_or_missing() {
+        // 全缺 → Unknown Artist；空白串也视为缺失（不产生空名 artist 容器）。
+        assert_eq!(music_artist_name(&AudioTags::default()), "Unknown Artist");
+        let blank = AudioTags {
+            album_artist: Some("   ".to_owned()),
+            artist: Some("".to_owned()),
+            ..AudioTags::default()
+        };
+        assert_eq!(music_artist_name(&blank), "Unknown Artist");
+    }
+
+    #[test]
     fn supported_media_extensions_are_detected() {
-        assert!(is_supported_media_file(Path::new("movie.mkv")));
-        assert!(is_supported_media_file(Path::new("song.flac")));
-        assert!(is_supported_media_file(Path::new("remote.strm")));
-        assert!(!is_supported_media_file(Path::new("cover.jpg")));
+        // 视频/音频在任意库都受支持。
+        assert!(is_supported_media_file(
+            Path::new("movie.mkv"),
+            LibraryType::Movies
+        ));
+        assert!(is_supported_media_file(
+            Path::new("song.flac"),
+            LibraryType::Movies
+        ));
+        assert!(is_supported_media_file(
+            Path::new("remote.strm"),
+            LibraryType::Movies
+        ));
+        // 图片只在家庭库受支持，电影库里的图片被忽略（不当海报误入库）。
+        assert!(!is_supported_media_file(
+            Path::new("cover.jpg"),
+            LibraryType::Movies
+        ));
+        assert!(is_supported_media_file(
+            Path::new("IMG_0001.jpg"),
+            LibraryType::HomeVideos
+        ));
+        // 无关扩展名一律忽略。
+        assert!(!is_supported_media_file(
+            Path::new("notes.txt"),
+            LibraryType::HomeVideos
+        ));
     }
 
     #[test]
@@ -1418,11 +2135,68 @@ mod tests {
     #[test]
     fn item_type_uses_library_and_extension() {
         assert_eq!(
-            item_type_for_file("movies", Path::new("movie.mkv")),
-            "movie"
+            ItemType::classify(LibraryType::Movies, Path::new("movie.mkv")),
+            ItemType::Movie
         );
-        assert_eq!(item_type_for_file("music", Path::new("song.mp3")), "track");
-        assert_eq!(item_type_for_file("mixed", Path::new("song.flac")), "track");
+        assert_eq!(
+            ItemType::classify(LibraryType::Music, Path::new("song.mp3")),
+            ItemType::Track
+        );
+        assert_eq!(
+            ItemType::classify(LibraryType::Mixed, Path::new("song.flac")),
+            ItemType::Track
+        );
+        assert_eq!(
+            ItemType::classify(LibraryType::HomeVideos, Path::new("clip.mp4")),
+            ItemType::Video
+        );
+    }
+
+    #[test]
+    fn recognize_scan_file_fills_fields_and_degrades() {
+        let (empty_rules, _) = RuleSet::compile(Vec::new());
+
+        // 电影：识别填标题 + 年份，item_type=movie。
+        let movie = recognize_scan_file(
+            Path::new("/lib/Inception.2010.1080p.BluRay-GROUP.mkv"),
+            Some(Path::new("/lib")),
+            LibraryType::Movies,
+            &empty_rules,
+        );
+        assert_eq!(movie.title, "Inception");
+        assert_eq!(movie.year, Some(2010));
+        assert_eq!(movie.item_type, "movie");
+
+        // 剧集：识别填季集，item_type=episode。
+        let episode = recognize_scan_file(
+            Path::new("/lib/Breaking.Bad.S01E05.mkv"),
+            Some(Path::new("/lib")),
+            LibraryType::TvShows,
+            &empty_rules,
+        );
+        assert_eq!(episode.title, "Breaking Bad");
+        assert_eq!(episode.season, Some(1));
+        assert_eq!(episode.episode, Some(5));
+        assert_eq!(episode.item_type, "episode");
+
+        // 目录证据：季在目录、集在文件。
+        let dir_ep = recognize_scan_file(
+            Path::new("/lib/Friends/Season 02/friends.e08.mkv"),
+            Some(Path::new("/lib")),
+            LibraryType::TvShows,
+            &empty_rules,
+        );
+        assert_eq!(dir_ep.season, Some(2));
+
+        // 图片分类不被识别覆盖（家庭库 jpg → photo）。
+        let photo = recognize_scan_file(
+            Path::new("/lib/IMG_0001.jpg"),
+            Some(Path::new("/lib")),
+            LibraryType::HomeVideos,
+            &empty_rules,
+        );
+        assert_eq!(photo.item_type, "photo");
+        assert_eq!(photo.kind, ItemType::Photo);
     }
 
     #[test]
@@ -1447,6 +2221,7 @@ mod tests {
             updated_files: 2,
             metadata_refresh_jobs: 5,
             probe_jobs: 6,
+            photo_jobs: 0,
             missing_items: 4,
             missing_mark_skipped: false,
             has_more: true,
@@ -1569,13 +2344,13 @@ mod tests {
             id: 1,
             path: root.clone(),
         };
-        let first = discover_media_files(vec![target.clone()], None, 1)
+        let first = discover_media_files(vec![target.clone()], None, 1, LibraryType::Movies)
             .await
             .unwrap();
         assert_eq!(first.files.len(), 1);
         assert!(first.next_cursor.is_some());
 
-        let second = discover_media_files(vec![target], first.next_cursor, 10)
+        let second = discover_media_files(vec![target], first.next_cursor, 10, LibraryType::Movies)
             .await
             .unwrap();
         let mut names = second
@@ -1600,7 +2375,9 @@ mod tests {
             path: missing_root,
         };
 
-        let page = discover_media_files(vec![target], None, 10).await.unwrap();
+        let page = discover_media_files(vec![target], None, 10, LibraryType::Movies)
+            .await
+            .unwrap();
 
         assert!(page.files.is_empty());
         assert!(page.next_cursor.is_none());
@@ -1670,5 +2447,109 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    }
+
+    // Live-DB smoke: validates hierarchical grouping (design §8) against the real
+    // migrated schema — series/season container find-or-create dedup (migration
+    // 0083 partial unique indexes) and the parent_id chain. Two episodes of the
+    // same series+season must share one series and one season container.
+    //   cargo test -- --ignored episode_grouping_dedups_containers_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn episode_grouping_dedups_containers_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let library_name = format!("group-smoke-{nonce}");
+        let library_id = sqlx::query_scalar::<_, i64>(
+            "insert into libraries (name, library_type) values ($1, 'tvshows') returning id",
+        )
+        .bind(&library_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create tvshows library");
+        let series_title = format!("Grouping Test Show {nonce}");
+
+        // Two episodes of S01 → must resolve to the same season container.
+        let mut tx = pool.begin().await.expect("begin tx1");
+        let parent1 =
+            ScanService::ensure_episode_parent(&mut tx, library_id, &series_title, Some(1))
+                .await
+                .expect("ensure parent for E01");
+        tx.commit().await.expect("commit tx1");
+
+        let mut tx = pool.begin().await.expect("begin tx2");
+        let parent2 =
+            ScanService::ensure_episode_parent(&mut tx, library_id, &series_title, Some(1))
+                .await
+                .expect("ensure parent for E02");
+        tx.commit().await.expect("commit tx2");
+
+        assert_eq!(
+            parent1, parent2,
+            "same series+season must dedup to one season container"
+        );
+
+        // A different season → different season container, same series parent.
+        let mut tx = pool.begin().await.expect("begin tx3");
+        let parent_s2 =
+            ScanService::ensure_episode_parent(&mut tx, library_id, &series_title, Some(2))
+                .await
+                .expect("ensure parent for S02E01");
+        tx.commit().await.expect("commit tx3");
+        assert_ne!(
+            parent1, parent_s2,
+            "different season must be a different container"
+        );
+
+        // Verify container topology: exactly one series, two seasons under it.
+        let series_count = sqlx::query_scalar::<_, i64>(
+            r#"select count(*) from media_items
+               where library_id = $1 and item_type = 'series'
+                 and lower(btrim(title)) = lower(btrim($2))"#,
+        )
+        .bind(library_id)
+        .bind(&series_title)
+        .fetch_one(&pool)
+        .await
+        .expect("count series");
+        assert_eq!(series_count, 1, "exactly one series container");
+
+        // Both season containers share the same series parent.
+        let series_id =
+            sqlx::query_scalar::<_, i64>(r#"select parent_id from media_items where id = $1"#)
+                .bind(parent1.unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("season's parent");
+        let season_count = sqlx::query_scalar::<_, i64>(
+            r#"select count(*) from media_items
+               where parent_id = $1 and item_type = 'season'"#,
+        )
+        .bind(series_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count seasons");
+        assert_eq!(season_count, 2, "two season containers under one series");
+
+        // Cleanup (cascade removes season/episode children via parent FK).
+        sqlx::query("delete from libraries where id = $1")
+            .bind(library_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup library");
     }
 }

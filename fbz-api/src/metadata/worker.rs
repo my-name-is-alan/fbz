@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use tokio::{
     sync::broadcast,
@@ -8,20 +8,32 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    config::{MetadataConfig, MetadataWorkerConfig, ProxyConfig},
+    config::{MetadataConfig, MetadataWorkerConfig, ProxyConfig, SecretConfig},
     db::DbPool,
     metadata::service::MetadataService,
+    notifications::secrets::SecretCipher,
 };
 
 pub fn spawn_metadata_worker(
     pool: DbPool,
     metadata: MetadataConfig,
     proxy: ProxyConfig,
+    secrets: SecretConfig,
+    artwork_cache_dir: PathBuf,
     config: MetadataWorkerConfig,
     mut shutdown: broadcast::Receiver<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let service = match MetadataService::new(pool, metadata, proxy) {
+        // A configured FBZ_SECRET_KEY unlocks DB-stored provider keys; without
+        // it the worker still runs on environment credentials.
+        let cipher = match SecretCipher::from_config(&secrets) {
+            Ok(cipher) => Some(cipher),
+            Err(err) => {
+                info!(reason = %err, "metadata worker using environment credentials only");
+                None
+            }
+        };
+        let service = match MetadataService::new(pool, metadata, proxy, cipher, artwork_cache_dir) {
             Ok(service) => service,
             Err(err) => {
                 warn!(error = %err, "metadata worker not started");

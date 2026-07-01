@@ -16,6 +16,13 @@ pub struct PublicUserRecord {
     pub has_password: bool,
 }
 
+/// 用户头像元数据：content-type + 更新时间的 epoch 秒（供 URL 缓存击穿）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvatarMeta {
+    pub content_type: String,
+    pub updated_at_epoch: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserDetailRecord {
     pub id: String,
@@ -208,6 +215,91 @@ impl UsersRepository {
         .await?;
 
         users_query_page_lower_bound_from_rows(rows, filter.start_index, filter.limit)
+    }
+
+    /// 读取用户头像元数据（content-type + 更新时间的 epoch 秒）。
+    /// 返回 `None` 表示用户不存在；`Some(None)` 表示用户存在但未设置头像。
+    pub async fn find_avatar_meta(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<Option<AvatarMeta>>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select
+                avatar_content_type,
+                extract(epoch from avatar_updated_at)::bigint as updated_at_epoch
+            from users
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let content_type: Option<String> = row.try_get("avatar_content_type")?;
+        let updated_at_epoch: Option<i64> = row.try_get("updated_at_epoch")?;
+        Ok(Some(match (content_type, updated_at_epoch) {
+            (Some(content_type), updated_at_epoch) => Some(AvatarMeta {
+                content_type,
+                updated_at_epoch: updated_at_epoch.unwrap_or(0),
+            }),
+            _ => None,
+        }))
+    }
+
+    /// 记录用户头像 content-type 并把更新时间设为 now()。文件应已写盘。
+    /// 返回受影响行数（0 表示用户不存在）。
+    pub async fn set_avatar_meta(
+        &self,
+        user_id: &str,
+        content_type: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            update users
+            set avatar_content_type = $2,
+                avatar_updated_at = now(),
+                updated_at = now()
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .bind(content_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// 清除用户头像元数据（删除文件后调用）。返回受影响行数。
+    pub async fn clear_avatar_meta(&self, user_id: &str) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            update users
+            set avatar_content_type = null,
+                avatar_updated_at = now(),
+                updated_at = now()
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 

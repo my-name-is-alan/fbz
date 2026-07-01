@@ -2,9 +2,11 @@
 name = "fbz-api"
 version = "0.1.0"
 edition = "2024"
+default-run = "fbz-api"
 
 [dependencies]
 argon2 = "0.5"
+async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
 chacha20poly1305 = "0.10"
@@ -14,6 +16,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 log = "0.4"
+pinyin = "0.10"
 rand = "0.8"
 redis = { version = "0.32", features = ["connection-manager", "tokio-comp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -30,6 +33,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wasmtime = { version = "45.0.2", default-features = false, features = ["async", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "45.0.2", default-features = false, features = ["p1"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+kamadak-exif = "0.6.1"
+regex = "1.12.4"
+lofty = "0.24.0"
+dotenvy = "0.15.7"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

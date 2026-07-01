@@ -5,9 +5,21 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{error::AppError, state::AppState};
+use crate::{
+    compat::emby::dto::{BaseItemDto, BaseItemSource, QueryResultDto},
+    error::AppError,
+    library::repository::{CollectionDetailRecord, LibraryRepository, PlaylistItemsInput},
+    state::AppState,
+};
 
-use super::access::authenticate_request_user;
+use super::{
+    access::{authenticate_query_user, authenticate_request_user},
+    items::media_item_to_base_item,
+};
+
+const DEFAULT_COLLECTION_ITEMS_LIMIT: u32 = 100;
+const MAX_COLLECTION_ITEMS_LIMIT: u32 = 200;
+const MAX_COLLECTION_ITEMS_START_INDEX: u32 = 10_000;
 
 const MAX_COLLECTION_IDS: usize = 256;
 const MAX_COLLECTION_ID_LEN: usize = 128;
@@ -33,6 +45,22 @@ pub struct CollectionItemsQuery {
     pub ids: Option<String>,
 }
 
+/// `GET /Collections/{id}` 与 `GET /Collections/{id}/Items` 的读 query。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct CollectionReadQuery {
+    #[serde(alias = "userId", alias = "user_id")]
+    pub user_id: Option<String>,
+    #[serde(alias = "startIndex", alias = "start_index")]
+    pub start_index: Option<u32>,
+    #[serde(alias = "limit")]
+    pub limit: Option<u32>,
+    #[serde(alias = "fields")]
+    pub fields: Option<String>,
+    #[serde(alias = "enableImages", alias = "enable_images")]
+    pub enable_images: Option<bool>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CollectionCreationResultDto {
@@ -52,6 +80,112 @@ struct CreateCollectionInput {
 struct CollectionItemsInput {
     collection_id: String,
     ids: Vec<String>,
+}
+
+/// `GET /Collections/{id}`：系列/合集详情（名称 + 简介）。无可见集返回 404。
+pub async fn collection_detail(
+    State(state): State<AppState>,
+    Path(collection_id): Path<String>,
+    Query(query): Query<CollectionReadQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<BaseItemDto>, AppError> {
+    let user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let collection_id = normalize_required_collection_id(&collection_id, "Id")?;
+
+    let Some(record) = LibraryRepository::new(database.clone())
+        .find_user_collection_detail_by_id(user.id, &collection_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get collection: {err}")))?
+    else {
+        return Err(AppError::not_found("collection not found"));
+    };
+
+    Ok(Json(collection_detail_to_base_item(record)))
+}
+
+/// `GET /Collections/{id}/Items`：系列/合集成员（复用 playlist 成员查询，同表）。
+pub async fn collection_items(
+    State(state): State<AppState>,
+    Path(collection_id): Path<String>,
+    Query(query): Query<CollectionReadQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let collection_id = normalize_required_collection_id(&collection_id, "Id")?;
+    let window = CollectionItemsWindow::from_query(&query);
+    let _requested_fields = query.fields.as_deref().unwrap_or_default();
+
+    let result = LibraryRepository::new(database.clone())
+        .list_user_playlist_items(PlaylistItemsInput {
+            user_id: user.id,
+            playlist_id: collection_id,
+            start_index: window.start_index,
+            limit: window.limit,
+            include_image_tags: query.enable_images.unwrap_or(false),
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list collection items: {err}")))?;
+
+    let items = result
+        .items
+        .into_iter()
+        .map(media_item_to_base_item)
+        .collect();
+    Ok(Json(QueryResultDto::new(
+        items,
+        result.total_record_count,
+        window.start_index as u32,
+    )))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CollectionItemsWindow {
+    start_index: i64,
+    limit: i64,
+}
+
+impl CollectionItemsWindow {
+    fn from_query(query: &CollectionReadQuery) -> Self {
+        Self {
+            start_index: i64::from(
+                query
+                    .start_index
+                    .unwrap_or(0)
+                    .min(MAX_COLLECTION_ITEMS_START_INDEX),
+            ),
+            limit: i64::from(
+                query
+                    .limit
+                    .unwrap_or(DEFAULT_COLLECTION_ITEMS_LIMIT)
+                    .clamp(1, MAX_COLLECTION_ITEMS_LIMIT),
+            ),
+        }
+    }
+}
+
+/// 系列/合集详情 → BaseItemDto：BoxSet 形状 + 简介。封面由客户端取首个成员海报派生。
+fn collection_detail_to_base_item(record: CollectionDetailRecord) -> BaseItemDto {
+    let mut item = BaseItemDto::from(BaseItemSource {
+        id: record.id,
+        name: record.name,
+        item_type: "BoxSet".to_owned(),
+        media_type: None,
+        parent_id: None,
+        is_folder: true,
+        run_time_ticks: None,
+        production_year: None,
+    });
+    item.overview = record.overview;
+    item.collection_type = Some("boxsets".to_owned());
+    item
 }
 
 pub async fn create_collection(
@@ -207,6 +341,32 @@ mod tests {
                 "Name": "Favorites"
             })
         );
+    }
+
+    #[test]
+    fn collection_detail_maps_boxset_shape_with_overview() {
+        let item = collection_detail_to_base_item(CollectionDetailRecord {
+            id: "collection-1".to_owned(),
+            name: "哈利·波特系列".to_owned(),
+            overview: Some("魔法世界八部曲。".to_owned()),
+        });
+
+        assert_eq!(item.item_type, "BoxSet");
+        assert!(item.is_folder);
+        assert_eq!(item.collection_type.as_deref(), Some("boxsets"));
+        assert_eq!(item.overview.as_deref(), Some("魔法世界八部曲。"));
+    }
+
+    #[test]
+    fn collection_items_window_clamps_pathological_values() {
+        let window = CollectionItemsWindow::from_query(&CollectionReadQuery {
+            start_index: Some(500_000),
+            limit: Some(50),
+            ..CollectionReadQuery::default()
+        });
+
+        assert_eq!(window.start_index, 10_000);
+        assert_eq!(window.limit, 50);
     }
 
     #[test]

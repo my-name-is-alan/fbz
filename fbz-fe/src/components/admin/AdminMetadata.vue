@@ -1,12 +1,20 @@
 <script setup lang="ts">
 import { useUiStore } from "@/stores/ui.ts";
+import {
+  getMetadataSettings,
+  setMetadataProviderKey,
+  updateMetadataProviderSettings,
+  updateMetadataSettings,
+} from "@/service/modules/admin.ts";
 
 const uiStore = useUiStore();
 
 // Form states
-const selectedLanguage = ref("zh");
-const tmdbToken = ref("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcGlfa2V5IjoiMTIzNDU2Nzg5MCJ9");
+const selectedLanguage = ref("zh-CN");
+const tmdbToken = ref("");
 const showToken = ref(false);
+const loading = ref(false);
+const loadError = ref<string | null>(null);
 
 const scrapers = ref([
   {
@@ -31,10 +39,44 @@ const scrapers = ref([
 
 const scanFrequency = ref("monitor");
 
+/**
+ * 接入真实后端：拉取元数据设置并叠加到表单。命中后端时按 provider id 同步开关；
+ * 后端永不回显明文 key，已配置时只给空输入框提示。
+ */
+async function loadSettings() {
+  loading.value = true;
+  loadError.value = null;
+  try {
+    const settings = await getMetadataSettings();
+    const byId = new Map(settings.providers.map((p) => [p.providerId, p]));
+    for (const scraper of scrapers.value) {
+      const provider = byId.get(scraper.id);
+      if (provider) {
+        scraper.enabled = provider.enabled;
+      }
+    }
+    const lang = settings.global.defaultLanguage;
+    if (lang) {
+      selectedLanguage.value = lang;
+    }
+    const tmdb = byId.get("tmdb");
+    if (tmdb?.hasKey) {
+      // 后端不回显明文 key，仅以占位提示「已配置」。
+      tmdbToken.value = "";
+    }
+  } catch {
+    loadError.value = "元数据设置加载失败，请检查服务器连接或管理员权限。";
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(loadSettings);
+
 const languageOptions = [
-  { label: "简体中文 (zh-CN)", value: "zh" },
-  { label: "英语 (en-US)", value: "en" },
-  { label: "使用原始产国语言", value: "original" },
+  { label: "简体中文 (zh-CN)", value: "zh-CN" },
+  { label: "英语 (en-US)", value: "en-US" },
+  { label: "不指定语言", value: "" },
 ];
 
 const frequencyOptions = [
@@ -46,12 +88,45 @@ const frequencyOptions = [
 
 const saving = ref(false);
 
-function handleSave() {
+async function handleSave() {
   saving.value = true;
-  setTimeout(() => {
+  try {
+    await updateMetadataSettings({
+      providerOrder: scrapers.value
+        .filter((scraper) => scraper.enabled)
+        .map((scraper) => scraper.id),
+      defaultLanguage: selectedLanguage.value || null,
+      defaultCountry: null,
+      imageLanguage: selectedLanguage.value || null,
+      imagePreferOriginal: false,
+      imageFallbackLanguages: selectedLanguage.value ? [selectedLanguage.value] : [],
+    });
+
+    await Promise.all(
+      scrapers.value.map((scraper) =>
+        updateMetadataProviderSettings(scraper.id, {
+          enabled: scraper.enabled,
+          language: selectedLanguage.value || null,
+          country: null,
+          imageLanguage: selectedLanguage.value || null,
+          imagePreferOriginal: false,
+        }),
+      ),
+    );
+
+    const token = tmdbToken.value.trim();
+    if (token) {
+      await setMetadataProviderKey("tmdb", token);
+      tmdbToken.value = "";
+    }
+
+    await loadSettings();
+    uiStore.showToast("元数据设置已保存到 Rust 后端。", "success");
+  } catch {
+    uiStore.showToast("保存元数据设置失败，请检查后端响应。", "error");
+  } finally {
     saving.value = false;
-    uiStore.showToast("元数据搜刮及扫描偏好设置已成功保存！", "success");
-  }, 1000);
+  }
 }
 </script>
 
@@ -65,6 +140,8 @@ function handleSave() {
           <h3>搜刮引擎列表及状态</h3>
         </div>
         <div class="card-body">
+          <p v-if="loadError" class="settings-error">{{ loadError }}</p>
+          <p v-else-if="loading" class="settings-hint">正在读取后端元数据设置...</p>
           <p class="settings-hint">选择启用的搜刮引擎。系统将按照优先级从上到下查找元数据。</p>
 
           <div class="scrapers-list">
@@ -121,7 +198,7 @@ function handleSave() {
               </button>
             </div>
             <span class="field-hint"
-              >抓取电影海报必须配置官方授权令牌，图片默认直连公开 CDN 加载。</span
+              >保存后后端会加密存储令牌；扫描/刷新元数据时会下载图片到本地缓存。</span
             >
           </div>
         </div>
@@ -166,6 +243,13 @@ function handleSave() {
   display: flex;
   flex-direction: column;
   gap: var(--fbz-space-4);
+}
+
+.settings-error {
+  margin: 0;
+  color: var(--fbz-color-danger-500);
+  font-size: var(--fbz-font-size-sm);
+  line-height: 1.5;
 }
 
 .scrapers-list {

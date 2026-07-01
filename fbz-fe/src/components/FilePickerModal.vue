@@ -1,160 +1,236 @@
 <script setup lang="ts">
+import {
+  getDefaultDirectoryBrowser,
+  getParentPath,
+  listDirectoryContents,
+  listDrives,
+  validatePath,
+} from "@/service/modules/environment.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import { useBodyScrollLock } from "@/composables/useBodyScrollLock.ts";
+import type { FileSystemEntryInfo } from "@/types/environment.ts";
 
 const uiStore = useUiStore();
 const { filePicker } = storeToRefs(uiStore);
+useBodyScrollLock(() => filePicker.value.open);
 
-// Mock server directories
-const diskOptions = [
-  { name: "系统盘 (C:)", root: "/c" },
-  { name: "NAS 存储池 (NAS_SHARE)", root: "/media/nas" },
-  { name: "备份存储盘 (USB_BACKUP)", root: "/media/backup" },
-];
+interface Breadcrumb {
+  name: string;
+  path: string;
+}
 
-const mockDirectories: Record<string, string[]> = {
-  "/c": ["Program Files", "Users", "Windows", "System32"],
-  "/c/Users": ["Administrator", "Default", "Public"],
-  "/c/Users/Administrator": ["Downloads", "Documents", "Desktop"],
-  "/c/Windows": ["Fonts", "System32", "Temp"],
-  "/c/Windows/System32": ["drivers", "config", "cmd.exe"],
-  "/media/nas": ["电影", "电视剧", "动漫", "纪录片", "音乐", "未分类"],
-  "/media/nas/电影": ["2026", "2025", "科幻电影", "动作片", "奥斯卡获奖影片"],
-  "/media/nas/电影/2026": ["阿凡达：水之道", "流浪地球3", "奥本海默", "沙丘2"],
-  "/media/nas/电视剧": ["权力的游戏", "狂飙", "风骚律师", "三体"],
-  "/media/nas/动漫": ["名侦探柯南", "航海王", "火影忍者"],
-  "/media/nas/纪录片": ["地球脉动", "舌尖上的中国"],
-  "/media/nas/音乐": ["周杰伦", "Taylor Swift", "陈奕迅"],
-  "/media/backup": ["2025备份", "个人相册", "工作文档"],
-};
+const currentPath = shallowRef("");
+const manualPathInput = shallowRef("");
+const entries = ref<FileSystemEntryInfo[]>([]);
+const drives = ref<FileSystemEntryInfo[]>([]);
+const loading = shallowRef(false);
+const loadingRoots = shallowRef(false);
+const validating = shallowRef(false);
+const errorMessage = shallowRef("");
+const rootsErrorMessage = shallowRef("");
 
-const currentPath = ref("/media/nas");
-const activeDisk = ref("/media/nas");
-const folderList = ref<string[]>([]);
-const loading = ref(false);
-const search = ref("");
-const manualPathInput = ref("");
-const permissionWarning = ref("");
+const directoryEntries = computed(() =>
+  entries.value.filter(
+    (entry) =>
+      entry.Type === "Directory" ||
+      entry.Type === "NetworkComputer" ||
+      entry.Type === "NetworkShare",
+  ),
+);
 
-// Initialize when modal opens
+const canGoUp = computed(() => Boolean(currentPath.value.trim()));
+
+const breadcrumbs = computed<Breadcrumb[]>(() => buildBreadcrumbs(currentPath.value));
+
 watch(
   () => filePicker.value.open,
-  (open) => {
-    if (open) {
-      currentPath.value = filePicker.value.currentPath;
-      manualPathInput.value = currentPath.value;
-      // Sync active disk
-      const matchingDisk = diskOptions.find((d) => currentPath.value.startsWith(d.root));
-      if (matchingDisk) {
-        activeDisk.value = matchingDisk.root;
-      }
-      loadFolder(currentPath.value);
-    }
+  async (open) => {
+    if (!open) return;
+    await initializeBrowser();
   },
 );
 
-async function loadFolder(path: string) {
-  loading.value = true;
-  permissionWarning.value = "";
-
-  // Simulate network latency
-  await new Promise((resolve) => setTimeout(resolve, 300));
-
-  currentPath.value = path;
-  manualPathInput.value = path;
-
-  // Custom permission warnings for mock
-  if (path.includes("System32") || path === "/c/Windows") {
-    permissionWarning.value = "⚠️ 系统敏感文件夹，管理用户缺乏写入 NFO 及海报权限。";
-  } else if (path === "/media/backup") {
-    permissionWarning.value = "💡 只读存储空间，不支持自动下载海报，建议开启直连 TMDB 模式。";
+function buildBreadcrumbs(path: string): Breadcrumb[] {
+  const normalized = path.trim();
+  if (!normalized) {
+    return [{ name: "服务器", path: "" }];
   }
 
-  // Retrieve folders
-  folderList.value = mockDirectories[path] || [];
-  loading.value = false;
-}
+  if (/^[A-Za-z]:[\\/]/.test(normalized)) {
+    const drive = normalized.slice(0, 3);
+    const rest = normalized
+      .slice(3)
+      .split(/[\\/]+/)
+      .filter(Boolean);
+    const crumbs: Breadcrumb[] = [{ name: drive, path: drive }];
+    let nextPath = drive.replace(/[\\/]$/, "");
+    for (const part of rest) {
+      nextPath += `\\${part}`;
+      crumbs.push({ name: part, path: nextPath });
+    }
+    return crumbs;
+  }
 
-const filteredFolders = computed(() => {
-  if (!search.value) return folderList.value;
-  return folderList.value.filter((f) => f.toLowerCase().includes(search.value.toLowerCase()));
-});
-
-// Breadcrumbs computed
-const breadcrumbs = computed(() => {
-  const parts = currentPath.value.split("/").filter(Boolean);
-  const crumbs = [{ name: "根目录", path: "/" }];
-
-  let tempPath = "";
+  const parts = normalized.split("/").filter(Boolean);
+  const crumbs: Breadcrumb[] = [{ name: "/", path: "/" }];
+  let nextPath = "";
   for (const part of parts) {
-    tempPath += "/" + part;
-    // Map custom disk names for better readability in crumbs
-    const matchedDisk = diskOptions.find((d) => d.root === tempPath);
-    crumbs.push({
-      name: matchedDisk ? matchedDisk.name.split(" ")[0] : part,
-      path: tempPath,
-    });
+    nextPath += `/${part}`;
+    crumbs.push({ name: part, path: nextPath });
   }
   return crumbs;
-});
-
-function selectDisk(rootPath: string) {
-  activeDisk.value = rootPath;
-  loadFolder(rootPath);
 }
 
-function handleFolderClick(folderName: string) {
-  const newPath =
-    currentPath.value === "/" ? `/${folderName}` : `${currentPath.value}/${folderName}`;
-  loadFolder(newPath);
+function isActiveRoot(rootPath: string): boolean {
+  const current = currentPath.value.trim().toLowerCase().replaceAll("/", "\\");
+  const root = rootPath.trim().toLowerCase().replaceAll("/", "\\");
+  if (!root) return !current;
+  return current === root || current.startsWith(root.endsWith("\\") ? root : `${root}\\`);
 }
 
-function navigateBack() {
-  if (currentPath.value === "/" || diskOptions.some((d) => d.root === currentPath.value)) {
-    loadFolder("/");
+function setCurrentPath(path: string) {
+  currentPath.value = path;
+  manualPathInput.value = path;
+}
+
+function extractErrorMessage(err: unknown, fallback: string): string {
+  if (typeof err === "object" && err && "response" in err) {
+    const response = (err as { response?: { data?: unknown } }).response;
+    if (typeof response?.data === "string" && response.data.trim()) {
+      return response.data;
+    }
+    if (
+      typeof response?.data === "object" &&
+      response.data &&
+      "message" in response.data &&
+      typeof response.data.message === "string"
+    ) {
+      return response.data.message;
+    }
+    if (
+      typeof response?.data === "object" &&
+      response.data &&
+      "error" in response.data &&
+      typeof response.data.error === "object" &&
+      response.data.error &&
+      "message" in response.data.error &&
+      typeof response.data.error.message === "string"
+    ) {
+      return response.data.error.message;
+    }
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return fallback;
+}
+
+async function initializeBrowser() {
+  errorMessage.value = "";
+  rootsErrorMessage.value = "";
+  entries.value = [];
+  const initialPath = filePicker.value.currentPath.trim();
+
+  await loadRoots();
+
+  try {
+    const defaultInfo = await getDefaultDirectoryBrowser();
+    const path = initialPath || defaultInfo.Path || drives.value[0]?.Path || "";
+    if (path) {
+      await loadFolder(path);
+    } else {
+      setCurrentPath("");
+      errorMessage.value = "后端未返回可浏览的默认目录。请手动输入服务器绝对路径。";
+    }
+  } catch (err) {
+    const fallbackPath = initialPath || drives.value[0]?.Path || "";
+    if (fallbackPath) {
+      await loadFolder(fallbackPath);
+      return;
+    }
+    setCurrentPath(initialPath);
+    errorMessage.value = extractErrorMessage(err, "读取默认目录失败，请手动输入服务器绝对路径。");
+  }
+}
+
+async function loadRoots() {
+  loadingRoots.value = true;
+  rootsErrorMessage.value = "";
+  try {
+    drives.value = await listDrives();
+  } catch (err) {
+    drives.value = [];
+    rootsErrorMessage.value = extractErrorMessage(err, "读取服务器磁盘列表失败。");
+  } finally {
+    loadingRoots.value = false;
+  }
+}
+
+async function loadFolder(path: string) {
+  const nextPath = path.trim();
+  if (!nextPath) return;
+
+  loading.value = true;
+  errorMessage.value = "";
+  try {
+    const nextEntries = await listDirectoryContents({
+      path: nextPath,
+      includeFiles: false,
+      includeDirectories: true,
+    });
+    entries.value = nextEntries;
+    setCurrentPath(nextPath);
+  } catch (err) {
+    entries.value = [];
+    setCurrentPath(nextPath);
+    errorMessage.value = extractErrorMessage(err, "目录不可读取，请确认路径存在且后端有权限访问。");
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function loadParentFolder() {
+  if (!currentPath.value.trim()) return;
+  loading.value = true;
+  errorMessage.value = "";
+  try {
+    const parent = await getParentPath(currentPath.value);
+    if (parent) {
+      await loadFolder(parent);
+    } else {
+      loading.value = false;
+    }
+  } catch (err) {
+    errorMessage.value = extractErrorMessage(err, "读取父目录失败。");
+    loading.value = false;
+  }
+}
+
+async function handleManualSubmit() {
+  const path = manualPathInput.value.trim();
+  if (!path) return;
+  await loadFolder(path);
+}
+
+async function handleConfirm() {
+  const path = currentPath.value.trim();
+  if (!path) {
+    uiStore.showToast("请先选择或输入服务器目录。", "warning");
     return;
   }
-  const parts = currentPath.value.split("/");
-  parts.pop();
-  const parent = parts.join("/") || "/";
-  loadFolder(parent);
-}
 
-function createNewFolder() {
-  const name = prompt("请输入新建文件夹的名称:", "新建文件夹");
-  if (!name) return;
-
-  if (!mockDirectories[currentPath.value]) {
-    mockDirectories[currentPath.value] = [];
+  validating.value = true;
+  errorMessage.value = "";
+  try {
+    await validatePath(path, { isFile: false, validateWriteable: false });
+    uiStore.closeFilePicker(path);
+  } catch (err) {
+    errorMessage.value = extractErrorMessage(err, "路径校验失败，请选择后端可访问的目录。");
+  } finally {
+    validating.value = false;
   }
-  mockDirectories[currentPath.value].push(name);
-  loadFolder(currentPath.value);
-}
-
-function handleManualSubmit() {
-  let path = manualPathInput.value.trim();
-  if (!path) return;
-  if (!path.startsWith("/")) {
-    path = "/" + path;
-  }
-  loadFolder(path);
-}
-
-function handleConfirm() {
-  uiStore.closeFilePicker(currentPath.value);
 }
 
 function handleCancel() {
   uiStore.closeFilePicker();
-}
-
-function handleFolderKeydown(event: KeyboardEvent, folder: string) {
-  if (event.key === "Enter") {
-    handleFolderClick(folder);
-  } else if (event.key === " ") {
-    event.preventDefault();
-    manualPathInput.value =
-      currentPath.value === "/" ? `/${folder}` : `${currentPath.value}/${folder}`;
-  }
 }
 
 useEventListener(window, "keydown", (e: KeyboardEvent) => {
@@ -174,7 +250,6 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
         aria-labelledby="file-picker-title"
         @click.stop
       >
-        <!-- Modal Header -->
         <header class="modal-header">
           <div class="header-title">
             <span class="icon" aria-hidden="true">📁</span>
@@ -190,18 +265,18 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
           </button>
         </header>
 
-        <!-- Manual Path Input -->
         <div class="path-bar">
           <input
             v-model="manualPathInput"
             type="text"
-            placeholder="手动输入服务器绝对路径..."
+            placeholder="输入 Rust 后端可访问的绝对路径..."
             aria-label="服务器绝对路径"
             @keyup.enter="handleManualSubmit"
           />
           <button
             class="action-btn"
             type="button"
+            :disabled="loading"
             aria-label="前往输入的路径"
             @click="handleManualSubmit"
           >
@@ -209,11 +284,10 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
           </button>
         </div>
 
-        <!-- Breadcrumbs -->
         <nav class="breadcrumbs-container" aria-label="路径导航">
           <span class="label">当前路径:</span>
           <div class="crumbs">
-            <template v-for="(crumb, idx) in breadcrumbs" :key="crumb.path">
+            <template v-for="(crumb, idx) in breadcrumbs" :key="`${crumb.path}-${idx}`">
               <span
                 class="crumb-link"
                 :class="{ active: idx === breadcrumbs.length - 1 }"
@@ -230,105 +304,120 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
               >
                 {{ crumb.name }}
               </span>
-              <span v-if="idx < breadcrumbs.length - 1" class="crumb-separator" aria-hidden="true"
-                >/</span
-              >
+              <span v-if="idx < breadcrumbs.length - 1" class="crumb-separator" aria-hidden="true">
+                /
+              </span>
             </template>
           </div>
         </nav>
 
-        <!-- Main Body -->
         <div class="modal-body">
-          <!-- Sidebar: Disks -->
-          <aside class="disk-sidebar" aria-label="存储盘选择">
-            <h3>存储介质</h3>
-            <div class="disk-list" role="radiogroup" aria-label="存储介质列表">
+          <aside class="disk-sidebar" aria-label="服务器磁盘">
+            <div class="sidebar-heading">
+              <h3>服务器根目录</h3>
               <button
-                v-for="disk in diskOptions"
-                :key="disk.root"
-                class="disk-item"
-                :class="{ active: activeDisk === disk.root }"
+                class="refresh-btn"
                 type="button"
-                role="radio"
-                :aria-checked="activeDisk === disk.root"
-                @click="selectDisk(disk.root)"
+                :disabled="loadingRoots"
+                aria-label="刷新服务器磁盘列表"
+                @click="loadRoots"
               >
-                <span class="disk-icon" aria-hidden="true">💽</span>
-                <span class="disk-name">{{ disk.name }}</span>
+                ↻
               </button>
             </div>
+            <div v-if="loadingRoots" class="sidebar-status">读取中...</div>
+            <div v-else-if="rootsErrorMessage" class="sidebar-status warning">
+              {{ rootsErrorMessage }}
+            </div>
+            <div v-else-if="drives.length" class="disk-list">
+              <button
+                v-for="drive in drives"
+                :key="drive.Path"
+                class="disk-item"
+                :class="{ active: isActiveRoot(drive.Path) }"
+                type="button"
+                @click="loadFolder(drive.Path)"
+              >
+                <span aria-hidden="true">▣</span>
+                <span>{{ drive.Name || drive.Path }}</span>
+              </button>
+            </div>
+            <div v-else class="sidebar-status">没有可枚举的根目录。</div>
           </aside>
 
-          <!-- Folder Explorer -->
-          <section class="folder-explorer" aria-label="文件夹浏览器">
+          <section class="folder-explorer" aria-label="目录内容">
             <div class="explorer-toolbar">
-              <div class="search-input">
-                <span class="search-icon" aria-hidden="true">🔍</span>
-                <input
-                  v-model="search"
-                  type="text"
-                  placeholder="过滤当前目录..."
-                  aria-label="过滤当前目录"
-                />
+              <div class="current-path-label" :title="currentPath">
+                {{ currentPath || "未选择路径" }}
               </div>
               <div class="action-buttons">
                 <button
                   class="util-btn"
                   type="button"
-                  @click="navigateBack"
-                  :disabled="currentPath === '/'"
+                  :disabled="!canGoUp || loading"
+                  @click="loadParentFolder"
                 >
-                  <span aria-hidden="true">↩️ </span>返回上级
+                  上一级
                 </button>
-                <button class="util-btn brand-btn" type="button" @click="createNewFolder">
-                  <span aria-hidden="true">➕ </span>新建文件夹
+                <button
+                  class="util-btn brand-btn"
+                  type="button"
+                  :disabled="!currentPath || loading"
+                  @click="loadFolder(currentPath)"
+                >
+                  刷新
                 </button>
               </div>
             </div>
 
-            <!-- Loader / List / Empty State -->
             <div class="explorer-content">
-              <div v-if="loading" class="loader-view">
-                <div class="spinner" />
-                <span>正在加载服务器目录...</span>
+              <div v-if="loading" class="loader-view" role="status" aria-live="polite">
+                <span class="spinner" aria-hidden="true" />
+                <span>正在读取后端目录...</span>
               </div>
-              <div v-else-if="filteredFolders.length === 0" class="empty-view" role="status">
-                <span class="empty-icon" aria-hidden="true">📂</span>
-                <span class="empty-title">当前目录为空</span>
-                <span class="empty-sub">没有在此处找到子文件夹。</span>
+
+              <div v-else-if="errorMessage" class="empty-view error-view">
+                <span class="empty-icon" aria-hidden="true">!</span>
+                <span class="empty-title">目录不可用</span>
+                <span class="empty-sub">{{ errorMessage }}</span>
               </div>
-              <div v-else class="folder-grid" role="list" aria-label="文件夹列表">
-                <div
-                  v-for="folder in filteredFolders"
-                  :key="folder"
+
+              <div v-else-if="directoryEntries.length === 0" class="empty-view">
+                <span class="empty-icon" aria-hidden="true">∅</span>
+                <span class="empty-title">没有可继续进入的子目录</span>
+                <span class="empty-sub">可以直接选择当前目录，或在上方输入其他绝对路径。</span>
+              </div>
+
+              <div v-else class="folder-grid">
+                <button
+                  v-for="entry in directoryEntries"
+                  :key="entry.Path"
                   class="folder-card"
-                  tabindex="0"
-                  role="listitem"
-                  :aria-label="`文件夹: ${folder}`"
-                  @dblclick="handleFolderClick(folder)"
-                  @click="
-                    manualPathInput =
-                      currentPath === '/' ? `/${folder}` : `${currentPath}/${folder}`
-                  "
-                  @keydown="handleFolderKeydown($event, folder)"
+                  type="button"
+                  :title="entry.Path"
+                  @click="loadFolder(entry.Path)"
                 >
                   <span class="folder-icon" aria-hidden="true">📁</span>
-                  <span class="folder-name">{{ folder }}</span>
-                </div>
+                  <span class="folder-name">{{ entry.Name || entry.Path }}</span>
+                </button>
               </div>
             </div>
           </section>
         </div>
 
-        <!-- Footer Warnings & Confirm Buttons -->
         <footer class="modal-footer">
           <div class="warning-text">
-            <span v-if="permissionWarning">{{ permissionWarning }}</span>
+            <span>目录列表来自 Rust 后端，确认时会再次校验路径存在且为目录。</span>
           </div>
           <div class="footer-actions">
             <button class="footer-btn secondary" type="button" @click="handleCancel">取消</button>
-            <button class="footer-btn primary" type="button" @click="handleConfirm">
-              确定选择
+            <button
+              class="footer-btn primary"
+              type="button"
+              :disabled="validating || !currentPath.trim()"
+              @click="handleConfirm"
+            >
+              {{ validating ? "校验中..." : "确定选择" }}
             </button>
           </div>
         </footer>
@@ -349,9 +438,10 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 }
 
 .file-picker-modal {
-  width: 820px;
+  width: 900px;
   max-width: 95vw;
-  height: 580px;
+  height: 620px;
+  max-height: 92vh;
   background: var(--fbz-color-panel);
   border: 1px solid var(--fbz-color-line);
   border-radius: var(--fbz-radius-card);
@@ -410,6 +500,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 
   input {
     flex: 1;
+    min-width: 0;
     height: 36px;
     background: var(--fbz-color-panel);
     border: 1px solid var(--fbz-color-line);
@@ -435,9 +526,14 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
     font-size: var(--fbz-font-size-sm);
     cursor: pointer;
 
-    &:hover {
+    &:hover:not(:disabled) {
       background: var(--fbz-color-panel-elevated);
       color: var(--fbz-color-text);
+    }
+
+    &:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
   }
 }
@@ -454,6 +550,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
   .label {
     color: var(--fbz-color-text-muted);
     font-weight: 700;
+    flex-shrink: 0;
   }
 
   .crumbs {
@@ -490,17 +587,25 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 .modal-body {
   flex: 1;
   display: flex;
+  min-height: 0;
   overflow: hidden;
 }
 
 .disk-sidebar {
-  width: 200px;
+  width: 220px;
   border-right: 1px solid var(--fbz-color-line-soft);
   background: var(--fbz-color-panel-strong);
   padding: var(--fbz-space-4);
   display: flex;
   flex-direction: column;
   gap: var(--fbz-space-3);
+
+  .sidebar-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--fbz-space-2);
+  }
 
   h3 {
     margin: 0;
@@ -511,10 +616,41 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
     font-weight: 700;
   }
 
+  .refresh-btn {
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--fbz-color-line);
+    border-radius: var(--fbz-radius-control);
+    background: var(--fbz-color-panel);
+    color: var(--fbz-color-text-soft);
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      color: var(--fbz-color-text);
+      background: var(--fbz-color-panel-elevated);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+
   .disk-list {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    overflow-y: auto;
+  }
+
+  .sidebar-status {
+    font-size: var(--fbz-font-size-xs);
+    color: var(--fbz-color-text-muted);
+    line-height: 1.5;
+
+    &.warning {
+      color: var(--fbz-color-amber-500);
+    }
   }
 
   .disk-item {
@@ -532,6 +668,12 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
     cursor: pointer;
     text-align: left;
     transition: all var(--fbz-motion-fast);
+
+    span:last-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
     &:hover {
       background: var(--fbz-color-panel-elevated);
@@ -552,6 +694,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 
 .folder-explorer {
   flex: 1;
+  min-width: 0;
   padding: var(--fbz-space-4);
   display: flex;
   flex-direction: column;
@@ -565,35 +708,21 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
   align-items: center;
   gap: var(--fbz-space-4);
 
-  .search-input {
+  .current-path-label {
     flex: 1;
-    max-width: 280px;
-    position: relative;
-
-    .search-icon {
-      position: absolute;
-      left: 10px;
-      top: 50%;
-      transform: translateY(-50%);
-      font-size: 13px;
-      color: var(--fbz-color-text-muted);
-    }
-
-    input {
-      width: 100%;
-      height: 34px;
-      background: var(--fbz-color-panel-strong);
-      border: 1px solid var(--fbz-color-line);
-      border-radius: var(--fbz-radius-control);
-      padding: 0 10px 0 32px;
-      color: var(--fbz-color-text);
-      font-size: var(--fbz-font-size-sm);
-
-      &:focus {
-        outline: none;
-        border-color: var(--fbz-color-brand-500);
-      }
-    }
+    min-width: 0;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    padding: 0 var(--fbz-space-3);
+    border: 1px solid var(--fbz-color-line-soft);
+    border-radius: var(--fbz-radius-control);
+    background: var(--fbz-color-bg-strong);
+    color: var(--fbz-color-text-soft);
+    font-size: var(--fbz-font-size-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .action-buttons {
@@ -626,7 +755,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
       border-color: color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
       color: var(--fbz-color-brand-500);
 
-      &:hover {
+      &:hover:not(:disabled) {
         background: color-mix(in srgb, var(--fbz-color-brand-500) 8%, transparent);
       }
     }
@@ -635,6 +764,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 
 .explorer-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--fbz-color-line-soft);
   border-radius: var(--fbz-radius-control);
@@ -672,17 +802,24 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 }
 
 .empty-view {
-  height: 100%;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
   justify-content: center;
   align-items: center;
   text-align: center;
   color: var(--fbz-color-text-muted);
+  padding: var(--fbz-space-5);
 
   .empty-icon {
-    font-size: 40px;
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-content: center;
+    border-radius: 999px;
+    border: 1px solid var(--fbz-color-line);
     margin-bottom: var(--fbz-space-3);
+    font-weight: 800;
   }
 
   .empty-title {
@@ -694,6 +831,13 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 
   .empty-sub {
     font-size: var(--fbz-font-size-sm);
+    line-height: 1.5;
+    max-width: 420px;
+  }
+
+  &.error-view .empty-icon {
+    border-color: color-mix(in srgb, var(--fbz-color-danger-500) 40%, transparent);
+    color: var(--fbz-color-danger-500);
   }
 }
 
@@ -704,6 +848,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
 }
 
 .folder-card {
+  min-height: 102px;
   border: 1px solid var(--fbz-color-line);
   background: var(--fbz-color-panel);
   border-radius: var(--fbz-radius-card);
@@ -711,9 +856,11 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   cursor: pointer;
   user-select: none;
+  color: var(--fbz-color-text);
   transition: all var(--fbz-motion-fast);
 
   &:hover {
@@ -723,7 +870,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
   }
 
   .folder-icon {
-    font-size: 32px;
+    font-size: 30px;
   }
 
   .folder-name {
@@ -743,12 +890,13 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: var(--fbz-space-4);
 
   .warning-text {
     font-size: var(--fbz-font-size-sm);
     font-weight: 600;
     color: var(--fbz-color-amber-500);
-    max-width: 450px;
+    max-width: 520px;
   }
 
   .footer-actions {
@@ -781,14 +929,55 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
       border: 0;
       color: #07120a;
 
-      &:hover {
+      &:hover:not(:disabled) {
         background: var(--fbz-color-brand-600);
       }
+    }
+
+    &:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
   }
 }
 
-// Fade animations
+@media (max-width: 720px) {
+  .file-picker-modal {
+    width: 96vw;
+    height: 88vh;
+  }
+
+  .modal-body {
+    flex-direction: column;
+  }
+
+  .disk-sidebar {
+    width: auto;
+    max-height: 150px;
+    border-right: 0;
+    border-bottom: 1px solid var(--fbz-color-line-soft);
+  }
+
+  .disk-sidebar .disk-list {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  .disk-sidebar .disk-item {
+    min-width: 112px;
+  }
+
+  .explorer-toolbar,
+  .modal-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .modal-footer .footer-actions {
+    justify-content: flex-end;
+  }
+}
+
 .fade-enter-active,
 .fade-leave-active {
   transition: opacity var(--fbz-motion-base) ease;

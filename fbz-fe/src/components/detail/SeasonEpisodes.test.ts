@@ -4,7 +4,7 @@ import { mount } from "@vue/test-utils";
 import SeasonEpisodes from "./SeasonEpisodes.vue";
 
 // Mock tmdb module
-vi.mock("@/service/modules/tmdb.ts", () => ({
+vi.mock("@/service/mock/tmdb.ts", () => ({
   imageUrl: (path: string) => `mocked-url-${path}`,
 }));
 

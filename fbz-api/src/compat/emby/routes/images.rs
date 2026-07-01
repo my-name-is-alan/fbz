@@ -1,4 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    io::Cursor,
+    path::{Component, Path, PathBuf},
+};
 
 use axum::{
     Json,
@@ -10,6 +13,7 @@ use axum::{
     },
     response::Response,
 };
+use image::{ImageReader, codecs::jpeg::JpegEncoder, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
@@ -34,6 +38,9 @@ const MAX_ENTITY_IMAGE_NAME_LEN: usize = 256;
 const MAX_GLOBAL_IMAGE_TEXT_LEN: usize = 128;
 const MAX_IMAGE_CACHE_TAG_LEN: usize = 128;
 const MAX_IMAGE_DIMENSION: i64 = 8192;
+const DEFAULT_DERIVED_IMAGE_QUALITY: u8 = 82;
+const MIN_DERIVED_IMAGE_QUALITY: u8 = 35;
+const MAX_DERIVED_IMAGE_QUALITY: u8 = 95;
 const MAX_IMAGE_PERCENT_PLAYED: i64 = 100;
 const MAX_IMAGE_UNPLAYED_COUNT: i64 = 100_000;
 const MAX_USER_IMAGE_ID_LEN: usize = 128;
@@ -249,6 +256,23 @@ struct LongFormItemImageInput {
     unplayed_count: i32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ImageTransformRequest {
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    quality: u8,
+}
+
+impl ImageTransformRequest {
+    fn new(max_width: Option<u32>, max_height: Option<u32>, quality: Option<u8>) -> Self {
+        Self {
+            max_width,
+            max_height,
+            quality: quality.unwrap_or(DEFAULT_DERIVED_IMAGE_QUALITY),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 enum GlobalImageKind {
     General,
@@ -283,7 +307,8 @@ pub async fn item_image(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, AppError> {
-    item_image_by_index(state, item_id, image_type, 0, headers, uri).await
+    let transform = image_transform_from_uri(&uri)?;
+    item_image_by_index(state, item_id, image_type, 0, headers, uri, transform).await
 }
 
 pub async fn item_image_index(
@@ -292,7 +317,8 @@ pub async fn item_image_index(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, AppError> {
-    item_image_by_index(state, item_id, image_type, index, headers, uri).await
+    let transform = image_transform_from_uri(&uri)?;
+    item_image_by_index(state, item_id, image_type, index, headers, uri, transform).await
 }
 
 pub async fn item_image_long_form(
@@ -325,11 +351,14 @@ pub async fn item_image_long_form(
     let _ = (
         &input.tag,
         &input.format,
-        input.max_width,
-        input.max_height,
         input.percent_played,
         input.unplayed_count,
     );
+    let transform = Some(ImageTransformRequest::new(
+        Some(input.max_width as u32),
+        Some(input.max_height as u32),
+        None,
+    ));
 
     item_image_by_index(
         state,
@@ -338,6 +367,7 @@ pub async fn item_image_long_form(
         i64::from(input.image_index),
         headers,
         uri,
+        transform,
     )
     .await
 }
@@ -674,6 +704,7 @@ async fn item_image_by_index(
     index: i64,
     headers: HeaderMap,
     uri: Uri,
+    transform: Option<ImageTransformRequest>,
 ) -> Result<Response, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     let artwork_types = artwork_types_for_emby(&image_type)
@@ -682,21 +713,51 @@ async fn item_image_by_index(
         return Err(AppError::internal("database is not configured"));
     };
 
-    let artwork = MediaRepository::new(database.clone())
+    let repository = MediaRepository::new(database.clone());
+    let artwork = repository
         .find_item_artwork(user.id, &item_id, &artwork_types, index)
         .await
-        .map_err(|err| AppError::internal(format!("failed to get item image: {err}")))?
-        .ok_or_else(|| AppError::not_found("item image not found"))?;
+        .map_err(|err| AppError::internal(format!("failed to get item image: {err}")))?;
 
-    artwork_response(&state.config().storage, artwork).await
+    if let Some(artwork) = artwork {
+        return artwork_response(&state.config().storage, artwork, transform).await;
+    }
+
+    // 回退：照片条目的缩略图不在 artwork 表，而在 photo-thumbnails/{internal_id}.jpg
+    // （photo worker 生成）。对 Primary/Thumb 的首图请求回退到它，让 Emby 客户端能渲染照片。
+    let normalized = image_type.trim().to_ascii_lowercase();
+    let thumbnail_eligible = index == 0
+        && matches!(
+            normalized.as_str(),
+            "primary" | "poster" | "thumb" | "thumbnail"
+        );
+    if thumbnail_eligible
+        && let Some(internal_id) = repository
+            .find_photo_thumbnail_item_id(user.id, &item_id)
+            .await
+            .map_err(|err| {
+                AppError::internal(format!("failed to resolve photo thumbnail: {err}"))
+            })?
+    {
+        let storage_key = format!("photo-thumbnails/{internal_id}.jpg");
+        return local_artwork_response(
+            &state.config().storage.artwork_cache_dir,
+            &storage_key,
+            transform,
+        )
+        .await;
+    }
+
+    Err(AppError::not_found("item image not found"))
 }
 
 async fn artwork_response(
     storage: &StorageConfig,
     artwork: ArtworkRecord,
+    transform: Option<ImageTransformRequest>,
 ) -> Result<Response, AppError> {
     if let Some(storage_key) = artwork.storage_key.as_deref() {
-        match local_artwork_response(&storage.artwork_cache_dir, storage_key).await {
+        match local_artwork_response(&storage.artwork_cache_dir, storage_key, transform).await {
             Ok(response) => return Ok(response),
             Err(err)
                 if artwork.remote_url.is_some() && err.status_code() == StatusCode::NOT_FOUND => {}
@@ -806,6 +867,7 @@ async fn ensure_user_image_target_visible(
 async fn local_artwork_response(
     artwork_cache_dir: &Path,
     storage_key: &str,
+    transform: Option<ImageTransformRequest>,
 ) -> Result<Response, AppError> {
     let relative_path = safe_storage_key_path(storage_key)?;
     let base = tokio::fs::canonicalize(artwork_cache_dir)
@@ -827,6 +889,30 @@ async fn local_artwork_response(
         return Err(AppError::not_found("item image file not found"));
     }
 
+    if let Some(transform) = transform {
+        let derived_path = derived_artwork_path(&base, &relative_path, transform)?;
+        ensure_derived_artwork(&path, &derived_path, transform).await?;
+        let derived_path = tokio::fs::canonicalize(&derived_path)
+            .await
+            .map_err(|err| artwork_io_error(err, "item image file not found"))?;
+        if !derived_path.starts_with(&base) {
+            return Err(AppError::forbidden(
+                "derived artwork path is outside cache directory",
+            ));
+        }
+        return local_file_response(&derived_path).await;
+    }
+
+    local_file_response(&path).await
+}
+
+async fn local_file_response(path: &Path) -> Result<Response, AppError> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|err| artwork_io_error(err, "item image file not found"))?;
+    if !metadata.is_file() {
+        return Err(AppError::not_found("item image file not found"));
+    }
     let file = File::open(&path)
         .await
         .map_err(|err| artwork_io_error(err, "item image file not found"))?;
@@ -845,6 +931,171 @@ async fn local_artwork_response(
     }
 
     Ok(response)
+}
+
+async fn ensure_derived_artwork(
+    source_path: &Path,
+    derived_path: &Path,
+    transform: ImageTransformRequest,
+) -> Result<(), AppError> {
+    if tokio::fs::metadata(derived_path)
+        .await
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let source_path = source_path.to_owned();
+    let derived_path = derived_path.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let bytes =
+            std::fs::read(&source_path).map_err(|err| format!("failed to read source: {err}"))?;
+        let output = encode_transformed_artwork(&bytes, transform)?;
+        if let Some(parent) = derived_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create derived artwork directory: {err}"))?;
+        }
+        std::fs::write(&derived_path, output)
+            .map_err(|err| format!("failed to write derived artwork: {err}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| AppError::internal(format!("failed to render derived artwork: {err}")))?
+    .map_err(|err| AppError::internal(format!("failed to render derived artwork: {err}")))
+}
+
+fn encode_transformed_artwork(
+    bytes: &[u8],
+    transform: ImageTransformRequest,
+) -> Result<Vec<u8>, String> {
+    let image = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|err| format!("image format detection failed: {err}"))?
+        .decode()
+        .map_err(|err| format!("image decode failed: {err}"))?;
+    let (target_width, target_height) = transformed_dimensions(
+        image.width(),
+        image.height(),
+        transform.max_width,
+        transform.max_height,
+    );
+    let transformed = if target_width == image.width() && target_height == image.height() {
+        image
+    } else {
+        image.resize(target_width, target_height, FilterType::Lanczos3)
+    };
+
+    let mut output = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut output, transform.quality);
+    encoder
+        .encode_image(&transformed.to_rgb8())
+        .map_err(|err| format!("image encode failed: {err}"))?;
+    Ok(output)
+}
+
+fn image_transform_from_uri(uri: &Uri) -> Result<Option<ImageTransformRequest>, AppError> {
+    let Some(query) = uri.query() else {
+        return Ok(None);
+    };
+
+    let mut max_width = None;
+    let mut max_height = None;
+    let mut quality = None;
+    for pair in query.split('&') {
+        let Some((raw_key, raw_value)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = raw_value.trim();
+        if key.eq_ignore_ascii_case("maxWidth") || key.eq_ignore_ascii_case("max_width") {
+            max_width = Some(normalize_query_dimension(value, "MaxWidth")?);
+        } else if key.eq_ignore_ascii_case("maxHeight") || key.eq_ignore_ascii_case("max_height") {
+            max_height = Some(normalize_query_dimension(value, "MaxHeight")?);
+        } else if key.eq_ignore_ascii_case("width") {
+            max_width = Some(normalize_query_dimension(value, "Width")?);
+        } else if key.eq_ignore_ascii_case("height") {
+            max_height = Some(normalize_query_dimension(value, "Height")?);
+        } else if key.eq_ignore_ascii_case("quality") {
+            quality = Some(normalize_query_quality(value)?);
+        }
+    }
+
+    if max_width.is_none() && max_height.is_none() && quality.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(ImageTransformRequest::new(
+        max_width, max_height, quality,
+    )))
+}
+
+fn normalize_query_dimension(value: &str, field: &'static str) -> Result<u32, AppError> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| AppError::unprocessable(format!("{field} is invalid")))?;
+    normalize_bounded_positive_i32(parsed, field, MAX_IMAGE_DIMENSION).map(|value| value as u32)
+}
+
+fn normalize_query_quality(value: &str) -> Result<u8, AppError> {
+    let parsed = value
+        .parse::<u8>()
+        .map_err(|_| AppError::unprocessable("Quality is invalid"))?;
+    Ok(parsed.clamp(MIN_DERIVED_IMAGE_QUALITY, MAX_DERIVED_IMAGE_QUALITY))
+}
+
+fn derived_artwork_path(
+    base: &Path,
+    relative_path: &Path,
+    transform: ImageTransformRequest,
+) -> Result<PathBuf, AppError> {
+    let source_file = relative_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::unprocessable("artwork storage key is invalid"))?;
+    let source_stem = relative_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(source_file);
+    let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+    let width = transform
+        .max_width
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "auto".to_owned());
+    let height = transform
+        .max_height
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "auto".to_owned());
+    let derived_file = format!(
+        "{source_stem}-mw{width}-mh{height}-q{}.jpg",
+        transform.quality
+    );
+    Ok(base.join("_derived").join(parent).join(derived_file))
+}
+
+fn transformed_dimensions(
+    original_width: u32,
+    original_height: u32,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+) -> (u32, u32) {
+    if original_width == 0 || original_height == 0 {
+        return (1, 1);
+    }
+    let width_ratio = max_width
+        .filter(|value| *value > 0)
+        .map(|value| value as f64 / original_width as f64)
+        .unwrap_or(1.0);
+    let height_ratio = max_height
+        .filter(|value| *value > 0)
+        .map(|value| value as f64 / original_height as f64)
+        .unwrap_or(1.0);
+    let scale = width_ratio.min(height_ratio).min(1.0);
+    let width = ((original_width as f64 * scale).round() as u32).max(1);
+    let height = ((original_height as f64 * scale).round() as u32).max(1);
+    (width, height)
 }
 
 fn parse_optional_remote_image_download_body(
@@ -1489,6 +1740,75 @@ mod tests {
     fn remote_artwork_redirect_rejects_non_http_urls() {
         assert!(remote_artwork_response("file:///tmp/poster.jpg").is_err());
         assert!(remote_artwork_response("https://image.example.test/poster.jpg").is_ok());
+    }
+
+    #[test]
+    fn image_transform_query_accepts_responsive_params_and_clamps_quality() {
+        let uri = "/Items/item-1/Images/Primary?api_key=token&maxWidth=500&quality=100"
+            .parse::<Uri>()
+            .unwrap();
+        let transform = image_transform_from_uri(&uri)
+            .expect("query should parse")
+            .expect("transform should exist");
+
+        assert_eq!(transform.max_width, Some(500));
+        assert_eq!(transform.max_height, None);
+        assert_eq!(transform.quality, MAX_DERIVED_IMAGE_QUALITY);
+
+        let uri = "/Items/item-1/Images/Primary?width=780&height=1170&quality=20"
+            .parse::<Uri>()
+            .unwrap();
+        let transform = image_transform_from_uri(&uri)
+            .expect("query should parse")
+            .expect("transform should exist");
+        assert_eq!(transform.max_width, Some(780));
+        assert_eq!(transform.max_height, Some(1170));
+        assert_eq!(transform.quality, MIN_DERIVED_IMAGE_QUALITY);
+    }
+
+    #[test]
+    fn image_transform_query_ignores_auth_only_query() {
+        let uri = "/Items/item-1/Images/Primary?api_key=token"
+            .parse::<Uri>()
+            .unwrap();
+
+        assert_eq!(image_transform_from_uri(&uri).unwrap(), None);
+    }
+
+    #[test]
+    fn derived_artwork_path_stays_under_cache_and_uses_jpeg_variant() {
+        let path = derived_artwork_path(
+            Path::new("var/artwork"),
+            Path::new("metadata/42/tmdb/poster.jpg"),
+            ImageTransformRequest::new(Some(500), None, Some(78)),
+        )
+        .expect("derived path should build");
+
+        assert_eq!(
+            path,
+            PathBuf::from("var/artwork")
+                .join("_derived")
+                .join("metadata")
+                .join("42")
+                .join("tmdb")
+                .join("poster-mw500-mhauto-q78.jpg")
+        );
+    }
+
+    #[test]
+    fn transformed_dimensions_downscale_without_upscale() {
+        assert_eq!(
+            transformed_dimensions(1000, 1500, Some(500), None),
+            (500, 750)
+        );
+        assert_eq!(
+            transformed_dimensions(1000, 1500, None, Some(300)),
+            (200, 300)
+        );
+        assert_eq!(
+            transformed_dimensions(1000, 1500, Some(2000), Some(3000)),
+            (1000, 1500)
+        );
     }
 
     #[test]

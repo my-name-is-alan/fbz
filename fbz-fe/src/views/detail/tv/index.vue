@@ -1,14 +1,9 @@
 <script setup lang="ts">
-import type { TvDetail } from "@/types/media.ts";
-import {
-  findCatalogItem,
-  getTvDetail,
-  imageUrl,
-  refToItem,
-  versionsFor,
-} from "@/service/modules/tmdb.ts";
+import type { DetailViewModel } from "@/service/modules/detail.ts";
+import { loadTvDetail } from "@/service/modules/detail.ts";
 import type { PlaybackEpisode } from "@/stores/playback.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
+import { useUiStore } from "@/stores/ui.ts";
 
 interface EpisodePlayEvent {
   seasonNumber: number;
@@ -30,63 +25,66 @@ interface EpisodePlayEvent {
 
 const route = useRoute();
 const playback = usePlaybackStore();
-const id = computed(() => Number(route.params.id));
+const uiStore = useUiStore();
+const routeId = computed(() => String(route.params.id));
 
-const item = computed(() => findCatalogItem("tv", id.value));
-const detail = ref<TvDetail>();
+const detail = ref<DetailViewModel>();
 
 watch(
-  id,
+  routeId,
   async (v) => {
-    detail.value = await getTvDetail(v);
+    detail.value = await loadTvDetail(v);
   },
   { immediate: true },
 );
 
-const versions = computed(() => versionsFor(id.value));
-
-const meta = computed(() => {
-  const it = item.value;
-  if (!it) return [];
-  const d = detail.value;
-  return [
-    String(it.year ?? "—"),
-    d ? `${d.seasons_count} 季` : "",
-    d ? `${d.episodes_count} 集` : "",
-    ...it.genres,
-  ].filter(Boolean);
-});
-
-const creators = computed(() => detail.value?.creators.map((c) => c.name).join("、") ?? "");
-const similar = computed(() => detail.value?.similar.map(refToItem) ?? []);
-
-// 演示「继续观看」定位：偶数 ID 模拟有历史，奇数 ID 模拟无历史，以便能展示/测试季列表和直达集列表两种状态
+// 演示「继续观看」定位：仅 TMDB 占位态（有季列表）下生效，后端态季集为空时不展示。
+// 偶数数字 id 模拟有历史、奇数模拟无历史，以便能展示/测试季列表和直达集列表两种状态。
+const numericId = computed(() => Number(detail.value?.id));
 const defaultSeason = computed(() => {
-  if (id.value % 2 !== 0) return undefined;
   const seasons = detail.value?.seasons ?? [];
-  if (!seasons.length) return undefined;
-  return seasons[id.value % seasons.length]?.season_number;
+  if (!seasons.length || Number.isNaN(numericId.value) || numericId.value % 2 !== 0)
+    return undefined;
+  return seasons[numericId.value % seasons.length]?.season_number;
 });
 const watchedEpisode = computed(() => {
   if (defaultSeason.value == null) return undefined;
   const s = detail.value?.seasons.find((x) => x.season_number === defaultSeason.value);
   if (!s) return undefined;
-  return (id.value % s.episode_count) + 1;
+  return (numericId.value % s.episode_count) + 1;
 });
 
 function playTv() {
-  const tv = item.value;
+  const tv = detail.value;
   if (!tv) return;
 
   playback.open({
     type: "tv",
-    id: String(tv.id),
+    id: tv.id,
     title: tv.title,
-    subtitle: meta.value.join(" · "),
-    poster: imageUrl(tv.poster_path, "w500"),
-    backdrop: imageUrl(tv.backdrop_path, "w1280"),
-    tags: versions.value[0]?.tags,
+    subtitle: tv.meta.join(" · "),
+    poster: tv.poster,
+    backdrop: tv.backdrop,
+    tags: tv.versions[0]?.tags,
     duration: 45 * 60,
+  });
+}
+
+/** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
+function editMetadata() {
+  const tv = detail.value;
+  if (!tv) return;
+  const yearSeg = tv.meta.find((m) => /^\d{4}$/.test(m));
+  uiStore.openMetadataManager({
+    id: tv.id,
+    libraryId: "series",
+    detailType: "tv",
+    title: tv.title,
+    meta: tv.meta.join(" · "),
+    poster: tv.poster,
+    year: yearSeg ? Number(yearSeg) : undefined,
+    rating: tv.rating ?? undefined,
+    isFavorite: false,
   });
 }
 
@@ -107,7 +105,7 @@ function toPlaybackPlaylist(
 }
 
 function playEpisode(episode: EpisodePlayEvent) {
-  const tv = item.value;
+  const tv = detail.value;
   if (!tv) return;
 
   const playlist = toPlaybackPlaylist(tv.title, episode.episodes);
@@ -124,9 +122,9 @@ function playEpisode(episode: EpisodePlayEvent) {
     id: episodeId,
     title: `${tv.title} S${episode.seasonNumber} E${episode.episodeNumber}`,
     subtitle: `${episode.title} · ${episode.runtime}min`,
-    poster: episode.poster ?? imageUrl(tv.poster_path, "w500"),
-    backdrop: episode.backdrop ?? imageUrl(tv.backdrop_path, "w1280"),
-    tags: versions.value[0]?.tags,
+    poster: episode.poster ?? tv.poster,
+    backdrop: episode.backdrop ?? tv.backdrop,
+    tags: tv.versions[0]?.tags,
     duration: episode.runtime * 60,
     playlist,
   });
@@ -134,48 +132,49 @@ function playEpisode(episode: EpisodePlayEvent) {
 </script>
 
 <template>
-  <main v-if="item" class="detail-view">
-    <PageHeader :title="item.title" fallback="/library/series" />
+  <main v-if="detail" class="detail-view">
+    <PageHeader :title="detail.title" fallback="/library/series" />
 
     <DetailHero
-      :title="item.title"
-      :poster="imageUrl(item.poster_path, 'w500')"
-      :backdrop="imageUrl(item.backdrop_path, 'w1280')"
-      :meta="meta"
-      :tagline="detail?.tagline"
-      :overview="item.overview"
-      :rating="item.rating"
-      :versions="versions"
+      :title="detail.title"
+      :poster="detail.poster"
+      :backdrop="detail.backdrop"
+      :meta="detail.meta"
+      :tagline="detail.tagline"
+      :overview="detail.overview"
+      :rating="detail.rating"
+      :versions="detail.versions"
       @play="playTv"
     >
       <template #extra>
         <dl class="facts">
-          <div v-if="creators" class="fact">
+          <div v-if="detail.creators" class="fact">
             <dt>主创</dt>
-            <dd>{{ creators }}</dd>
+            <dd>{{ detail.creators }}</dd>
           </div>
-          <div v-if="detail && detail.original_title !== item.title" class="fact">
+          <div v-if="detail.originalTitle" class="fact">
             <dt>原名</dt>
-            <dd>{{ detail.original_title }}</dd>
+            <dd>{{ detail.originalTitle }}</dd>
           </div>
         </dl>
+        <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
       </template>
     </DetailHero>
 
     <SeasonEpisodes
-      v-if="detail?.seasons.length"
+      v-if="detail.seasons.length"
       :seasons="detail.seasons"
-      :series-id="id"
+      :series-id="detail.id"
       :default-season="defaultSeason"
       :watched-episode="watchedEpisode"
-      :show-title="item.title"
-      :backdrop="imageUrl(item.backdrop_path, 'w1280')"
-      :rating="item.rating"
+      :show-title="detail.title"
+      :backdrop="detail.backdrop"
+      :rating="detail.rating"
       @play-episode="playEpisode"
     />
 
-    <CastRow v-if="detail" :cast="detail.cast" />
-    <SimilarRow :items="similar" />
+    <CastRow :cast="detail.cast" />
+    <SimilarRow :items="detail.similar" />
   </main>
 
   <main v-else class="detail-missing">
@@ -214,6 +213,26 @@ function playEpisode(episode: EpisodePlayEvent) {
 
   &:hover {
     text-decoration: underline;
+  }
+}
+
+.edit-meta-btn {
+  margin-top: var(--fbz-space-3);
+  height: 34px;
+  padding: 0 16px;
+  border-radius: var(--fbz-radius-control);
+  border: 1px solid var(--fbz-color-line);
+  background: var(--fbz-color-panel-strong);
+  color: var(--fbz-color-text-soft);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--fbz-motion-fast);
+
+  &:hover {
+    border-color: var(--fbz-color-brand-500);
+    color: var(--fbz-color-brand-500);
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 6%, transparent);
   }
 }
 

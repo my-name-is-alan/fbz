@@ -46,7 +46,6 @@ const loadError = shallowRef("");
 const selectedInfoTab = shallowRef<"episodes" | "chapters" | "info">("episodes");
 
 let hideTimer: number | undefined;
-let demoTimer: number | undefined;
 let shakaApiPromise: Promise<ShakaApi> | undefined;
 
 const hasSource = computed(() => Boolean(props.item.source?.uri));
@@ -78,20 +77,7 @@ const subtitleTracks = computed<PlaybackTrack[]>(() =>
 
 const chapters = computed<PlaybackChapter[]>(() => {
   if (props.item.chapters?.length) return props.item.chapters;
-  const total = duration.value;
-  const chapterCount = Math.max(4, Math.min(8, Math.round(total / 600)));
-  return Array.from({ length: chapterCount }, (_, index) => {
-    const startTime = Math.floor((total / chapterCount) * index);
-    const nextStart = Math.floor((total / chapterCount) * (index + 1));
-    return {
-      id: `chapter-${index + 1}`,
-      title:
-        ["片头", "铺垫", "冲突", "转折", "高潮", "尾声", "彩蛋", "下一集预告"][index] ??
-        `章节 ${index + 1}`,
-      startTime,
-      duration: Math.max(30, nextStart - startTime),
-    };
-  });
+  return [];
 });
 
 const mediaStats = computed<MediaStat[]>(() => {
@@ -103,21 +89,21 @@ const mediaStats = computed<MediaStat[]>(() => {
     { label: "播放器核心", value: "Shaka Player 5.1" },
     {
       label: "协议",
-      value: props.item.source?.mimeType ?? (hasSource.value ? "自适应流" : "演示模式"),
+      value: props.item.source?.mimeType ?? (hasSource.value ? "自适应流" : "无媒体源"),
     },
     {
       label: "分辨率",
-      value: activeTrack?.height ? `${activeTrack.width}x${activeTrack.height}` : "3840x2160",
+      value: activeTrack?.height ? `${activeTrack.width}x${activeTrack.height}` : "待播放器上报",
     },
     {
       label: "带宽估算",
       value: stats?.estimatedBandwidth
         ? `${Math.round(stats.estimatedBandwidth / 1000)} Kbps`
-        : "18200 Kbps",
+        : "待播放器上报",
     },
     {
       label: "缓冲",
-      value: `${Math.round(stats?.bufferingTime ?? (isBuffering.value ? 1.2 : 0.2))}s`,
+      value: stats?.bufferingTime != null ? `${Math.round(stats.bufferingTime)}s` : "待播放器上报",
     },
     {
       label: "音轨",
@@ -176,7 +162,7 @@ async function resetPlayer() {
   }
 
   if (!hasSource.value) {
-    loadState.value = "当前资源未提供流地址，使用播放器演示模式";
+    loadState.value = "当前资源未提供可播放流地址";
     return;
   }
 
@@ -199,7 +185,7 @@ async function resetPlayer() {
     loadState.value = "媒体已就绪";
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : "媒体加载失败";
-    loadState.value = "加载失败，已切换到演示模式";
+    loadState.value = "媒体加载失败";
   }
 }
 
@@ -210,9 +196,7 @@ async function loadShaka() {
 
 function clearTimers() {
   if (hideTimer) window.clearTimeout(hideTimer);
-  if (demoTimer) window.clearInterval(demoTimer);
   hideTimer = undefined;
-  demoTimer = undefined;
 }
 
 function handlePointerMove() {
@@ -234,17 +218,7 @@ async function togglePlay() {
     return;
   }
 
-  isPlaying.value = !isPlaying.value;
-  if (isPlaying.value) {
-    loadState.value = "模拟播放中";
-    demoTimer = window.setInterval(() => {
-      currentTime.value = Math.min(duration.value, currentTime.value + 1);
-      if (currentTime.value >= duration.value) isPlaying.value = false;
-    }, 1000);
-  } else if (demoTimer) {
-    window.clearInterval(demoTimer);
-    demoTimer = undefined;
-  }
+  loadError.value = "当前资源没有来自后端的播放地址。";
 }
 
 function onVideoPlay() {
@@ -341,6 +315,7 @@ function handleKeydown(event: KeyboardEvent) {
       class="center-play"
       type="button"
       :aria-label="isPlaying ? '暂停' : '播放'"
+      :disabled="!hasSource || Boolean(loadError)"
       @click="togglePlay"
     >
       {{ isPlaying ? "Ⅱ" : "▶" }}
@@ -383,7 +358,12 @@ function handleKeydown(event: KeyboardEvent) {
           >
             上一集
           </button>
-          <button class="primary-control" type="button" @click="togglePlay">
+          <button
+            class="primary-control"
+            type="button"
+            :disabled="!hasSource || Boolean(loadError)"
+            @click="togglePlay"
+          >
             {{ isPlaying ? "暂停" : "播放" }}
           </button>
           <button type="button" @click="emit('nextEpisode')" :disabled="!props.hasNextEpisode">
@@ -499,6 +479,7 @@ function handleKeydown(event: KeyboardEvent) {
             {{ formatTime(chapter.startTime + chapter.duration) }}</span
           >
         </button>
+        <p v-if="!chapters.length" class="empty-note">当前媒体没有后端章节数据。</p>
       </div>
 
       <dl v-else class="media-stats">

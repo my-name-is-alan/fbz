@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, Uri},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,22 +14,33 @@ use crate::{
             AddLibraryPathInput, AdminJobDetailRecord, AdminJobEventFilter, AdminJobEventRecord,
             AdminJobFilter, AdminJobRecord, AdminJobRunFilter, AdminJobRunRecord, AdminRepository,
             AdminUserFilter, AdminUserLibraryPermissionFilter, AdminUserLibraryPermissionRecord,
-            AdminUserRecord, CreateLibraryInput, EventStreamMirrorStatusRecord,
-            LibraryMetadataRefreshQueueRecord, LibraryPathRecord, ManagedLibraryRecord,
-            MetadataRefreshJobRecord, NotificationDeliveryAttemptFilter,
-            NotificationDeliveryAttemptRecord, NotificationRequestFilter,
-            NotificationRequestRecord, NotificationRetryError, NotificationTargetFilter,
-            NotificationTargetRecord, PluginDispatchFilter, PluginDispatchRecord,
-            PluginDispatchReplayError, PluginExecutionRunFilter, PluginExecutionRunRecord,
-            PluginHostApiCallFilter, PluginHostApiCallRecord, QueueLibraryMetadataRefreshInput,
-            QueueLibraryScanInput, QueueMetadataRefreshInput, ScanJobRecord,
-            ScheduledTaskAdminRecord, ScheduledTaskFilter, ScheduledTaskRunFilter,
-            ScheduledTaskRunRecord, UpdateUserLibraryPermissionInput, UpdateUserPolicyInput,
-            UpsertNotificationTargetInput,
+            AdminUserRecord, CreateAdminUserInput, CreateLibraryInput, DeleteAdminUserOutcome,
+            EventStreamMirrorStatusRecord, LibraryListFilter, LibraryMetadataRefreshQueueRecord,
+            LibraryPathRecord, LibraryPathSelector, LibraryPhotoListFilter, LibraryPhotoRecord,
+            LibrarySettingsRecord, ManagedLibraryRecord, MetadataRefreshJobRecord,
+            NotificationDeliveryAttemptFilter, NotificationDeliveryAttemptRecord,
+            NotificationRequestFilter, NotificationRequestRecord, NotificationRetryError,
+            NotificationTargetFilter, NotificationTargetRecord, PluginDispatchFilter,
+            PluginDispatchRecord, PluginDispatchReplayError, PluginExecutionRunFilter,
+            PluginExecutionRunRecord, PluginHostApiCallFilter, PluginHostApiCallRecord,
+            QueueLibraryMetadataRefreshInput, QueueLibraryScanInput, QueueMetadataRefreshInput,
+            ScanJobRecord, ScheduledTaskAdminRecord, ScheduledTaskFilter, ScheduledTaskRunFilter,
+            ScheduledTaskRunRecord, SetLibraryPathEnabledInput, UpdateLibrarySettingsInput,
+            UpdateUserLibraryPermissionInput, UpdateUserPolicyInput, UpsertNotificationTargetInput,
         },
     },
-    config::{Config, MetadataConfig},
+    auth::password::PasswordService,
+    config::{Config, MetadataConfig, admin_password_meets_policy},
+    db::DbPool,
     error::AppError,
+    metadata::{
+        provider::{ProviderProbeResult, ProviderProxyOverride, probe_provider},
+        settings::{
+            MetadataGlobalSettings, MetadataProviderSettings, MetadataSettingsError,
+            MetadataSettingsRepository, SUPPORTED_PROVIDER_IDS, mask_secret,
+            resolve_metadata_config, validate_provider_id, validate_provider_settings,
+        },
+    },
     notifications::{
         secrets::{SecretCipher, TargetSecretInput},
         target_config::{redacted_target_config, secretize_target_config},
@@ -59,6 +70,7 @@ const MAX_PLUGIN_EXECUTION_RUNS_LIST_LIMIT: i64 = 500;
 const MAX_PLUGIN_HOST_API_CALLS_LIST_LIMIT: i64 = 1_000;
 const MAX_SCHEDULED_TASKS_LIST_LIMIT: i64 = 200;
 const MAX_SCHEDULED_TASK_RUNS_LIST_LIMIT: i64 = 500;
+const MAX_LIBRARIES_LIST_LIMIT: i64 = 500;
 const MAX_TRANSCODE_SESSIONS_LIST_LIMIT: i64 = 200;
 const MAX_PARTITION_ROLLUPS_LIST_LIMIT: i64 = 1_000;
 const MAX_PARTITION_ARCHIVE_CANDIDATES_LIST_LIMIT: i64 = 500;
@@ -75,9 +87,36 @@ const MAX_TRANSCODE_HARDWARE_ACCELERATION_LEN: usize = 64;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/admin/libraries", post(create_library))
-        .route("/api/admin/libraries/{library_id}/paths", post(add_path))
+        .route(
+            "/api/admin/libraries",
+            post(create_library).get(list_libraries),
+        )
+        .route(
+            "/api/admin/libraries/{library_id}/settings",
+            post(update_library_settings),
+        )
+        .route("/api/admin/libraries/{library_id}", delete(delete_library))
+        .route(
+            "/api/admin/libraries/{library_id}/paths",
+            post(add_path).get(list_paths),
+        )
+        .route(
+            "/api/admin/libraries/{library_id}/paths/{path_id}",
+            delete(remove_path),
+        )
+        .route(
+            "/api/admin/libraries/{library_id}/paths/{path_id}/settings",
+            post(set_path_enabled),
+        )
         .route("/api/admin/libraries/{library_id}/scan", post(queue_scan))
+        .route(
+            "/api/admin/libraries/{library_id}/photos",
+            get(list_library_photos),
+        )
+        .route(
+            "/api/admin/media-items/{item_id}/thumbnail",
+            get(get_photo_thumbnail),
+        )
         .route(
             "/api/admin/libraries/{library_id}/metadata/refresh",
             post(queue_library_metadata_refresh),
@@ -90,7 +129,24 @@ pub fn router() -> Router<AppState> {
             "/api/admin/metadata/providers",
             get(list_metadata_providers),
         )
-        .route("/api/admin/users", get(list_users))
+        .route(
+            "/api/admin/metadata/settings",
+            get(get_metadata_settings).post(update_metadata_global_settings),
+        )
+        .route(
+            "/api/admin/metadata/providers/{provider_id}",
+            post(update_metadata_provider_settings),
+        )
+        .route(
+            "/api/admin/metadata/providers/{provider_id}/key",
+            post(set_metadata_provider_key).delete(delete_metadata_provider_key),
+        )
+        .route(
+            "/api/admin/metadata/providers/{provider_id}/test",
+            post(test_metadata_provider),
+        )
+        .route("/api/admin/users", get(list_users).post(create_user))
+        .route("/api/admin/users/{user_id}", delete(delete_user))
         .route("/api/admin/users/{user_id}/policy", put(update_user_policy))
         .route(
             "/api/admin/users/{user_id}/libraries",
@@ -179,6 +235,19 @@ pub fn router() -> Router<AppState> {
             "/api/admin/plugin-dispatches/{dispatch_id}/replay",
             post(replay_plugin_dispatch),
         )
+        .route(
+            "/api/admin/recognition/words",
+            get(crate::recognition::routes::list_recognition_words)
+                .post(crate::recognition::routes::create_recognition_word),
+        )
+        .route(
+            "/api/admin/recognition/words/{word_id}",
+            delete(crate::recognition::routes::delete_recognition_word),
+        )
+        .route(
+            "/api/admin/recognition/test",
+            post(crate::recognition::routes::test_recognition),
+        )
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -190,12 +259,22 @@ pub struct CreateLibraryRequestDto {
     pub paths: Vec<String>,
     pub preferred_metadata_language: Option<String>,
     pub preferred_metadata_country: Option<String>,
+    pub preferred_image_language: Option<String>,
+    pub preferred_image_prefer_original: Option<bool>,
+    #[serde(default)]
+    pub preferred_image_fallback_languages: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AddLibraryPathRequestDto {
     pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLibraryPathEnabledRequestDto {
+    pub is_enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -248,6 +327,23 @@ pub struct UpdateUserLibraryPermissionRequestDto {
     pub can_transcode: bool,
 }
 
+/// `POST /api/admin/users` 请求体。`role` 取前端三档 `admin`/`user`/`guest`。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateUserRequestDto {
+    pub username: String,
+    pub password: String,
+    pub role: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub allow_download: Option<bool>,
+    #[serde(default)]
+    pub allow_transcode: Option<bool>,
+    #[serde(default)]
+    pub allow_new_device_login: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct UserPolicyInput {
     display_name: Option<String>,
@@ -280,6 +376,96 @@ pub struct ManagedLibraryDto {
     pub id: String,
     pub name: String,
     pub library_type: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySettingsDto {
+    pub id: String,
+    pub name: String,
+    pub library_type: String,
+    pub is_hidden: bool,
+    pub preferred_metadata_language: Option<String>,
+    pub preferred_metadata_country: Option<String>,
+    pub preferred_image_language: Option<String>,
+    pub preferred_image_prefer_original: Option<bool>,
+    pub preferred_image_fallback_languages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryListQueryDto {
+    pub library_type: Option<String>,
+    pub is_hidden: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPhotoListQueryDto {
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// 图片时间线一行：条目 + EXIF/尺寸/GPS/缩略图标记（`LibraryPhotoRecord` 的对外形态）。
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPhotoDto {
+    pub id: String,
+    pub title: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub captured_at: Option<String>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens_model: Option<String>,
+    pub orientation: Option<i16>,
+    pub iso: Option<i32>,
+    pub f_number: Option<f64>,
+    pub exposure_time: Option<String>,
+    pub focal_length: Option<f64>,
+    pub gps_latitude: Option<f64>,
+    pub gps_longitude: Option<f64>,
+    pub gps_altitude: Option<f64>,
+    pub has_thumbnail: bool,
+}
+
+impl From<LibraryPhotoRecord> for LibraryPhotoDto {
+    fn from(record: LibraryPhotoRecord) -> Self {
+        Self {
+            id: record.id,
+            title: record.title,
+            width: record.width,
+            height: record.height,
+            captured_at: record.captured_at,
+            camera_make: record.camera_make,
+            camera_model: record.camera_model,
+            lens_model: record.lens_model,
+            orientation: record.orientation,
+            iso: record.iso,
+            f_number: record.f_number,
+            exposure_time: record.exposure_time,
+            focal_length: record.focal_length,
+            gps_latitude: record.gps_latitude,
+            gps_longitude: record.gps_longitude,
+            gps_altitude: record.gps_altitude,
+            has_thumbnail: record.has_thumbnail,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLibrarySettingsRequestDto {
+    #[serde(default)]
+    pub is_hidden: bool,
+    pub preferred_metadata_language: Option<String>,
+    pub preferred_metadata_country: Option<String>,
+    pub preferred_image_language: Option<String>,
+    pub preferred_image_prefer_original: Option<bool>,
+    #[serde(default)]
+    pub preferred_image_fallback_languages: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -470,6 +656,93 @@ pub struct MetadataProviderStatusResponseDto {
     pub proxy_policy: String,
     pub http_proxy_configured: bool,
     pub https_proxy_configured: bool,
+}
+
+/// Full settings response: global defaults + per-provider override rows.
+/// API keys are never present here — providers report only `hasKey`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataSettingsResponseDto {
+    pub global: MetadataGlobalSettingsDto,
+    pub providers: Vec<MetadataProviderSettingsDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataGlobalSettingsDto {
+    #[serde(default)]
+    pub provider_order: Vec<String>,
+    #[serde(default)]
+    pub default_language: Option<String>,
+    #[serde(default)]
+    pub default_country: Option<String>,
+    #[serde(default)]
+    pub image_language: Option<String>,
+    #[serde(default)]
+    pub image_prefer_original: bool,
+    #[serde(default)]
+    pub image_fallback_languages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataProviderSettingsDto {
+    pub provider_id: String,
+    pub enabled: bool,
+    pub api_base_url: Option<String>,
+    pub image_base_url: Option<String>,
+    pub proxy_mode: String,
+    pub proxy_url: Option<String>,
+    pub language: Option<String>,
+    pub country: Option<String>,
+    pub image_language: Option<String>,
+    pub image_prefer_original: Option<bool>,
+    pub has_key: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertMetadataProviderRequestDto {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+    #[serde(default)]
+    pub image_base_url: Option<String>,
+    #[serde(default)]
+    pub proxy_mode: Option<String>,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub image_language: Option<String>,
+    #[serde(default)]
+    pub image_prefer_original: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMetadataProviderKeyRequestDto {
+    /// 单 key（向后兼容）。`keys` 非空时忽略此字段。
+    #[serde(default)]
+    pub key: Option<String>,
+    /// 多 key 令牌池（可选）：配多个 API key 让运行时轮转 + 限流跳过。
+    /// 对任意 provider（含 `plugin:{id}`）通用。
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataProviderKeyStatusDto {
+    pub provider_id: String,
+    pub has_key: bool,
+    pub key_preview: Option<String>,
+    /// 当前 provider 已存储的 key 数（令牌池大小；单 key = 1）。
+    pub key_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -849,13 +1122,212 @@ pub async fn create_library(
             library_type,
             preferred_metadata_language: payload.preferred_metadata_language,
             preferred_metadata_country: payload.preferred_metadata_country,
+            preferred_image_language: payload.preferred_image_language,
+            preferred_image_prefer_original: payload.preferred_image_prefer_original,
+            preferred_image_fallback_languages: payload
+                .preferred_image_fallback_languages
+                .unwrap_or_default(),
             paths: payload.paths,
             owner_user_id: admin.id,
         })
         .await
         .map_err(|err| AppError::internal(format!("failed to create library: {err}")))?;
 
+    // 建库后立即排入一次扫描，让"信息预提取"链路（扫描→元数据/probe/photo 入队）自动跑起来，
+    // 而不是把新库停在"待手动扫描"状态。入队失败不应让建库整体 500——库已建成，
+    // 记一条 warn，让管理员可稍后手动触发 /libraries/{id}/scan。
+    match AdminRepository::new(database.clone())
+        .queue_library_scan(QueueLibraryScanInput {
+            library_id: library.id.clone(),
+            requested_by_user_id: admin.id,
+            reason: Some("library created".to_owned()),
+        })
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            tracing::warn!(
+                library_id = %library.id,
+                "library created but scan enqueue found no library row"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                library_id = %library.id,
+                error = %err,
+                "library created but initial scan enqueue failed"
+            );
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(ManagedLibraryDto::from(library))))
+}
+
+pub async fn list_libraries(
+    State(state): State<AppState>,
+    Query(query): Query<LibraryListQueryDto>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<(HeaderMap, Json<Vec<LibrarySettingsDto>>), AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let library_type = query
+        .library_type
+        .as_deref()
+        .map(normalize_library_type)
+        .map(|value| validate_library_type(&value).map(|_| value))
+        .transpose()?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let page = AdminRepository::new(database.clone())
+        .list_libraries_page(LibraryListFilter {
+            library_type,
+            is_hidden: query.is_hidden,
+            cursor,
+            limit: libraries_list_limit(query.limit),
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list libraries: {err}")))?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
+
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(LibrarySettingsDto::from)
+                .collect(),
+        ),
+    ))
+}
+
+/// 列出某库的图片时间线（按拍摄时间倒序，keyset 翻页）。server-admin 门控。
+pub async fn list_library_photos(
+    State(state): State<AppState>,
+    Path(library_id): Path<String>,
+    Query(query): Query<LibraryPhotoListQueryDto>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<(HeaderMap, Json<Vec<LibraryPhotoDto>>), AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    validate_uuid_public_id("libraryId", &library_id)?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| validate_uuid_public_id("cursor", value))
+        .transpose()?
+        .map(str::to_owned);
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let page = AdminRepository::new(database.clone())
+        .list_library_photos_page(LibraryPhotoListFilter {
+            library_id,
+            cursor,
+            limit: libraries_list_limit(query.limit),
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list library photos: {err}")))?;
+    let response_headers = pagination_headers(page.has_more, page.next_cursor.as_deref())?;
+
+    Ok((
+        response_headers,
+        Json(
+            page.records
+                .into_iter()
+                .map(LibraryPhotoDto::from)
+                .collect(),
+        ),
+    ))
+}
+
+/// 返回图片条目的缩略图（JPEG 字节）。server-admin 门控。
+/// 缩略图文件名用内部 bigint id（整数无法目录穿越），落在 artwork_cache_dir/photo-thumbnails。
+pub async fn get_photo_thumbnail(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<axum::response::Response, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    validate_uuid_public_id("itemId", &item_id)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let Some(internal_id) = AdminRepository::new(database.clone())
+        .resolve_photo_item_id(&item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to resolve photo item: {err}")))?
+    else {
+        return Err(AppError::not_found("photo item not found"));
+    };
+
+    let path = state
+        .config()
+        .storage
+        .artwork_cache_dir
+        .join("photo-thumbnails")
+        .join(format!("{internal_id}.jpg"));
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| AppError::not_found("photo thumbnail not generated yet"))?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let mut response = axum::response::Response::new(axum::body::Body::from_stream(stream));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("image/jpeg"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400"),
+    );
+    Ok(response)
+}
+
+pub async fn update_library_settings(
+    State(state): State<AppState>,
+    Path(library_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<UpdateLibrarySettingsRequestDto>,
+) -> Result<Json<LibrarySettingsDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    validate_uuid_public_id("libraryId", &library_id)?;
+    let preferred_metadata_country =
+        normalize_optional_country(payload.preferred_metadata_country)?;
+    let preferred_image_fallback_languages = payload
+        .preferred_image_fallback_languages
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|language| {
+            let language = language.trim().to_owned();
+            (!language.is_empty()).then_some(language)
+        })
+        .collect();
+    let database = require_database(&state)?;
+    let updated = AdminRepository::new(database.clone())
+        .update_library_settings(UpdateLibrarySettingsInput {
+            library_id,
+            is_hidden: payload.is_hidden,
+            preferred_metadata_language: normalize_optional_text(
+                payload.preferred_metadata_language,
+            ),
+            preferred_metadata_country,
+            preferred_image_language: normalize_optional_text(payload.preferred_image_language),
+            preferred_image_prefer_original: payload.preferred_image_prefer_original,
+            preferred_image_fallback_languages,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to update library settings: {err}")))?
+        .ok_or_else(|| AppError::not_found("library not found"))?;
+
+    Ok(Json(LibrarySettingsDto::from(updated)))
 }
 
 pub async fn add_path(
@@ -883,6 +1355,102 @@ pub async fn add_path(
     };
 
     Ok((StatusCode::CREATED, Json(LibraryPathDto::from(path))))
+}
+
+/// Parses a library path id from the URL. Path ids are numeric (`bigint`); a
+/// non-numeric or non-positive value can never match a real row, so reject it
+/// as a 404 rather than letting it reach SQL.
+fn parse_library_path_id(value: &str) -> Result<i64, AppError> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| AppError::not_found("library path not found"))
+}
+
+pub async fn list_paths(
+    State(state): State<AppState>,
+    Path(library_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<LibraryPathDto>>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    validate_uuid_public_id("libraryId", &library_id)?;
+    let database = require_database(&state)?;
+    let paths = AdminRepository::new(database.clone())
+        .list_library_paths(&library_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list library paths: {err}")))?
+        .ok_or_else(|| AppError::not_found("library not found"))?;
+
+    Ok(Json(paths.into_iter().map(LibraryPathDto::from).collect()))
+}
+
+pub async fn remove_path(
+    State(state): State<AppState>,
+    Path((library_id, path_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    validate_uuid_public_id("libraryId", &library_id)?;
+    let path_id = parse_library_path_id(&path_id)?;
+    let database = require_database(&state)?;
+    let removed = AdminRepository::new(database.clone())
+        .remove_library_path(LibraryPathSelector {
+            library_id,
+            path_id,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to remove library path: {err}")))?;
+    if !removed {
+        return Err(AppError::not_found("library path not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn set_path_enabled(
+    State(state): State<AppState>,
+    Path((library_id, path_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<SetLibraryPathEnabledRequestDto>,
+) -> Result<Json<LibraryPathDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    validate_uuid_public_id("libraryId", &library_id)?;
+    let path_id = parse_library_path_id(&path_id)?;
+    let database = require_database(&state)?;
+    let updated = AdminRepository::new(database.clone())
+        .set_library_path_enabled(SetLibraryPathEnabledInput {
+            library_id,
+            path_id,
+            is_enabled: payload.is_enabled,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to update library path: {err}")))?
+        .ok_or_else(|| AppError::not_found("library path not found"))?;
+
+    Ok(Json(LibraryPathDto::from(updated)))
+}
+
+pub async fn delete_library(
+    State(state): State<AppState>,
+    Path(library_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    validate_uuid_public_id("libraryId", &library_id)?;
+    let database = require_database(&state)?;
+    let removed = AdminRepository::new(database.clone())
+        .delete_library(&library_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to delete library: {err}")))?;
+    if !removed {
+        return Err(AppError::not_found("library not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn queue_scan(
@@ -982,6 +1550,344 @@ pub async fn list_metadata_providers(
     Ok(Json(metadata_provider_status_response(state.config())))
 }
 
+/// `GET /api/admin/metadata/settings` — global defaults + per-provider override
+/// rows. API keys are never echoed: each provider only reports `hasKey`.
+pub async fn get_metadata_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<MetadataSettingsResponseDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let repo = MetadataSettingsRepository::new(database.clone());
+
+    let global = repo.load_global().await.map_err(db_internal)?;
+    let providers = repo.load_all_providers().await.map_err(db_internal)?;
+    let with_key: std::collections::BTreeSet<String> = repo
+        .providers_with_key()
+        .await
+        .map_err(db_internal)?
+        .into_iter()
+        .collect();
+
+    Ok(Json(metadata_settings_response(
+        global, providers, with_key,
+    )))
+}
+
+/// `POST /api/admin/metadata/settings` — write the global defaults row.
+pub async fn update_metadata_global_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<MetadataGlobalSettingsDto>,
+) -> Result<Json<MetadataSettingsResponseDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let repo = MetadataSettingsRepository::new(database.clone());
+
+    let settings = MetadataGlobalSettings {
+        provider_order: payload
+            .provider_order
+            .iter()
+            .filter_map(|provider| {
+                let provider = provider.trim().to_ascii_lowercase();
+                (!provider.is_empty()).then_some(provider)
+            })
+            .collect(),
+        default_language: normalize_optional_text(payload.default_language),
+        default_country: normalize_optional_country(payload.default_country)?,
+        image_language: normalize_optional_text(payload.image_language),
+        image_prefer_original: payload.image_prefer_original,
+        image_fallback_languages: payload
+            .image_fallback_languages
+            .iter()
+            .filter_map(|language| {
+                let language = language.trim().to_owned();
+                (!language.is_empty()).then_some(language)
+            })
+            .collect(),
+    };
+    repo.upsert_global(&settings).await.map_err(db_internal)?;
+
+    let providers = repo.load_all_providers().await.map_err(db_internal)?;
+    let with_key: std::collections::BTreeSet<String> = repo
+        .providers_with_key()
+        .await
+        .map_err(db_internal)?
+        .into_iter()
+        .collect();
+    Ok(Json(metadata_settings_response(
+        Some(settings),
+        providers,
+        with_key,
+    )))
+}
+
+/// `POST /api/admin/metadata/providers/{id}` — write one provider's override row.
+/// Full replacement: absent optional fields clear the override (inherit).
+pub async fn update_metadata_provider_settings(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<UpsertMetadataProviderRequestDto>,
+) -> Result<Json<MetadataProviderSettingsDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let repo = MetadataSettingsRepository::new(database.clone());
+
+    let provider_id = validate_provider_id(&provider_id).map_err(metadata_settings_error)?;
+    let settings = MetadataProviderSettings {
+        provider_id: provider_id.clone(),
+        enabled: payload.enabled.unwrap_or(true),
+        api_base_url: normalize_optional_text(payload.api_base_url),
+        image_base_url: normalize_optional_text(payload.image_base_url),
+        proxy_mode: payload
+            .proxy_mode
+            .map(|mode| mode.trim().to_ascii_lowercase())
+            .filter(|mode| !mode.is_empty())
+            .unwrap_or_else(|| "inherit".to_owned()),
+        proxy_url: normalize_optional_text(payload.proxy_url),
+        language: normalize_optional_text(payload.language),
+        country: normalize_optional_country(payload.country)?,
+        image_language: normalize_optional_text(payload.image_language),
+        image_prefer_original: payload.image_prefer_original,
+    };
+    validate_provider_settings(&settings).map_err(metadata_settings_error)?;
+    repo.upsert_provider(&settings).await.map_err(db_internal)?;
+
+    let has_key = repo
+        .providers_with_key()
+        .await
+        .map_err(db_internal)?
+        .iter()
+        .any(|id| id == &provider_id);
+    Ok(Json(metadata_provider_settings_dto(settings, has_key)))
+}
+
+/// `POST /api/admin/metadata/providers/{id}/key` — set (encrypt) the API key.
+pub async fn set_metadata_provider_key(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<SetMetadataProviderKeyRequestDto>,
+) -> Result<Json<MetadataProviderKeyStatusDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let cipher = secret_cipher_from_state(&state)?;
+    let repo = MetadataSettingsRepository::new(database.clone());
+
+    let provider_id = validate_provider_id(&provider_id).map_err(metadata_settings_error)?;
+    // 收集 key：`keys` 数组优先（令牌池），否则回退单 `key`（向后兼容）。
+    let raw_keys: Vec<String> = if !payload.keys.is_empty() {
+        payload.keys.clone()
+    } else {
+        payload.key.clone().into_iter().collect()
+    };
+    let keys: Vec<String> = raw_keys
+        .iter()
+        .map(|k| k.trim().to_owned())
+        .filter(|k| !k.is_empty())
+        .collect();
+    if keys.is_empty() {
+        return Err(AppError::unprocessable(
+            "metadata provider key must not be empty",
+        ));
+    }
+    if keys.iter().any(|k| k.len() > 4096) {
+        return Err(AppError::unprocessable(
+            "metadata provider key is too large",
+        ));
+    }
+    if keys.len() > 32 {
+        return Err(AppError::unprocessable(
+            "metadata provider key pool is too large (max 32)",
+        ));
+    }
+    let stored = repo
+        .set_secrets(&provider_id, &keys, &cipher)
+        .await
+        .map_err(metadata_settings_error)?;
+
+    Ok(Json(MetadataProviderKeyStatusDto {
+        provider_id,
+        has_key: stored > 0,
+        key_preview: keys.first().map(|k| mask_secret(k)),
+        key_count: stored,
+    }))
+}
+
+/// `DELETE /api/admin/metadata/providers/{id}/key` — clear the stored key.
+pub async fn delete_metadata_provider_key(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<MetadataProviderKeyStatusDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let repo = MetadataSettingsRepository::new(database.clone());
+
+    let provider_id = validate_provider_id(&provider_id).map_err(metadata_settings_error)?;
+    let removed = repo
+        .delete_secret(&provider_id)
+        .await
+        .map_err(db_internal)?;
+    if !removed {
+        return Err(AppError::not_found(format!(
+            "no stored key for provider `{provider_id}`"
+        )));
+    }
+    Ok(Json(MetadataProviderKeyStatusDto {
+        provider_id,
+        has_key: false,
+        key_preview: None,
+        key_count: 0,
+    }))
+}
+
+/// `POST /api/admin/metadata/providers/{id}/test` — controlled connectivity /
+/// auth probe using the effective (env ← DB) config. Does not write the DB.
+pub async fn test_metadata_provider(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<ProviderProbeResult>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let repo = MetadataSettingsRepository::new(database.clone());
+
+    let provider_id = validate_provider_id(&provider_id).map_err(metadata_settings_error)?;
+    let cipher = SecretCipher::from_config(&state.config().secrets).ok();
+    let resolved = repo
+        .resolve(cipher.as_ref())
+        .await
+        .map_err(metadata_settings_error)?;
+    let effective = resolve_metadata_config(&state.config().metadata, &resolved);
+    let proxy_override =
+        resolved
+            .providers
+            .get(&provider_id)
+            .map(|settings| ProviderProxyOverride {
+                mode: settings.proxy_mode.clone(),
+                url: settings.proxy_url.clone(),
+            });
+
+    Ok(Json(
+        probe_provider(
+            &provider_id,
+            &effective,
+            &state.config().proxy,
+            proxy_override.as_ref(),
+        )
+        .await,
+    ))
+}
+
+fn require_database(state: &AppState) -> Result<&DbPool, AppError> {
+    state
+        .database()
+        .ok_or_else(|| AppError::internal("database is not configured"))
+}
+
+fn db_internal(err: sqlx::Error) -> AppError {
+    AppError::internal(format!("database error: {err}"))
+}
+
+fn metadata_settings_error(err: MetadataSettingsError) -> AppError {
+    match err {
+        MetadataSettingsError::Validation(message) => AppError::unprocessable(message),
+        MetadataSettingsError::Secret(inner) => AppError::unprocessable(inner.to_string()),
+        MetadataSettingsError::Database(inner) => {
+            AppError::internal(format!("database error: {inner}"))
+        }
+    }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_optional_country(value: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(value) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+    let upper = value.to_ascii_uppercase();
+    if upper.len() == 2 && upper.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        Ok(Some(upper))
+    } else {
+        Err(AppError::unprocessable("country must be a 2-letter code"))
+    }
+}
+
+fn metadata_settings_response(
+    global: Option<MetadataGlobalSettings>,
+    providers: std::collections::HashMap<String, MetadataProviderSettings>,
+    with_key: std::collections::BTreeSet<String>,
+) -> MetadataSettingsResponseDto {
+    // Union of built-in ids and any extra (plugin) provider rows, stable order.
+    let mut ids: Vec<String> = SUPPORTED_PROVIDER_IDS
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+    let mut extras: Vec<String> = providers
+        .keys()
+        .filter(|id| !ids.contains(id))
+        .cloned()
+        .collect();
+    extras.sort();
+    ids.extend(extras);
+
+    let provider_dtos = ids
+        .into_iter()
+        .map(|id| {
+            let settings = providers
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| MetadataProviderSettings::new(&id));
+            let has_key = with_key.contains(&id);
+            metadata_provider_settings_dto(settings, has_key)
+        })
+        .collect();
+
+    let global = global.unwrap_or_default();
+    MetadataSettingsResponseDto {
+        global: MetadataGlobalSettingsDto {
+            provider_order: global.provider_order,
+            default_language: global.default_language,
+            default_country: global.default_country,
+            image_language: global.image_language,
+            image_prefer_original: global.image_prefer_original,
+            image_fallback_languages: global.image_fallback_languages,
+        },
+        providers: provider_dtos,
+    }
+}
+
+fn metadata_provider_settings_dto(
+    settings: MetadataProviderSettings,
+    has_key: bool,
+) -> MetadataProviderSettingsDto {
+    MetadataProviderSettingsDto {
+        provider_id: settings.provider_id,
+        enabled: settings.enabled,
+        api_base_url: settings.api_base_url,
+        image_base_url: settings.image_base_url,
+        proxy_mode: settings.proxy_mode,
+        proxy_url: settings.proxy_url,
+        language: settings.language,
+        country: settings.country,
+        image_language: settings.image_language,
+        image_prefer_original: settings.image_prefer_original,
+        has_key,
+    }
+}
+
 pub async fn list_users(
     State(state): State<AppState>,
     Query(query): Query<AdminUserQueryDto>,
@@ -1050,6 +1956,111 @@ pub async fn update_user_policy(
     };
 
     Ok(Json(AdminUserDto::from(user)))
+}
+
+/// `POST /api/admin/users`：建一个用户。前端 `role` 三档映射为后端角色名。
+pub async fn create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<CreateUserRequestDto>,
+) -> Result<Json<AdminUserDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+
+    let username = validate_bounded_text("username", &payload.username, MAX_USER_DISPLAY_NAME_LEN)?;
+    if !admin_password_meets_policy(&payload.password) {
+        return Err(AppError::unprocessable(
+            "password must be at least 12 characters",
+        ));
+    }
+    let (role_name, role_name_normalized) = resolve_user_role(&payload.role)?;
+    let display_name = payload
+        .display_name
+        .as_deref()
+        .map(|name| validate_optional_bounded_text("displayName", name, MAX_USER_DISPLAY_NAME_LEN))
+        .transpose()?
+        .flatten()
+        .map(str::to_owned);
+
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let user = AdminRepository::new(database.clone())
+        .create_admin_user(CreateAdminUserInput {
+            username: username.to_owned(),
+            username_normalized: username.to_ascii_lowercase(),
+            password_hash: PasswordService.hash_password(&payload.password),
+            display_name,
+            role_name: role_name.to_owned(),
+            role_name_normalized: role_name_normalized.to_owned(),
+            // 默认权限：普通用户可转码/可上新设备，下载默认关；后续可由 policy 接口调整。
+            allow_download: payload.allow_download.unwrap_or(false),
+            allow_transcode: payload.allow_transcode.unwrap_or(true),
+            allow_new_device_login: payload.allow_new_device_login.unwrap_or(true),
+        })
+        .await
+        .map_err(|err| {
+            if is_unique_violation(&err) {
+                AppError::conflict("a user with this name already exists")
+            } else {
+                AppError::internal(format!("failed to create user: {err}"))
+            }
+        })?;
+
+    Ok(Json(AdminUserDto::from(user)))
+}
+
+/// `DELETE /api/admin/users/{user_id}`：删用户。禁止删自己与最后一个管理员。
+pub async fn delete_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let admin = authenticate_admin(&state, &headers, &uri).await?;
+    let user_id = validate_uuid_public_id("userId", &user_id)?;
+    if admin.public_id == user_id {
+        return Err(AppError::conflict(
+            "current admin user cannot delete itself",
+        ));
+    }
+
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    match AdminRepository::new(database.clone())
+        .delete_admin_user(user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to delete user: {err}")))?
+    {
+        DeleteAdminUserOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteAdminUserOutcome::NotFound => Err(AppError::not_found("user not found")),
+        DeleteAdminUserOutcome::LastAdministrator => {
+            Err(AppError::conflict("cannot delete the last administrator"))
+        }
+    }
+}
+
+/// 把前端三档角色 `admin`/`user`/`guest` 映射为后端角色（显示名, 归一化名）。
+fn resolve_user_role(role: &str) -> Result<(&'static str, &'static str), AppError> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "admin" | "administrator" | "owner" => Ok(("Administrator", "administrator")),
+        "user" => Ok(("User", "user")),
+        "guest" => Ok(("Guest", "guest")),
+        _ => Err(AppError::unprocessable(
+            "role must be one of admin, user, or guest",
+        )),
+    }
+}
+
+/// 唯一约束冲突（Postgres `23505`），用于把并发/重名建用户转成 409。
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .is_some_and(|code| code == "23505")
 }
 
 pub async fn list_user_library_permissions(
@@ -2186,12 +3197,17 @@ fn validate_optional_bounded_text<'a>(
 }
 
 fn validate_library_type(value: &str) -> Result<(), AppError> {
-    match value {
-        "movies" | "tv" | "music" | "mixed" => Ok(()),
-        _ => Err(AppError::unprocessable(
-            "libraryType must be one of movies, tv, music, mixed",
-        )),
+    if crate::media_types::LibraryType::parse(value).is_some() {
+        return Ok(());
     }
+    let allowed = crate::media_types::LibraryType::ALL
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(AppError::unprocessable(format!(
+        "libraryType must be one of {allowed}"
+    )))
 }
 
 fn validate_notification_target_type(value: &str) -> Result<(), AppError> {
@@ -2280,6 +3296,12 @@ fn notification_target_list_limit(value: Option<i64>) -> i64 {
     value
         .unwrap_or(MAX_NOTIFICATION_TARGETS_LIST_LIMIT)
         .clamp(1, MAX_NOTIFICATION_TARGETS_LIST_LIMIT)
+}
+
+fn libraries_list_limit(value: Option<i64>) -> i64 {
+    value
+        .unwrap_or(MAX_LIBRARIES_LIST_LIMIT)
+        .clamp(1, MAX_LIBRARIES_LIST_LIMIT)
 }
 
 fn plugin_host_api_call_limit(value: Option<i64>) -> i64 {
@@ -2714,6 +3736,22 @@ impl From<ManagedLibraryRecord> for ManagedLibraryDto {
             id: record.id,
             name: record.name,
             library_type: record.library_type,
+        }
+    }
+}
+
+impl From<LibrarySettingsRecord> for LibrarySettingsDto {
+    fn from(record: LibrarySettingsRecord) -> Self {
+        Self {
+            id: record.id,
+            name: record.name,
+            library_type: record.library_type,
+            is_hidden: record.is_hidden,
+            preferred_metadata_language: record.preferred_metadata_language,
+            preferred_metadata_country: record.preferred_metadata_country,
+            preferred_image_language: record.preferred_image_language,
+            preferred_image_prefer_original: record.preferred_image_prefer_original,
+            preferred_image_fallback_languages: record.preferred_image_fallback_languages,
         }
     }
 }
@@ -3348,9 +4386,12 @@ mod tests {
     #[test]
     fn validates_supported_library_types() {
         assert!(validate_library_type("movies").is_ok());
-        assert!(validate_library_type("tv").is_ok());
+        assert!(validate_library_type("tvshows").is_ok());
         assert!(validate_library_type("music").is_ok());
+        assert!(validate_library_type("homevideos").is_ok());
         assert!(validate_library_type("mixed").is_ok());
+        assert!(validate_library_type("livetv").is_ok());
+        assert!(validate_library_type("tv").is_err());
         assert!(validate_library_type("books").is_err());
     }
 
@@ -3395,6 +4436,22 @@ mod tests {
         assert!(routes.contains("list_plugin_host_api_calls_for_run_page"));
         assert!(routes.contains("plugin_host_api_call_limit(query.limit)"));
         assert!(routes.contains("pagination_headers(page.has_more, page.next_cursor.as_deref())"));
+    }
+
+    #[test]
+    fn library_photo_routes_are_registered_and_keyset_paginated() {
+        let routes = include_str!("routes.rs");
+
+        // 时间线读 API：keyset 翻页 + server-admin 门控，路由已注册。
+        assert!(routes.contains(r#""/api/admin/libraries/{library_id}/photos""#));
+        assert!(routes.contains("get(list_library_photos)"));
+        assert!(routes.contains("Query(query): Query<LibraryPhotoListQueryDto>"));
+        assert!(routes.contains("list_library_photos_page"));
+        // 缩略图字节服务：用内部 id 拼路径（防穿越），路由已注册。
+        assert!(routes.contains(r#""/api/admin/media-items/{item_id}/thumbnail""#));
+        assert!(routes.contains("get(get_photo_thumbnail)"));
+        assert!(routes.contains("resolve_photo_item_id"));
+        assert!(routes.contains(r#".join("photo-thumbnails")"#));
     }
 
     #[test]
@@ -3609,6 +4666,18 @@ mod tests {
         assert_eq!(
             admin_job_event_list_limit(Some(MAX_ADMIN_JOB_EVENTS_LIST_LIMIT + 1)),
             MAX_ADMIN_JOB_EVENTS_LIST_LIMIT
+        );
+    }
+
+    #[test]
+    fn libraries_list_limit_is_bounded() {
+        assert_eq!(libraries_list_limit(None), MAX_LIBRARIES_LIST_LIMIT);
+        assert_eq!(libraries_list_limit(Some(10)), 10);
+        assert_eq!(libraries_list_limit(Some(0)), 1);
+        assert_eq!(libraries_list_limit(Some(-5)), 1);
+        assert_eq!(
+            libraries_list_limit(Some(MAX_LIBRARIES_LIST_LIMIT + 1)),
+            MAX_LIBRARIES_LIST_LIMIT
         );
     }
 

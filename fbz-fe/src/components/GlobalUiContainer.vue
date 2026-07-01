@@ -7,8 +7,8 @@
   <FilePickerModal />
   <LibrarySettingsModal />
   <MetadataManagerModal />
-  <GuidedTourOverlay />
   <ContextMenu />
+  <LibraryContextMenu />
   <GlobalToast />
 </template>
 

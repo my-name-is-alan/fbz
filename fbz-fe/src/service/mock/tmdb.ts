@@ -12,10 +12,10 @@ import type {
   TmdbCatalog,
   TvDetail,
 } from "@/types/media.ts";
-import catalogJson from "@/service/modules/tmdb-catalog.json";
+import catalogJson from "@/service/mock/tmdb-catalog.json";
 
 /**
- * TMDB 数据访问层（设计阶段从烤好的 JSON 读取）。
+ * TMDB 设计态 mock 数据访问层（**非真实后端**，接 fbz-api 后整体替换）。
  * - 目录 catalog 随包加载（首页/媒体库网格用）。
  * - 详情 details 体积大，按需动态 import（详情页用），只下载一次。
  * 接入后端后，把这些函数换成对 fbz-api 的请求即可，页面消费方不变。
@@ -37,7 +37,7 @@ let detailsCache: Record<string, DetailRecord> | undefined;
 
 async function loadDetails(): Promise<Record<string, DetailRecord>> {
   if (!detailsCache) {
-    const mod = await import("@/service/modules/tmdb-details.json");
+    const mod = await import("@/service/mock/tmdb-details.json");
     detailsCache = mod.default as Record<string, DetailRecord>;
   }
   return detailsCache;

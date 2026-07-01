@@ -439,6 +439,21 @@ pub struct UserLibraryViewRecord {
     pub library_type: String,
 }
 
+/// 单库可见顶层条目计数（库 `public_id` → 卡片数）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryViewCountRecord {
+    pub library_id: String,
+    pub item_count: i64,
+}
+
+/// 条目主文件的画质标签（迁移 0084 的 media_files 列；识别不出即各自为 None）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemQualityTags {
+    pub resolution: Option<String>,
+    pub hdr: Option<String>,
+    pub audio_codec: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserMediaFolderRecord {
     pub id: String,
@@ -861,6 +876,18 @@ pub struct PersonRecord {
     pub total_record_count: i64,
 }
 
+/// 人物详情（按名取单人）：含传记、生卒、是否有头像。日期以 `YYYY-MM-DD` 文本透传，
+/// 避免引入 sqlx 的 chrono 依赖；识别不出即各自为 None。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonDetailRecord {
+    pub id: String,
+    pub name: String,
+    pub overview: Option<String>,
+    pub birth_date: Option<String>,
+    pub death_date: Option<String>,
+    pub has_image: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StudioRecord {
     pub id: String,
@@ -899,6 +926,14 @@ pub struct PlaylistRecord {
     pub id: String,
     pub name: String,
     pub total_record_count: i64,
+}
+
+/// 系列/合集详情（按 public_id 取单个）：名称 + 简介。封面由成员海报派生（collections 无 artwork）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectionDetailRecord {
+    pub id: String,
+    pub name: String,
+    pub overview: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -940,6 +975,16 @@ pub struct MediaItemBrowseRecord {
     pub played: bool,
     pub image_tags: Vec<String>,
     pub total_record_count: i64,
+}
+
+/// 单条条目关联人物（详情接口用）：public_id + 名称 + 角色类型/角色名 + 排序。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemPersonRecord {
+    pub id: String,
+    pub name: String,
+    pub role_type: String,
+    pub role_name: String,
+    pub sort_order: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1060,6 +1105,223 @@ impl LibraryRepository {
         .fetch_optional(&self.pool)
         .await?
         .map(UserLibraryViewRecord::from_row)
+        .transpose()
+    }
+
+    /// 按库 `public_id` 聚合当前用户可见的「顶层」条目数（网格卡片数）。
+    ///
+    /// 只数 movie/series/album/artist/collection/photo/video 这些会以卡片出现在库网格里的
+    /// 顶层类型，排除 season/episode/track 等嵌套子项，避免计数虚高。权限过滤与
+    /// [`list_user_views`](Self::list_user_views) 一致（`can_view` + 非隐藏库）。
+    pub async fn list_user_view_counts(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<LibraryViewCountRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                l.public_id::text as library_id,
+                count(mi.id)::bigint as item_count
+            from libraries l
+            join library_permissions lp on lp.library_id = l.id
+            left join media_items mi on mi.library_id = l.id
+                and mi.is_deleted = false
+                and mi.item_type in ('movie', 'series', 'album', 'artist', 'collection', 'photo', 'video')
+            where lp.user_id = $1
+              and lp.can_view = true
+              and l.is_hidden = false
+            group by l.public_id
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(LibraryViewCountRecord::from_row)
+            .collect()
+    }
+
+    /// 按 `public_id` 批量取条目简介，返回 `public_id → overview` 映射（无简介的条目不入表）。
+    /// 用于 hero 主打项补 overview——浏览记录不含该列，故按 id 单查。绑参数防注入，
+    /// 仅命中传入的 id（非法 UUID 自然不匹配）。空入参直接返回空表，不查库。
+    pub async fn fetch_item_overviews(
+        &self,
+        public_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+        if public_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let rows = sqlx::query(
+            r#"
+            select mi.public_id::text as id, mi.overview
+            from media_items mi
+            where mi.is_deleted = false
+              and mi.overview is not null
+              and mi.public_id = any(
+                  select id::uuid
+                  from unnest($1::text[]) as id
+                  where id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              )
+            "#,
+        )
+        .bind(public_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut overviews = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let overview: String = row.try_get("overview")?;
+            overviews.insert(id, overview);
+        }
+        Ok(overviews)
+    }
+
+    /// 按 `public_id` 取单条条目的关联人物（演员/导演/编剧…），按 role_type 再 sort_order 排序。
+    /// 供详情接口填充演职员与导演。绑参数 + UUID 正则防注入；非法/不存在 id 自然返回空。
+    pub async fn fetch_item_people(
+        &self,
+        public_id: &str,
+    ) -> Result<Vec<ItemPersonRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                p.public_id::text as id,
+                p.name,
+                mip.role_type,
+                mip.role_name,
+                mip.sort_order
+            from media_items mi
+            join media_item_people mip on mip.media_item_id = mi.id
+            join people p on p.id = mip.person_id
+            where mi.is_deleted = false
+              and mi.public_id = case
+                  when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+            order by
+                case mip.role_type
+                    when 'actor' then 0
+                    when 'director' then 1
+                    when 'writer' then 2
+                    else 3
+                end,
+                mip.sort_order,
+                p.name
+            "#,
+        )
+        .bind(public_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(ItemPersonRecord::from_row).collect()
+    }
+
+    /// 按 `public_id` 批量取条目「主文件」的画质标签，返回 `public_id → tags` 映射。
+    ///
+    /// 画质是物理文件属性（同一条目可有多版本文件），取主文件（`is_primary desc, id`）
+    /// 的 `resolution/hdr/audio_codec`（迁移 0084，扫描识别 + probe 校正填入）。
+    /// 绑参数 + UUID 正则防注入；空入参不查库；无画质列的条目不入表。
+    pub async fn fetch_item_quality_tags(
+        &self,
+        public_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, ItemQualityTags>, sqlx::Error> {
+        if public_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let rows = sqlx::query(
+            r#"
+            select
+                mi.public_id::text as id,
+                primary_file.resolution,
+                primary_file.hdr,
+                primary_file.audio_codec
+            from media_items mi
+            left join lateral (
+                select mf.resolution, mf.hdr, mf.audio_codec
+                from media_files mf
+                where mf.media_item_id = mi.id
+                order by mf.is_primary desc, mf.id
+                limit 1
+            ) primary_file on true
+            where mi.is_deleted = false
+              and mi.public_id = any(
+                  select id::uuid
+                  from unnest($1::text[]) as id
+                  where id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              )
+            "#,
+        )
+        .bind(public_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut tags = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            tags.insert(
+                id,
+                ItemQualityTags {
+                    resolution: row.try_get("resolution")?,
+                    hdr: row.try_get("hdr")?,
+                    audio_codec: row.try_get("audio_codec")?,
+                },
+            );
+        }
+        Ok(tags)
+    }
+
+    /// 取系列/合集详情（按 public_id），含名称与简介。
+    ///
+    /// 电影系列与 playlist 同存 `collections` 表（metadata 刮削 belongs_to_collection 时
+    /// find-or-create）。可见性同 [`list_user_playlist_items`](Self::list_user_playlist_items)
+    /// 的 scope：无 library_id 的全局集放行，挂库的集要求 can_view + 非隐藏库。成员列表复用
+    /// `list_user_playlist_items`。无可见集即 None。
+    pub async fn find_user_collection_detail_by_id(
+        &self,
+        user_id: i64,
+        collection_id: &str,
+    ) -> Result<Option<CollectionDetailRecord>, sqlx::Error> {
+        sqlx::query(
+            r#"
+            with requested_collection as (
+                select case
+                    when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $2::uuid
+                    else null::uuid
+                end as public_id
+            )
+            select
+                c.public_id::text as id,
+                c.name,
+                c.overview
+            from collections c
+            left join libraries collection_library
+                on collection_library.id = c.library_id
+            left join library_permissions collection_permission
+                on collection_permission.library_id = c.library_id
+               and collection_permission.user_id = $1
+            cross join requested_collection requested
+            where c.public_id = requested.public_id
+              and (
+                    c.library_id is null
+                 or (
+                        collection_permission.can_view = true
+                    and collection_library.is_hidden = false
+                 )
+              )
+            limit 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(collection_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(CollectionDetailRecord::from_row)
         .transpose()
     }
 
@@ -2525,6 +2787,13 @@ impl LibraryRepository {
                   and (
                         $8::text is null
                      or lower(p.name) like '%' || lower($8::text) || '%'
+                     or (
+                            regexp_replace(lower($8::text), '[^a-z0-9]', '', 'g') <> ''
+                        and (
+                              p.pinyin_full like '%' || regexp_replace(lower($8::text), '[^a-z0-9]', '', 'g') || '%'
+                           or p.pinyin_initials like '%' || regexp_replace(lower($8::text), '[^a-z0-9]', '', 'g') || '%'
+                        )
+                     )
                   )
                   and (
                         $9::text is null
@@ -2599,6 +2868,54 @@ impl LibraryRepository {
         .fetch_optional(&self.pool)
         .await?
         .map(PersonRecord::from_row)
+        .transpose()
+    }
+
+    /// 取演员/人物详情（按精确名匹配），含传记、生卒、是否有头像。
+    ///
+    /// 与列表用的 [`find_user_person_by_name`](Self::find_user_person_by_name) 分开：
+    /// 列表查询走 `distinct id,name`，加这些列会破坏去重；详情只取单人，可放心富化。
+    /// 权限同列表（该人参演的条目里存在用户可见、非隐藏库的项）。无可见作品即 None。
+    pub async fn find_user_person_detail_by_name(
+        &self,
+        user_id: i64,
+        name: &str,
+    ) -> Result<Option<PersonDetailRecord>, sqlx::Error> {
+        sqlx::query(
+            r#"
+            select
+                p.public_id::text as id,
+                p.name,
+                p.overview,
+                p.birth_date::text as birth_date,
+                p.death_date::text as death_date,
+                exists(
+                    select 1 from artwork a
+                    where a.person_id = p.id
+                ) as has_image
+            from people p
+            where lower(p.name) = lower($2)
+              and exists (
+                    select 1
+                    from media_item_people mip
+                    join media_items mi on mi.id = mip.media_item_id
+                    join libraries l on l.id = mi.library_id
+                    join library_permissions lp on lp.library_id = mi.library_id
+                    where mip.person_id = p.id
+                      and lp.user_id = $1
+                      and lp.can_view = true
+                      and mi.is_deleted = false
+                      and l.is_hidden = false
+              )
+            order by p.id
+            limit 1
+            "#,
+        )
+        .bind(user_id)
+        .bind(name.trim())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(PersonDetailRecord::from_row)
         .transpose()
     }
 
@@ -2771,6 +3088,13 @@ impl LibraryRepository {
                  or lower(mi.title) like '%' || lower($15::text) || '%'
                  or lower(mi.original_title) like '%' || lower($15::text) || '%'
                  or lower(mi.sort_title) like '%' || lower($15::text) || '%'
+                 or (
+                        regexp_replace(lower($15::text), '[^a-z0-9]', '', 'g') <> ''
+                    and (
+                          mi.pinyin_full like '%' || regexp_replace(lower($15::text), '[^a-z0-9]', '', 'g') || '%'
+                       or mi.pinyin_initials like '%' || regexp_replace(lower($15::text), '[^a-z0-9]', '', 'g') || '%'
+                    )
+                 )
               )
               and (
                     $16::text is null
@@ -3760,7 +4084,7 @@ impl LibraryRepository {
                 up.is_favorite,
                 up.rating::double precision as rating,
                 up.played,
-                array[]::text[] as image_tags,
+                coalesce(item_images.image_tags, array[]::text[]) as image_tags,
                 0::bigint as total_record_count
             from user_playstates up
             join media_items mi on mi.id = up.media_item_id
@@ -3781,6 +4105,11 @@ impl LibraryRepository {
                 order by mf.is_primary desc, mf.id
                 limit 1
             ) primary_file on true
+            left join lateral (
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                from artwork a
+                where a.media_item_id = mi.id
+            ) item_images on true
             where up.user_id = $1
               and lp.user_id = $1
               and lp.can_view = true
@@ -5092,6 +5421,15 @@ impl UserLibraryViewRecord {
     }
 }
 
+impl LibraryViewCountRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            library_id: row.try_get("library_id")?,
+            item_count: row.try_get("item_count")?,
+        })
+    }
+}
+
 impl ItemCountsRecord {
     fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
@@ -5133,6 +5471,19 @@ impl PersonRecord {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             total_record_count: row.try_get("total_record_count")?,
+        })
+    }
+}
+
+impl PersonDetailRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            overview: row.try_get("overview")?,
+            birth_date: row.try_get("birth_date")?,
+            death_date: row.try_get("death_date")?,
+            has_image: row.try_get("has_image")?,
         })
     }
 }
@@ -5195,6 +5546,16 @@ impl PlaylistRecord {
     }
 }
 
+impl CollectionDetailRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            overview: row.try_get("overview")?,
+        })
+    }
+}
+
 impl ItemPrefixRecord {
     fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
@@ -5226,6 +5587,18 @@ impl MediaItemBrowseRecord {
             played: row.try_get("played")?,
             image_tags: row.try_get("image_tags")?,
             total_record_count: row.try_get("total_record_count")?,
+        })
+    }
+}
+
+impl ItemPersonRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            role_type: row.try_get("role_type")?,
+            role_name: row.try_get("role_name")?,
+            sort_order: row.try_get("sort_order")?,
         })
     }
 }
@@ -6425,6 +6798,11 @@ mod tests {
         assert!(main_query.contains(
             "lower(coalesce(nullif(mi.sort_title, ''), mi.title)) like lower($16::text) || '%'"
         ));
+        // 拼音模糊匹配（全拼 + 首字母）并入标题搜索，归一化空串时跳过避免误命中。
+        assert!(main_query.contains("mi.pinyin_full like '%' || regexp_replace(lower($15::text)"));
+        assert!(
+            main_query.contains("mi.pinyin_initials like '%' || regexp_replace(lower($15::text)")
+        );
 
         assert!(genre_query.contains("lower(g.name) like '%' || lower($7::text) || '%'"));
         assert!(genre_query.contains("lower(g.name) like lower($8::text) || '%'"));
@@ -6441,6 +6819,11 @@ mod tests {
         assert!(person_query.contains("lower(p.name) like lower($9::text) || '%'"));
         assert!(person_query.contains("lower(p.name) >= lower($10::text)"));
         assert!(person_query.contains("case when $11 = 'asc' then lower(name)"));
+        // 演员搜索并入拼音模糊匹配（全拼 + 首字母）。
+        assert!(person_query.contains("p.pinyin_full like '%' || regexp_replace(lower($8::text)"));
+        assert!(
+            person_query.contains("p.pinyin_initials like '%' || regexp_replace(lower($8::text)")
+        );
     }
 
     #[test]

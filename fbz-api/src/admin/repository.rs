@@ -86,14 +86,44 @@ pub struct CreateLibraryInput {
     pub library_type: String,
     pub preferred_metadata_language: Option<String>,
     pub preferred_metadata_country: Option<String>,
+    pub preferred_image_language: Option<String>,
+    pub preferred_image_prefer_original: Option<bool>,
+    pub preferred_image_fallback_languages: Vec<String>,
     pub paths: Vec<String>,
     pub owner_user_id: i64,
+}
+
+/// Full replacement of a library's admin-configurable settings (metadata
+/// language/country + image-language policy + hidden flag). Every field is set
+/// authoritatively, so the caller sends the complete desired state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateLibrarySettingsInput {
+    pub library_id: String,
+    pub is_hidden: bool,
+    pub preferred_metadata_language: Option<String>,
+    pub preferred_metadata_country: Option<String>,
+    pub preferred_image_language: Option<String>,
+    pub preferred_image_prefer_original: Option<bool>,
+    pub preferred_image_fallback_languages: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddLibraryPathInput {
     pub library_id: String,
     pub path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryPathSelector {
+    pub library_id: String,
+    pub path_id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetLibraryPathEnabledInput {
+    pub library_id: String,
+    pub path_id: i64,
+    pub is_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +178,74 @@ pub struct ManagedLibraryRecord {
     pub id: String,
     pub name: String,
     pub library_type: String,
+}
+
+/// A library row with its full admin-configurable settings, for the read-back /
+/// list endpoint. Kept separate from [`ManagedLibraryRecord`] (returned by
+/// create) so the create RETURNING clause stays minimal and untouched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibrarySettingsRecord {
+    pub id: String,
+    pub name: String,
+    pub library_type: String,
+    pub is_hidden: bool,
+    pub preferred_metadata_language: Option<String>,
+    pub preferred_metadata_country: Option<String>,
+    pub preferred_image_language: Option<String>,
+    pub preferred_image_prefer_original: Option<bool>,
+    pub preferred_image_fallback_languages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LibraryListFilter {
+    pub library_type: Option<String>,
+    pub is_hidden: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryListPage {
+    pub records: Vec<LibrarySettingsRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+/// 一条图片条目 + 其 EXIF/缩略图元数据（时间线视图的行）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryPhotoRecord {
+    pub id: String,
+    pub title: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub captured_at: Option<String>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens_model: Option<String>,
+    pub orientation: Option<i16>,
+    pub iso: Option<i32>,
+    pub f_number: Option<f64>,
+    pub exposure_time: Option<String>,
+    pub focal_length: Option<f64>,
+    pub gps_latitude: Option<f64>,
+    pub gps_longitude: Option<f64>,
+    pub gps_altitude: Option<f64>,
+    pub has_thumbnail: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LibraryPhotoListFilter {
+    /// 库 public_id（uuid）。
+    pub library_id: String,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryPhotoListPage {
+    pub records: Vec<LibraryPhotoRecord>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,6 +514,30 @@ pub struct AdminUserFilter {
     pub is_disabled: Option<bool>,
     pub cursor: Option<String>,
     pub limit: i64,
+}
+
+/// 建用户入参（密码已在路由层 hash，repository 只落库）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateAdminUserInput {
+    pub username: String,
+    pub username_normalized: String,
+    pub password_hash: String,
+    pub display_name: Option<String>,
+    /// 角色显示名（如 `Administrator`/`User`/`Guest`），事务内按 `name_normalized` upsert。
+    pub role_name: String,
+    pub role_name_normalized: String,
+    pub allow_download: bool,
+    pub allow_transcode: bool,
+    pub allow_new_device_login: bool,
+}
+
+/// 删用户结果，供路由映射状态码。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteAdminUserOutcome {
+    Deleted,
+    NotFound,
+    /// 目标是系统最后一个管理员，拒绝删除以免锁死系统。
+    LastAdministrator,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1000,9 +1122,12 @@ impl AdminRepository {
                 name,
                 library_type,
                 preferred_metadata_language,
-                preferred_metadata_country
+                preferred_metadata_country,
+                preferred_image_language,
+                preferred_image_prefer_original,
+                preferred_image_fallback_languages
             )
-            values ($1, $2, $3, $4)
+            values ($1, $2, $3, $4, $5, $6, $7)
             returning
                 id,
                 public_id::text as public_id,
@@ -1014,6 +1139,9 @@ impl AdminRepository {
         .bind(&input.library_type)
         .bind(input.preferred_metadata_language.as_deref().map(str::trim))
         .bind(input.preferred_metadata_country.as_deref().map(str::trim))
+        .bind(input.preferred_image_language.as_deref().map(str::trim))
+        .bind(input.preferred_image_prefer_original)
+        .bind(&input.preferred_image_fallback_languages)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -1049,6 +1177,264 @@ impl AdminRepository {
         ManagedLibraryRecord::from_row(library_row)
     }
 
+    /// Lists libraries with their full admin settings, keyset-paginated by
+    /// `(name, id)` so large deployments never offset-scan. `limit + 1` probe
+    /// drives `has_more` without an exact count.
+    pub async fn list_libraries_page(
+        &self,
+        filter: LibraryListFilter,
+    ) -> Result<LibraryListPage, sqlx::Error> {
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select libraries.public_id::text as id,
+                   libraries.name,
+                   libraries.library_type,
+                   libraries.is_hidden,
+                   libraries.preferred_metadata_language,
+                   libraries.preferred_metadata_country,
+                   libraries.preferred_image_language,
+                   libraries.preferred_image_prefer_original,
+                   libraries.preferred_image_fallback_languages
+            from libraries
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join libraries cursor_library
+                  on cursor_library.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                "#,
+            );
+        }
+
+        query.push(" where true");
+
+        if let Some(library_type) = filter.library_type.as_deref() {
+            query.push(" and libraries.library_type = ");
+            query.push_bind(library_type);
+        }
+
+        if let Some(is_hidden) = filter.is_hidden {
+            query.push(" and libraries.is_hidden = ");
+            query.push_bind(is_hidden);
+        }
+
+        if filter.cursor.is_some() {
+            query.push(
+                " and (libraries.name, libraries.id) > (cursor_library.name, cursor_library.id)",
+            );
+        }
+
+        query.push(" order by libraries.name asc, libraries.id asc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
+            .map(LibrarySettingsRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(LibraryListPage {
+            records,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    /// 列出某库的图片时间线：按拍摄时间倒序（无拍摄时间排最后），keyset 翻页。
+    /// 游标 = 上一页末条图片条目的 public_id；join 回它的 `(captured_at, id)` 元组比较。
+    /// 只返回已提取元数据的图片（inner join），未提取的会在 photo worker 跑完后出现。
+    pub async fn list_library_photos_page(
+        &self,
+        filter: LibraryPhotoListFilter,
+    ) -> Result<LibraryPhotoListPage, sqlx::Error> {
+        let page_limit = filter.limit.max(1);
+        let fetch_limit = page_limit.saturating_add(1);
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select mi.public_id::text as id,
+                   mi.title,
+                   pm.width,
+                   pm.height,
+                   pm.captured_at::text as captured_at,
+                   pm.camera_make,
+                   pm.camera_model,
+                   pm.lens_model,
+                   pm.orientation,
+                   pm.iso,
+                   pm.f_number::float8 as f_number,
+                   pm.exposure_time,
+                   pm.focal_length::float8 as focal_length,
+                   pm.gps_latitude,
+                   pm.gps_longitude,
+                   pm.gps_altitude,
+                   (pm.thumbnail_path is not null) as has_thumbnail
+            from media_items mi
+            join media_photo_metadata pm on pm.media_item_id = mi.id
+            join libraries lib on lib.id = mi.library_id
+            "#,
+        );
+
+        if let Some(cursor) = filter.cursor.as_deref() {
+            query.push(
+                r#"
+                join media_items cursor_item
+                  on cursor_item.public_id = case
+                      when
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then
+                "#,
+            );
+            query.push_bind(cursor);
+            query.push(
+                r#"::uuid
+                      else null::uuid
+                  end
+                join media_photo_metadata cursor_pm on cursor_pm.media_item_id = cursor_item.id
+                "#,
+            );
+        }
+
+        query.push(" where mi.is_deleted = false and mi.item_type = 'photo' and lib.public_id = case when ");
+        query.push_bind(filter.library_id.clone());
+        query.push(
+            r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then "#,
+        );
+        query.push_bind(filter.library_id.clone());
+        query.push("::uuid else null::uuid end");
+
+        if filter.cursor.is_some() {
+            // 倒序 keyset：用 coalesce 让 NULL captured_at 落到 epoch（排最后且比较良定义）。
+            query.push(
+                r#" and (coalesce(pm.captured_at, to_timestamp(0)), mi.id)
+                      < (coalesce(cursor_pm.captured_at, to_timestamp(0)), cursor_item.id)"#,
+            );
+        }
+
+        query.push(" order by coalesce(pm.captured_at, to_timestamp(0)) desc, mi.id desc limit ");
+        query.push_bind(fetch_limit);
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+
+        let has_more = rows.len() as i64 > page_limit;
+        let mut records = rows
+            .into_iter()
+            .map(LibraryPhotoRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_more {
+            records.truncate(page_limit as usize);
+        }
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.clone()))
+            .flatten();
+
+        Ok(LibraryPhotoListPage {
+            records,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    /// 解析图片条目 public_id → 内部 bigint id（用于拼缩略图文件名）。
+    /// 只匹配未删除的 photo 条目；返回 None 时调用方映射 404。
+    /// 返回整数 id 而非存储的路径串，杜绝目录穿越。
+    pub async fn resolve_photo_item_id(&self, public_id: &str) -> Result<Option<i64>, sqlx::Error> {
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            select mi.id
+            from media_items mi
+            where mi.item_type = 'photo'
+              and mi.is_deleted = false
+              and mi.public_id = case
+                  when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+            limit 1
+            "#,
+        )
+        .bind(public_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// Replaces a library's admin-configurable settings, addressing it by
+    /// `public_id` through the index-friendly uuid-safe comparison. Returns the
+    /// updated settings, or `None` when no library matches (caller maps to 404).
+    pub async fn update_library_settings(
+        &self,
+        input: UpdateLibrarySettingsInput,
+    ) -> Result<Option<LibrarySettingsRecord>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            update libraries
+            set is_hidden = $2,
+                preferred_metadata_language = $3,
+                preferred_metadata_country = $4,
+                preferred_image_language = $5,
+                preferred_image_prefer_original = $6,
+                preferred_image_fallback_languages = $7,
+                updated_at = now()
+            where public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            returning
+                public_id::text as id,
+                name,
+                library_type,
+                is_hidden,
+                preferred_metadata_language,
+                preferred_metadata_country,
+                preferred_image_language,
+                preferred_image_prefer_original,
+                preferred_image_fallback_languages
+            "#,
+        )
+        .bind(input.library_id.trim())
+        .bind(input.is_hidden)
+        .bind(input.preferred_metadata_language.as_deref().map(str::trim))
+        .bind(input.preferred_metadata_country.as_deref().map(str::trim))
+        .bind(input.preferred_image_language.as_deref().map(str::trim))
+        .bind(input.preferred_image_prefer_original)
+        .bind(&input.preferred_image_fallback_languages)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(LibrarySettingsRecord::from_row).transpose()
+    }
+
     pub async fn add_library_path(
         &self,
         input: AddLibraryPathInput,
@@ -1073,6 +1459,141 @@ impl AdminRepository {
             path: path.path,
             is_enabled: path.is_enabled,
         }))
+    }
+
+    /// Lists a library's configured paths. Returns `None` when the library does
+    /// not exist (caller maps to 404). Path counts per library are small, so no
+    /// pagination is needed.
+    pub async fn list_library_paths(
+        &self,
+        library_id: &str,
+    ) -> Result<Option<Vec<LibraryPathRecord>>, sqlx::Error> {
+        let Some(library_row) = sqlx::query(ADMIN_LIBRARY_BY_PUBLIC_ID_SQL)
+            .bind(library_id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let library_row_id = library_row.try_get::<i64, _>("id")?;
+        let library_public_id = library_row.try_get::<String, _>("public_id")?;
+
+        let rows = sqlx::query(
+            r#"
+            select id::text as id,
+                   path,
+                   is_enabled
+            from library_paths
+            where library_id = $1
+            order by path asc, id asc
+            "#,
+        )
+        .bind(library_row_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let paths = rows
+            .into_iter()
+            .map(|row| {
+                Ok(LibraryPathRecord {
+                    id: row.try_get("id")?,
+                    library_id: library_public_id.clone(),
+                    path: row.try_get("path")?,
+                    is_enabled: row.try_get("is_enabled")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        Ok(Some(paths))
+    }
+
+    /// Removes a single path from a library. The path is addressed by numeric id
+    /// but scoped to the library's `public_id` so a caller can never remove a
+    /// path belonging to a different library. Returns whether a row was removed.
+    pub async fn remove_library_path(
+        &self,
+        selector: LibraryPathSelector,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            delete from library_paths
+            using libraries
+            where library_paths.id = $2
+              and library_paths.library_id = libraries.id
+              and libraries.public_id = case
+                  when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+            "#,
+        )
+        .bind(selector.library_id.trim())
+        .bind(selector.path_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Enables or disables a single library path, scoped to the owning library's
+    /// `public_id`. Returns the updated path, or `None` when no path matches.
+    pub async fn set_library_path_enabled(
+        &self,
+        input: SetLibraryPathEnabledInput,
+    ) -> Result<Option<LibraryPathRecord>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            update library_paths
+            set is_enabled = $3,
+                updated_at = now()
+            from libraries
+            where library_paths.id = $2
+              and library_paths.library_id = libraries.id
+              and libraries.public_id = case
+                  when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+            returning
+                library_paths.id::text as id,
+                libraries.public_id::text as library_id,
+                library_paths.path,
+                library_paths.is_enabled
+            "#,
+        )
+        .bind(input.library_id.trim())
+        .bind(input.path_id)
+        .bind(input.is_enabled)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(LibraryPathRecord {
+                id: row.try_get("id")?,
+                library_id: row.try_get("library_id")?,
+                path: row.try_get("path")?,
+                is_enabled: row.try_get("is_enabled")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Deletes a library by `public_id` through the index-friendly uuid-safe
+    /// comparison. The FK cascade clears its paths and permissions. Returns
+    /// whether a library was removed (caller maps absence to 404).
+    pub async fn delete_library(&self, library_id: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            delete from libraries
+            where public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(library_id.trim())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn queue_library_scan(
@@ -1298,6 +1819,144 @@ impl AdminRepository {
         let row = query.build().fetch_optional(&self.pool).await?;
 
         row.map(AdminUserRecord::from_row).transpose()
+    }
+
+    /// 建一个用户：事务内 upsert 角色拿 `role_id`，再插入 user，回查 [`AdminUserRecord`]。
+    ///
+    /// `username_normalized` 唯一约束兜底并发；命中冲突时返回 `sqlx` 唯一冲突错误，由路由转 409。
+    pub async fn create_admin_user(
+        &self,
+        input: CreateAdminUserInput,
+    ) -> Result<AdminUserRecord, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description, is_builtin)
+            values ($1, $2, 'Managed via admin console', false)
+            on conflict (name_normalized) do update
+                set updated_at = now()
+            returning id
+            "#,
+        )
+        .bind(&input.role_name)
+        .bind(&input.role_name_normalized)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let public_id = sqlx::query_scalar::<_, String>(
+            r#"
+            insert into users (
+                username,
+                username_normalized,
+                password_hash,
+                display_name,
+                role_id,
+                allow_download,
+                allow_transcode,
+                allow_new_device_login
+            )
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            returning public_id::text
+            "#,
+        )
+        .bind(input.username.trim())
+        .bind(&input.username_normalized)
+        .bind(&input.password_hash)
+        .bind(input.display_name.as_deref())
+        .bind(role_id)
+        .bind(input.allow_download)
+        .bind(input.allow_transcode)
+        .bind(input.allow_new_device_login)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        // 回查完整行（device/session 计数为 0），复用 list/update 的同形 select。
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select u.public_id::text as id,
+                   u.username,
+                   u.display_name,
+                   r.name as role_name,
+                   u.is_disabled,
+                   u.allow_download,
+                   u.allow_transcode,
+                   u.allow_new_device_login,
+                   u.password_hash is not null as has_password,
+"#,
+        );
+        push_admin_user_counts_sql(&mut query);
+        query.push(
+            r#"
+                   u.last_login_at::text as last_login_at,
+                   u.created_at::text as created_at,
+                   u.updated_at::text as updated_at
+            from users u
+            join roles r on r.id = u.role_id
+            where u.public_id = "#,
+        );
+        query.push_bind(public_id);
+        query.push("::uuid");
+
+        let row = query.build().fetch_one(&self.pool).await?;
+        AdminUserRecord::from_row(row)
+    }
+
+    /// 删用户。事务内先确认目标不是最后一个管理员（owner/admin/administrator），再删。
+    /// 关联 devices/sessions 等已 `on delete cascade`（见迁移 0002/0003/0069）。
+    pub async fn delete_admin_user(
+        &self,
+        user_id: &str,
+    ) -> Result<DeleteAdminUserOutcome, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let target = sqlx::query_scalar::<_, bool>(
+            r#"
+            select r.name_normalized in ('owner', 'admin', 'administrator')
+            from users u
+            join roles r on r.id = u.role_id
+            where u.public_id = $1::uuid
+            "#,
+        )
+        .bind(user_id.trim())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(is_admin) = target else {
+            return Ok(DeleteAdminUserOutcome::NotFound);
+        };
+
+        if is_admin {
+            let admin_count = sqlx::query_scalar::<_, i64>(
+                r#"
+                select count(*)
+                from users u
+                join roles r on r.id = u.role_id
+                where r.name_normalized in ('owner', 'admin', 'administrator')
+                "#,
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            if admin_count <= 1 {
+                return Ok(DeleteAdminUserOutcome::LastAdministrator);
+            }
+        }
+
+        let deleted = sqlx::query("delete from users where public_id = $1::uuid")
+            .bind(user_id.trim())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+        tx.commit().await?;
+
+        Ok(if deleted == 0 {
+            DeleteAdminUserOutcome::NotFound
+        } else {
+            DeleteAdminUserOutcome::Deleted
+        })
     }
 
     pub async fn list_user_library_permissions(
@@ -3418,6 +4077,48 @@ impl ManagedLibraryRecord {
             id: row.try_get("public_id")?,
             name: row.try_get("name")?,
             library_type: row.try_get("library_type")?,
+        })
+    }
+}
+
+impl LibraryPhotoRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            title: row.try_get("title")?,
+            width: row.try_get("width")?,
+            height: row.try_get("height")?,
+            captured_at: row.try_get("captured_at")?,
+            camera_make: row.try_get("camera_make")?,
+            camera_model: row.try_get("camera_model")?,
+            lens_model: row.try_get("lens_model")?,
+            orientation: row.try_get("orientation")?,
+            iso: row.try_get("iso")?,
+            f_number: row.try_get("f_number")?,
+            exposure_time: row.try_get("exposure_time")?,
+            focal_length: row.try_get("focal_length")?,
+            gps_latitude: row.try_get("gps_latitude")?,
+            gps_longitude: row.try_get("gps_longitude")?,
+            gps_altitude: row.try_get("gps_altitude")?,
+            has_thumbnail: row.try_get("has_thumbnail")?,
+        })
+    }
+}
+
+impl LibrarySettingsRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            library_type: row.try_get("library_type")?,
+            is_hidden: row.try_get("is_hidden")?,
+            preferred_metadata_language: row.try_get("preferred_metadata_language")?,
+            preferred_metadata_country: row.try_get("preferred_metadata_country")?,
+            preferred_image_language: row.try_get("preferred_image_language")?,
+            preferred_image_prefer_original: row.try_get("preferred_image_prefer_original")?,
+            preferred_image_fallback_languages: row
+                .try_get("preferred_image_fallback_languages")
+                .unwrap_or_default(),
         })
     }
 }
@@ -8394,5 +9095,772 @@ mod tests {
             !plan_rows.is_empty(),
             "EXPLAIN should return a query plan for the admin mirror status summary"
         );
+    }
+
+    // Live-DB smoke: validates create_library persists the full library settings
+    // (incl. migration 0079 image-language columns) and list_libraries_page reads
+    // them back with keyset pagination against the real migrated schema. Seeds a
+    // role + owner user + two libraries, asserts the settings round-trip and the
+    // (name, id) keyset cursor walks both rows, then cleans up.
+    //   cargo test -- --ignored library_settings_list_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn library_settings_list_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let role_name = format!("lib-settings-smoke-role-{nonce}");
+        let owner_id = {
+            let role_id = sqlx::query_scalar::<_, i64>(
+                r#"
+                insert into roles (name, name_normalized, description, is_builtin)
+                values ($1, $1, 'library settings smoke role', false)
+                returning id
+                "#,
+            )
+            .bind(&role_name)
+            .fetch_one(&pool)
+            .await
+            .expect("create smoke role");
+
+            let username = format!("lib-settings-smoke-user-{nonce}");
+            sqlx::query_scalar::<_, i64>(
+                r#"
+                insert into users (
+                    username, username_normalized, display_name, role_id,
+                    is_disabled, allow_download, allow_transcode, allow_new_device_login
+                )
+                values ($1, $1, 'Library settings smoke owner', $2, false, true, true, true)
+                returning id
+                "#,
+            )
+            .bind(&username)
+            .bind(role_id)
+            .fetch_one(&pool)
+            .await
+            .expect("create smoke owner user")
+        };
+
+        let repository = AdminRepository::new(pool.clone());
+        let name_a = format!("lib-smoke-a-{nonce}");
+        let name_b = format!("lib-smoke-b-{nonce}");
+
+        // Library A carries an explicit image-language override; B inherits.
+        repository
+            .create_library(CreateLibraryInput {
+                name: name_a.clone(),
+                library_type: "movies".to_owned(),
+                preferred_metadata_language: Some("zh-CN".to_owned()),
+                preferred_metadata_country: Some("CN".to_owned()),
+                preferred_image_language: Some("ja".to_owned()),
+                preferred_image_prefer_original: Some(true),
+                preferred_image_fallback_languages: vec!["none".to_owned(), "en".to_owned()],
+                paths: Vec::new(),
+                owner_user_id: owner_id,
+            })
+            .await
+            .expect("create_library A should execute against the live schema");
+        repository
+            .create_library(CreateLibraryInput {
+                name: name_b.clone(),
+                library_type: "tvshows".to_owned(),
+                preferred_metadata_language: None,
+                preferred_metadata_country: None,
+                preferred_image_language: None,
+                preferred_image_prefer_original: None,
+                preferred_image_fallback_languages: Vec::new(),
+                paths: Vec::new(),
+                owner_user_id: owner_id,
+            })
+            .await
+            .expect("create_library B should execute against the live schema");
+
+        // First page: limit 1, no cursor -> A (name sorts before B), has_more.
+        let first = repository
+            .list_libraries_page(LibraryListFilter {
+                library_type: None,
+                is_hidden: None,
+                cursor: None,
+                limit: 1,
+            })
+            .await
+            .expect("list_libraries_page should execute against the live schema");
+        // The dev DB may hold other libraries; assert our seeded rows specifically
+        // by reading the full settings back through a type filter instead.
+        let movies = repository
+            .list_libraries_page(LibraryListFilter {
+                library_type: Some("movies".to_owned()),
+                is_hidden: Some(false),
+                cursor: None,
+                limit: 500,
+            })
+            .await
+            .expect("list movies libraries should execute");
+        let seeded_a = movies
+            .records
+            .iter()
+            .find(|record| record.name == name_a)
+            .expect("seeded library A should be listed");
+        assert_eq!(seeded_a.preferred_image_language.as_deref(), Some("ja"));
+        assert_eq!(seeded_a.preferred_image_prefer_original, Some(true));
+        assert_eq!(
+            seeded_a.preferred_image_fallback_languages,
+            vec!["none".to_owned(), "en".to_owned()]
+        );
+        assert_eq!(
+            seeded_a.preferred_metadata_language.as_deref(),
+            Some("zh-CN")
+        );
+
+        // Keyset pagination shape: a limit-1 page exposes a cursor we can follow.
+        if first.has_more {
+            assert!(
+                first.next_cursor.is_some(),
+                "limit-1 page should expose a cursor"
+            );
+            let second = repository
+                .list_libraries_page(LibraryListFilter {
+                    library_type: None,
+                    is_hidden: None,
+                    cursor: first.next_cursor.clone(),
+                    limit: 1,
+                })
+                .await
+                .expect("cursor page should execute against the live schema");
+            // The cursor strictly advances: the second page's row differs from the first.
+            if let (Some(p1), Some(p2)) = (first.records.first(), second.records.first()) {
+                assert_ne!(
+                    p1.id, p2.id,
+                    "keyset cursor must advance past the first row"
+                );
+            }
+        }
+
+        // Cleanup: delete the seeded libraries (cascade clears permissions) + user + role.
+        sqlx::query("delete from libraries where name = any($1)")
+            .bind(vec![name_a, name_b])
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke libraries");
+        sqlx::query("delete from users where id = $1")
+            .bind(owner_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke user");
+        sqlx::query("delete from roles where name = $1")
+            .bind(&role_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke role");
+    }
+
+    // Live-DB smoke: validates update_library_settings replaces a library's
+    // settings (incl. migration 0079 image-language columns) addressed by the
+    // uuid-safe public_id comparison against the real schema, and that an absent
+    // id yields None (caller maps to 404). Seeds role+owner+library, mutates,
+    // asserts the round-trip, then cleans up.
+    //   cargo test -- --ignored library_settings_update_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn library_settings_update_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let role_name = format!("lib-update-smoke-role-{nonce}");
+        let role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description, is_builtin)
+            values ($1, $1, 'library update smoke role', false)
+            returning id
+            "#,
+        )
+        .bind(&role_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke role");
+        let username = format!("lib-update-smoke-user-{nonce}");
+        let owner_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into users (
+                username, username_normalized, display_name, role_id,
+                is_disabled, allow_download, allow_transcode, allow_new_device_login
+            )
+            values ($1, $1, 'Library update smoke owner', $2, false, true, true, true)
+            returning id
+            "#,
+        )
+        .bind(&username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke owner user");
+
+        let repository = AdminRepository::new(pool.clone());
+        let library_name = format!("lib-update-smoke-{nonce}");
+        // Create with no image overrides, then update to set them.
+        let created = repository
+            .create_library(CreateLibraryInput {
+                name: library_name.clone(),
+                library_type: "movies".to_owned(),
+                preferred_metadata_language: None,
+                preferred_metadata_country: None,
+                preferred_image_language: None,
+                preferred_image_prefer_original: None,
+                preferred_image_fallback_languages: Vec::new(),
+                paths: Vec::new(),
+                owner_user_id: owner_id,
+            })
+            .await
+            .expect("create_library should execute against the live schema");
+
+        let updated = repository
+            .update_library_settings(UpdateLibrarySettingsInput {
+                library_id: created.id.clone(),
+                is_hidden: true,
+                preferred_metadata_language: Some("zh-CN".to_owned()),
+                preferred_metadata_country: Some("CN".to_owned()),
+                preferred_image_language: Some("ja".to_owned()),
+                preferred_image_prefer_original: Some(true),
+                preferred_image_fallback_languages: vec!["none".to_owned()],
+            })
+            .await
+            .expect("update_library_settings should execute against the live schema")
+            .expect("update should match the seeded library");
+
+        assert!(updated.is_hidden);
+        assert_eq!(
+            updated.preferred_metadata_language.as_deref(),
+            Some("zh-CN")
+        );
+        assert_eq!(updated.preferred_image_language.as_deref(), Some("ja"));
+        assert_eq!(updated.preferred_image_prefer_original, Some(true));
+        assert_eq!(
+            updated.preferred_image_fallback_languages,
+            vec!["none".to_owned()]
+        );
+
+        // A well-formed but unknown id resolves to None (handler maps to 404).
+        let missing = repository
+            .update_library_settings(UpdateLibrarySettingsInput {
+                library_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+                is_hidden: false,
+                preferred_metadata_language: None,
+                preferred_metadata_country: None,
+                preferred_image_language: None,
+                preferred_image_prefer_original: None,
+                preferred_image_fallback_languages: Vec::new(),
+            })
+            .await
+            .expect("update against missing id should execute without error");
+        assert!(missing.is_none(), "unknown library id must yield None");
+
+        // Cleanup.
+        sqlx::query("delete from libraries where name = $1")
+            .bind(&library_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke library");
+        sqlx::query("delete from users where id = $1")
+            .bind(owner_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke user");
+        sqlx::query("delete from roles where name = $1")
+            .bind(&role_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke role");
+    }
+
+    // Live-DB smoke: validates the photo timeline keyset query and thumbnail-id
+    // resolution against the real migrated schema (incl. migration 0080's
+    // media_photo_metadata + the homevideos library_type / photo item_type that
+    // migration 0002 was widened to allow). Seeds a homevideos library with three
+    // photos (two timestamped, one NULL captured_at) and asserts capture-time
+    // ordering, NULL-last placement, and keyset pagination, then cleans up.
+    //   cargo test -- --ignored library_photos_timeline_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn library_photos_timeline_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let role_name = format!("photo-smoke-role-{nonce}");
+        let role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description, is_builtin)
+            values ($1, $1, 'photo smoke role', false)
+            returning id
+            "#,
+        )
+        .bind(&role_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke role");
+        let username = format!("photo-smoke-user-{nonce}");
+        let owner_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into users (
+                username, username_normalized, display_name, role_id,
+                is_disabled, allow_download, allow_transcode, allow_new_device_login
+            )
+            values ($1, $1, 'Photo smoke owner', $2, false, true, true, true)
+            returning id
+            "#,
+        )
+        .bind(&username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke owner user");
+
+        let repository = AdminRepository::new(pool.clone());
+        let library_name = format!("photo-smoke-lib-{nonce}");
+        // homevideos library_type must be accepted by the widened 0002 CHECK.
+        let library = repository
+            .create_library(CreateLibraryInput {
+                name: library_name.clone(),
+                library_type: "homevideos".to_owned(),
+                preferred_metadata_language: None,
+                preferred_metadata_country: None,
+                preferred_image_language: None,
+                preferred_image_prefer_original: None,
+                preferred_image_fallback_languages: Vec::new(),
+                paths: Vec::new(),
+                owner_user_id: owner_id,
+            })
+            .await
+            .expect("create homevideos library should execute against live schema");
+        let library_public_id = library.id.clone();
+        let library_internal_id =
+            sqlx::query_scalar::<_, i64>("select id from libraries where public_id = $1::uuid")
+                .bind(&library_public_id)
+                .fetch_one(&pool)
+                .await
+                .expect("resolve internal library id");
+
+        // Three photos: newest, older, and one with NULL captured_at (sorts last).
+        // photo item_type must be accepted by the widened 0002 CHECK.
+        let photo_specs = [
+            ("photo-newest", Some("2024-06-01T12:00:00")),
+            ("photo-older", Some("2020-01-15T09:30:00")),
+            ("photo-undated", None::<&str>),
+        ];
+        let mut item_public_ids = Vec::new();
+        for (title, captured_at) in photo_specs {
+            let item_id = sqlx::query_scalar::<_, i64>(
+                r#"
+                insert into media_items (library_id, item_type, title, sort_title)
+                values ($1, 'photo', $2, $2)
+                returning id
+                "#,
+            )
+            .bind(library_internal_id)
+            .bind(title)
+            .fetch_one(&pool)
+            .await
+            .expect("insert photo media item");
+            let public_id = sqlx::query_scalar::<_, String>(
+                "select public_id::text from media_items where id = $1",
+            )
+            .bind(item_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read item public id");
+            item_public_ids.push(public_id);
+            sqlx::query(
+                r#"
+                insert into media_photo_metadata (
+                    media_item_id, width, height, captured_at, camera_model, thumbnail_path
+                )
+                values (
+                    $1, 4000, 3000,
+                    case when $2::text is null then null else $2::timestamptz end,
+                    'Test Cam', $3
+                )
+                "#,
+            )
+            .bind(item_id)
+            .bind(captured_at)
+            .bind(format!("/thumbs/{item_id}.jpg"))
+            .execute(&pool)
+            .await
+            .expect("insert photo metadata");
+        }
+
+        // Full page: capture-time desc, NULL captured_at last.
+        let page = repository
+            .list_library_photos_page(LibraryPhotoListFilter {
+                library_id: library_public_id.clone(),
+                cursor: None,
+                limit: 50,
+            })
+            .await
+            .expect("list photos page should execute against live schema");
+        let titles: Vec<&str> = page.records.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["photo-newest", "photo-older", "photo-undated"],
+            "photos must order by captured_at desc with NULL last"
+        );
+        assert_eq!(page.records[0].width, Some(4000));
+        assert!(page.records[0].has_thumbnail);
+        assert_eq!(page.records[0].camera_model.as_deref(), Some("Test Cam"));
+        assert!(!page.has_more);
+
+        // Keyset: limit-1 yields a cursor; following it returns the next photo.
+        let first = repository
+            .list_library_photos_page(LibraryPhotoListFilter {
+                library_id: library_public_id.clone(),
+                cursor: None,
+                limit: 1,
+            })
+            .await
+            .expect("first keyset page should execute");
+        assert_eq!(first.records.len(), 1);
+        assert_eq!(first.records[0].title, "photo-newest");
+        assert!(first.has_more);
+        let cursor = first.next_cursor.expect("first page must expose a cursor");
+        let second = repository
+            .list_library_photos_page(LibraryPhotoListFilter {
+                library_id: library_public_id.clone(),
+                cursor: Some(cursor),
+                limit: 1,
+            })
+            .await
+            .expect("second keyset page should execute");
+        assert_eq!(second.records.len(), 1);
+        assert_eq!(
+            second.records[0].title, "photo-older",
+            "keyset cursor must advance past the first photo"
+        );
+
+        // Thumbnail id resolution: known photo resolves, unknown id yields None.
+        let resolved = repository
+            .resolve_photo_item_id(&item_public_ids[0])
+            .await
+            .expect("resolve photo item id should execute");
+        assert!(
+            resolved.is_some(),
+            "seeded photo must resolve to internal id"
+        );
+        let missing = repository
+            .resolve_photo_item_id("00000000-0000-0000-0000-000000000000")
+            .await
+            .expect("resolve missing id should execute without error");
+        assert!(missing.is_none(), "unknown photo id must yield None");
+
+        // Cleanup (media_items cascade removes media_photo_metadata via FK).
+        sqlx::query("delete from libraries where id = $1")
+            .bind(library_internal_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke library");
+        sqlx::query("delete from users where id = $1")
+            .bind(owner_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke user");
+        sqlx::query("delete from roles where name = $1")
+            .bind(&role_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke role");
+    }
+
+    // and library delete against the real migrated schema, including the
+    // library-scoped uuid-safe addressing that prevents cross-library path
+    // manipulation. Seeds role+owner+library, walks the full lifecycle, then
+    // confirms delete_library cascades the remaining paths.
+    //   cargo test -- --ignored library_path_lifecycle_executes_against_live_schema
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn library_path_lifecycle_executes_against_live_schema() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let role_name = format!("lib-path-smoke-role-{nonce}");
+        let role_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into roles (name, name_normalized, description, is_builtin)
+            values ($1, $1, 'library path smoke role', false)
+            returning id
+            "#,
+        )
+        .bind(&role_name)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke role");
+        let username = format!("lib-path-smoke-user-{nonce}");
+        let owner_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into users (
+                username, username_normalized, display_name, role_id,
+                is_disabled, allow_download, allow_transcode, allow_new_device_login
+            )
+            values ($1, $1, 'Library path smoke owner', $2, false, true, true, true)
+            returning id
+            "#,
+        )
+        .bind(&username)
+        .bind(role_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create smoke owner user");
+
+        let repository = AdminRepository::new(pool.clone());
+        let library_name = format!("lib-path-smoke-{nonce}");
+        let library = repository
+            .create_library(CreateLibraryInput {
+                name: library_name.clone(),
+                library_type: "movies".to_owned(),
+                preferred_metadata_language: None,
+                preferred_metadata_country: None,
+                preferred_image_language: None,
+                preferred_image_prefer_original: None,
+                preferred_image_fallback_languages: Vec::new(),
+                paths: Vec::new(),
+                owner_user_id: owner_id,
+            })
+            .await
+            .expect("create_library should execute against the live schema");
+
+        // Add two paths.
+        let path_a = repository
+            .add_library_path(AddLibraryPathInput {
+                library_id: library.id.clone(),
+                path: format!("/media/smoke-a-{nonce}"),
+            })
+            .await
+            .expect("add path A should execute")
+            .expect("library should exist for path A");
+        let path_b = repository
+            .add_library_path(AddLibraryPathInput {
+                library_id: library.id.clone(),
+                path: format!("/media/smoke-b-{nonce}"),
+            })
+            .await
+            .expect("add path B should execute")
+            .expect("library should exist for path B");
+
+        // List: both present, enabled by default.
+        let listed = repository
+            .list_library_paths(&library.id)
+            .await
+            .expect("list paths should execute against the live schema")
+            .expect("library should exist");
+        assert_eq!(listed.len(), 2, "both seeded paths should list");
+        assert!(listed.iter().all(|path| path.is_enabled));
+
+        // Toggle path A off, scoped to the owning library.
+        let path_a_id: i64 = path_a.id.parse().expect("path id is numeric");
+        let toggled = repository
+            .set_library_path_enabled(SetLibraryPathEnabledInput {
+                library_id: library.id.clone(),
+                path_id: path_a_id,
+                is_enabled: false,
+            })
+            .await
+            .expect("toggle should execute against the live schema")
+            .expect("path A should match");
+        assert!(!toggled.is_enabled, "path A should be disabled");
+
+        // A toggle against a non-existent library id must not match.
+        let cross = repository
+            .set_library_path_enabled(SetLibraryPathEnabledInput {
+                library_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+                path_id: path_a_id,
+                is_enabled: true,
+            })
+            .await
+            .expect("cross-library toggle should execute without error");
+        assert!(cross.is_none(), "path must be scoped to its own library");
+
+        // Remove path B, scoped to the library.
+        let path_b_id: i64 = path_b.id.parse().expect("path id is numeric");
+        let removed = repository
+            .remove_library_path(LibraryPathSelector {
+                library_id: library.id.clone(),
+                path_id: path_b_id,
+            })
+            .await
+            .expect("remove should execute against the live schema");
+        assert!(removed, "path B should be removed");
+        let after_remove = repository
+            .list_library_paths(&library.id)
+            .await
+            .expect("list after remove should execute")
+            .expect("library should exist");
+        assert_eq!(after_remove.len(), 1, "one path should remain");
+
+        // Delete the library: cascade clears the remaining path + permissions.
+        let deleted = repository
+            .delete_library(&library.id)
+            .await
+            .expect("delete_library should execute against the live schema");
+        assert!(deleted, "library should be deleted");
+        let after_delete = repository
+            .list_library_paths(&library.id)
+            .await
+            .expect("list after delete should execute");
+        assert!(after_delete.is_none(), "deleted library should not list");
+        let remaining_paths: i64 =
+            sqlx::query_scalar("select count(*) from library_paths where id = any($1)")
+                .bind(vec![path_a_id, path_b_id])
+                .fetch_one(&pool)
+                .await
+                .expect("count remaining paths");
+        assert_eq!(remaining_paths, 0, "delete must cascade the paths");
+
+        // Cleanup the owner + role (library + paths already gone).
+        sqlx::query("delete from users where id = $1")
+            .bind(owner_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke user");
+        sqlx::query("delete from roles where name = $1")
+            .bind(&role_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke role");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL from ./scripts/dev-deps.ps1"]
+    async fn create_and_delete_admin_user_round_trips() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://fbz:fbz@127.0.0.1:5432/fbz".to_owned());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to live PostgreSQL");
+        crate::db::migrate(&pool).await.expect("run migrations");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let username = format!("0000_user_crud_smoke_{nonce}");
+        let role_name = format!("User Crud Smoke {nonce}");
+        let role_normalized = format!("user-crud-smoke-{nonce}");
+        let repository = AdminRepository::new(pool.clone());
+
+        // 建用户成功。
+        let created = repository
+            .create_admin_user(CreateAdminUserInput {
+                username: username.clone(),
+                username_normalized: username.to_ascii_lowercase(),
+                password_hash: "argon2-placeholder-hash".to_owned(),
+                display_name: Some("Crud Smoke".to_owned()),
+                role_name: role_name.clone(),
+                role_name_normalized: role_normalized.clone(),
+                allow_download: false,
+                allow_transcode: true,
+                allow_new_device_login: true,
+            })
+            .await
+            .expect("create user");
+        assert_eq!(created.role_name, role_name);
+        assert!(created.has_password);
+        assert_eq!(created.device_count, 0);
+
+        // 重名再建 → 唯一冲突。
+        let dup = repository
+            .create_admin_user(CreateAdminUserInput {
+                username: username.clone(),
+                username_normalized: username.to_ascii_lowercase(),
+                password_hash: "argon2-placeholder-hash".to_owned(),
+                display_name: None,
+                role_name: role_name.clone(),
+                role_name_normalized: role_normalized.clone(),
+                allow_download: false,
+                allow_transcode: true,
+                allow_new_device_login: true,
+            })
+            .await;
+        assert!(
+            dup.as_ref()
+                .err()
+                .and_then(|err| err.as_database_error())
+                .and_then(|err| err.code())
+                .is_some_and(|code| code == "23505"),
+            "expected unique violation on duplicate username"
+        );
+
+        // 删非管理员用户成功。
+        let outcome = repository
+            .delete_admin_user(&created.id)
+            .await
+            .expect("delete user");
+        assert_eq!(outcome, DeleteAdminUserOutcome::Deleted);
+
+        // 再删 → NotFound。
+        let missing = repository
+            .delete_admin_user(&created.id)
+            .await
+            .expect("delete missing user");
+        assert_eq!(missing, DeleteAdminUserOutcome::NotFound);
+
+        sqlx::query("delete from roles where name_normalized = $1")
+            .bind(&role_normalized)
+            .execute(&pool)
+            .await
+            .expect("cleanup smoke role");
     }
 }

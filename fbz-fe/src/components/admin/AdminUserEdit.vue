@@ -2,6 +2,11 @@
 import { useAuthStore } from "@/stores/auth.ts";
 import { useLibraryStore } from "@/stores/library.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import {
+  listUserLibraryPermissions,
+  updateUserLibraryPermission,
+} from "@/service/modules/admin.ts";
+import type { UserLibraryPermission } from "@/types/admin.ts";
 
 const route = useRoute();
 const router = useRouter();
@@ -12,11 +17,17 @@ const uiStore = useUiStore();
 const isCreate = computed(() => route.name === "admin-users-create");
 const userId = computed(() => route.params.id as string);
 
+/** 后端策略：管理员/用户密码至少 6 位。 */
+const PASSWORD_MIN_LEN = 6;
+
 const username = ref("");
 const password = ref("");
 const role = ref<"admin" | "user" | "guest">("user");
 const active = ref(true);
 const selectedLibraries = ref<string[]>([]);
+const libraryPermissions = ref<UserLibraryPermission[]>([]);
+const permissionsLoading = ref(false);
+const saving = ref(false);
 
 const roleOptions = [
   { label: "超级管理员 (最高权限)", value: "admin" },
@@ -24,57 +35,92 @@ const roleOptions = [
   { label: "访客账号 (只读预览，禁止播放)", value: "guest" },
 ];
 
-onMounted(() => {
+onMounted(async () => {
+  if (!libraryStore.loaded) {
+    await libraryStore.loadFromBackend();
+  }
   if (isCreate.value) {
     username.value = "";
     password.value = "";
     role.value = "user";
     active.value = true;
     selectedLibraries.value = libraryStore.libraries.map((l) => l.id);
+    return;
+  }
+  // 编辑态：确保用户列表已加载，再回填。
+  if (authStore.users.length === 0) {
+    await authStore.loadUsers();
+  }
+  const user = authStore.users.find((u) => u.id === userId.value);
+  if (user) {
+    username.value = user.username;
+    role.value = user.role;
+    active.value = user.active;
+    selectedLibraries.value = [...user.libraries];
+    await loadLibraryPermissions();
   } else {
-    const user = authStore.users.find((u) => u.id === userId.value);
-    if (user) {
-      username.value = user.username;
-      role.value = user.role;
-      active.value = user.active;
-      selectedLibraries.value = [...user.libraries];
-    } else {
-      uiStore.showToast("找不到该用户！", "error");
-      router.push("/admin/users");
-    }
+    uiStore.showToast("找不到该用户！", "error");
+    router.push("/admin/users");
   }
 });
 
-function handleSave() {
-  if (!username.value.trim()) {
-    uiStore.showToast("请输入用户名！", "warning");
+async function loadLibraryPermissions() {
+  permissionsLoading.value = true;
+  try {
+    libraryPermissions.value = await listUserLibraryPermissions(userId.value);
+  } catch {
+    uiStore.showToast("加载用户媒体库权限失败。", "error");
+  } finally {
+    permissionsLoading.value = false;
+  }
+}
+
+async function handleSave() {
+  if (saving.value) return;
+
+  if (isCreate.value) {
+    if (!username.value.trim()) {
+      uiStore.showToast("请输入用户名！", "warning");
+      return;
+    }
+    if (password.value.length < PASSWORD_MIN_LEN) {
+      uiStore.showToast(`登录密码至少需要 ${PASSWORD_MIN_LEN} 位！`, "warning");
+      return;
+    }
+    saving.value = true;
+    const ok = await authStore.addUser({
+      username: username.value.trim(),
+      password: password.value,
+      role: role.value,
+      active: active.value,
+    });
+    saving.value = false;
+    if (ok) router.push("/admin/users");
     return;
   }
 
-  if (isCreate.value) {
-    if (!password.value) {
-      uiStore.showToast("请输入登录密码！", "warning");
+  // 编辑态：后端只支持改启用态（policy）。用户名/角色/密码/媒体库授权暂无运行时接口。
+  saving.value = true;
+  const ok = await authStore.updateUser(userId.value, { active: active.value });
+  if (ok && libraryPermissions.value.length > 0) {
+    try {
+      await Promise.all(
+        libraryPermissions.value.map((permission) =>
+          updateUserLibraryPermission(userId.value, permission.libraryId, {
+            canView: permission.canView,
+            canDownload: permission.canDownload,
+            canTranscode: permission.canTranscode,
+          }),
+        ),
+      );
+    } catch {
+      saving.value = false;
+      uiStore.showToast("保存媒体库授权失败。", "error");
       return;
     }
-    authStore.addUser({
-      username: username.value.trim(),
-      role: role.value,
-      active: active.value,
-      libraries: selectedLibraries.value,
-    });
-  } else {
-    authStore.updateUser(userId.value, {
-      username: username.value.trim(),
-      role: role.value,
-      active: active.value,
-      libraries: selectedLibraries.value,
-    });
-    if (password.value) {
-      uiStore.showToast(`用户【${username.value}】的密码已重置。`, "success");
-    }
   }
-
-  router.push("/admin/users");
+  saving.value = false;
+  if (ok) router.push("/admin/users");
 }
 
 function handleCancel() {
@@ -97,8 +143,8 @@ function handleCancel() {
           <p class="settings-hint">
             {{
               isCreate
-                ? "创建自托管系统的新访问账号及相应的媒体库授权。"
-                : "修改系统用户基本信息、系统控制权限组和授权媒体库。"
+                ? `创建自托管系统的新访问账号。密码至少 ${PASSWORD_MIN_LEN} 位。`
+                : "编辑态支持切换账号启用状态，并按媒体库设置浏览、下载和转码权限。"
             }}
           </p>
 
@@ -111,19 +157,17 @@ function handleCancel() {
                 type="text"
                 placeholder="输入用户名"
                 class="control-input"
-                :disabled="!isCreate && username === 'admin'"
+                :disabled="!isCreate"
               />
             </div>
 
-            <div class="form-group">
-              <label for="edit-password">
-                {{ isCreate ? "登录密码" : "重置密码 (留空则不修改)" }}
-              </label>
+            <div v-if="isCreate" class="form-group">
+              <label for="edit-password">登录密码（至少 {{ PASSWORD_MIN_LEN }} 位）</label>
               <input
                 id="edit-password"
                 v-model="password"
                 type="password"
-                :placeholder="isCreate ? '输入登录密码' : '重置新密码'"
+                placeholder="输入登录密码"
                 class="control-input"
               />
             </div>
@@ -135,7 +179,7 @@ function handleCancel() {
                 :options="roleOptions"
                 aria-labelledby="edit-role-label"
                 class="w-full-select"
-                :disabled="!isCreate && username === 'admin'"
+                :disabled="!isCreate"
               />
             </div>
 
@@ -145,16 +189,12 @@ function handleCancel() {
                 <span class="desc">若禁用，该用户将无法点播流媒体或访问控制台。</span>
               </div>
               <label class="glow-switch">
-                <input
-                  type="checkbox"
-                  v-model="active"
-                  :disabled="!isCreate && username === 'admin'"
-                />
+                <input type="checkbox" v-model="active" />
                 <span class="switch-slide-thumb" />
               </label>
             </div>
 
-            <div class="form-group full-width">
+            <div v-if="isCreate" class="form-group full-width">
               <label>授权可访问的媒体库</label>
               <div class="libraries-checklist">
                 <label
@@ -168,12 +208,49 @@ function handleCancel() {
                 </label>
               </div>
             </div>
+
+            <div v-else class="form-group full-width">
+              <label>媒体库授权</label>
+              <div v-if="permissionsLoading" class="permissions-empty">正在加载媒体库权限...</div>
+              <div v-else-if="libraryPermissions.length === 0" class="permissions-empty">
+                当前没有可授权媒体库。请先创建媒体库。
+              </div>
+              <div v-else class="permissions-list">
+                <div
+                  v-for="permission in libraryPermissions"
+                  :key="permission.libraryId"
+                  class="permission-row"
+                >
+                  <div class="permission-main">
+                    <span class="permission-name">{{ permission.libraryName }}</span>
+                    <span class="permission-meta">
+                      {{ permission.libraryType }}
+                      {{ permission.permissionConfigured ? "已配置显式权限" : "继承全局用户策略" }}
+                    </span>
+                  </div>
+                  <label class="permission-toggle">
+                    <input v-model="permission.canView" type="checkbox" />
+                    <span>浏览</span>
+                  </label>
+                  <label class="permission-toggle">
+                    <input v-model="permission.canDownload" type="checkbox" />
+                    <span>下载</span>
+                  </label>
+                  <label class="permission-toggle">
+                    <input v-model="permission.canTranscode" type="checkbox" />
+                    <span>转码</span>
+                  </label>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
         <div class="card-actions-row">
           <button type="button" class="footer-btn secondary" @click="handleCancel">取消</button>
-          <button type="button" class="footer-btn primary" @click="handleSave">保存配置</button>
+          <button type="button" class="footer-btn primary" :disabled="saving" @click="handleSave">
+            {{ saving ? "保存中…" : "保存配置" }}
+          </button>
         </div>
       </section>
     </div>
@@ -436,6 +513,72 @@ function handleCancel() {
   }
 }
 
+.permissions-empty {
+  background: var(--fbz-color-panel);
+  border: 1px dashed var(--fbz-color-line-soft);
+  border-radius: var(--fbz-radius-control);
+  color: var(--fbz-color-text-muted);
+  padding: var(--fbz-space-4);
+  font-size: var(--fbz-font-size-sm);
+  text-align: center;
+}
+
+.permissions-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fbz-space-2);
+  background: var(--fbz-color-panel);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: var(--fbz-radius-control);
+  padding: var(--fbz-space-3);
+}
+
+.permission-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, auto);
+  align-items: center;
+  gap: var(--fbz-space-3);
+  padding: 10px 12px;
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: var(--fbz-radius-control);
+  background: var(--fbz-color-panel-strong);
+}
+
+.permission-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.permission-name {
+  color: var(--fbz-color-text);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-meta {
+  color: var(--fbz-color-text-muted);
+  font-size: var(--fbz-font-size-xs);
+}
+
+.permission-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fbz-color-text-soft);
+  font-size: var(--fbz-font-size-xs);
+  font-weight: 700;
+  cursor: pointer;
+
+  input {
+    accent-color: var(--fbz-color-brand-500);
+  }
+}
+
 .card-actions-row {
   padding: var(--fbz-space-4) var(--fbz-space-5);
   border-top: 1px solid var(--fbz-color-line-soft);
@@ -475,6 +618,13 @@ function handleCancel() {
       color: var(--fbz-color-text);
       border-color: var(--fbz-color-line-bright);
     }
+  }
+}
+
+@media (max-width: 720px) {
+  .permission-row {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
   }
 }
 </style>

@@ -288,7 +288,11 @@ fn media_folder_to_virtual_folder(record: UserMediaFolderRecord) -> VirtualFolde
             .map(|subfolder| subfolder.path)
             .collect(),
     );
-    let mut library_options = LibraryDefaultOptionsDto::for_content_type(&record.library_type);
+    // 经单一事实源把存储的 library_type 规范化为 Emby CollectionType；未知值原样保留。
+    let collection_type = crate::media_types::LibraryType::parse(&record.library_type)
+        .map(|kind| kind.collection_type().to_owned())
+        .unwrap_or(record.library_type);
+    let mut library_options = LibraryDefaultOptionsDto::for_content_type(&collection_type);
     library_options.path_infos = locations
         .iter()
         .map(|path| LibraryMediaPathInfoDto {
@@ -302,7 +306,7 @@ fn media_folder_to_virtual_folder(record: UserMediaFolderRecord) -> VirtualFolde
     VirtualFolderInfoDto {
         name: record.name,
         locations,
-        collection_type: record.library_type,
+        collection_type,
         library_options,
         item_id: record.id.clone(),
         id: record.id.clone(),

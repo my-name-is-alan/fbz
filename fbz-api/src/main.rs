@@ -7,7 +7,7 @@ use fbz_api::{
     config::{Config, NodeRole},
     db,
     events::worker::spawn_event_stream_mirror_worker,
-    media::{probe::spawn_probe_worker, tools::resolve_media_tools},
+    media::{photo::spawn_photo_worker, probe::spawn_probe_worker, tools::resolve_media_tools},
     metadata::worker::spawn_metadata_worker,
     notifications::worker::spawn_notification_worker,
     plugins::worker::spawn_plugin_worker,
@@ -23,6 +23,15 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // 加载 .env（若存在）到进程环境，再读配置。dotenvy 不覆盖已存在的真实环境变量，
+    // 故显式导出的变量仍优先于 .env——与 README「copy .env.example to .env」的约定一致。
+    // 文件缺失（生产用真实环境变量）不是错误，忽略即可。
+    match dotenvy::dotenv() {
+        Ok(path) => eprintln!("loaded environment from {}", path.display()),
+        Err(err) if err.not_found() => {}
+        Err(err) => eprintln!("failed to load .env: {err}"),
+    }
+
     let config = Config::from_env()?;
     init_tracing(&config.telemetry);
     let media_tools = resolve_media_tools(&config.media_tools)?;
@@ -151,11 +160,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         None
     };
+    let photo_worker = if should_start_photo_worker(&config) {
+        Some(spawn_photo_worker(
+            database.clone(),
+            config.photo_worker.clone(),
+            config.storage.artwork_cache_dir.join("photo-thumbnails"),
+            shutdown_tx.subscribe(),
+        ))
+    } else {
+        info!(
+            photo_worker_enabled = config.photo_worker.enabled,
+            node_role = config.node.role.as_str(),
+            "photo worker not started"
+        );
+        None
+    };
     let metadata_worker = if should_start_metadata_worker(&config) {
         Some(spawn_metadata_worker(
             database.clone(),
             config.metadata.clone(),
             config.proxy.clone(),
+            config.secrets.clone(),
+            config.storage.artwork_cache_dir.clone(),
             config.metadata_worker.clone(),
             shutdown_tx.subscribe(),
         ))
@@ -219,6 +245,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             warn!(error = %err, "probe worker join failed");
         }
     }
+    if let Some(photo_worker) = photo_worker {
+        if let Err(err) = photo_worker.await {
+            warn!(error = %err, "photo worker join failed");
+        }
+    }
     if let Some(metadata_worker) = metadata_worker {
         if let Err(err) = metadata_worker.await {
             warn!(error = %err, "metadata worker join failed");
@@ -258,6 +289,10 @@ fn should_start_transcode_worker(config: &Config) -> bool {
 
 fn should_start_probe_worker(config: &Config) -> bool {
     config.probe_worker.enabled && matches!(config.node.role, NodeRole::All | NodeRole::Worker)
+}
+
+fn should_start_photo_worker(config: &Config) -> bool {
+    config.photo_worker.enabled && matches!(config.node.role, NodeRole::All | NodeRole::Worker)
 }
 
 fn should_start_metadata_worker(config: &Config) -> bool {

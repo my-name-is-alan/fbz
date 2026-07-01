@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted } from "vue";
 import type { SeasonInfo } from "@/types/media.ts";
-import { imageUrl } from "@/service/modules/tmdb.ts";
 
 interface Props {
   seasons: SeasonInfo[];
@@ -145,7 +144,7 @@ const seasonCards = computed<SeasonCard[]>(() =>
     return {
       ...season,
       airYear,
-      poster: imageUrl(season.poster_path, "w500"),
+      poster: season.poster_path ?? undefined,
       rating,
       hasHistory: season.season_number === props.defaultSeason && props.watchedEpisode != null,
     };
@@ -162,7 +161,7 @@ const activeSeasonCard = computed(() =>
   seasonCards.value.find((season) => season.season_number === activeSeason.value?.season_number),
 );
 
-const activeSeasonPoster = computed(() => imageUrl(activeSeason.value?.poster_path, "w500"));
+const activeSeasonPoster = computed(() => activeSeason.value?.poster_path ?? undefined);
 const activeSeasonBackdrop = computed(() => props.backdrop ?? activeSeasonPoster.value);
 
 const activeSeasonMeta = computed(() => {

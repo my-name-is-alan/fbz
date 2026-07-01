@@ -109,7 +109,12 @@ useEventListener(window, "keydown", (e) => {
         :aria-expanded="accountMenuOpen"
         @click.stop="accountMenuOpen = !accountMenuOpen"
       >
-        {{ authStore.nickname.charAt(0).toUpperCase() }}
+        <BaseAvatar
+          :user-id="authStore.userId"
+          :name="authStore.nickname"
+          :version="authStore.avatarVersion"
+          :size="34"
+        />
       </button>
 
       <div v-if="accountMenuOpen" class="account-dropdown" role="menu" aria-label="用户账户菜单">
@@ -338,23 +343,19 @@ useEventListener(window, "keydown", (e) => {
   width: 34px;
   height: 34px;
   flex: 0 0 auto;
+  padding: 0;
   border-radius: 50%;
-  background: var(--fbz-color-panel-strong);
+  background: none;
   border: 1px solid var(--fbz-color-line);
   display: grid;
   place-content: center;
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 700;
-  color: var(--fbz-color-text-soft);
+  overflow: hidden;
   cursor: pointer;
-  transition:
-    border-color var(--fbz-motion-fast),
-    color var(--fbz-motion-fast);
+  transition: border-color var(--fbz-motion-fast);
 
   &:hover,
   &[aria-expanded="true"] {
     border-color: var(--fbz-color-line-bright);
-    color: var(--fbz-color-text);
   }
 }
 

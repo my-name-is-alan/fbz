@@ -1,7 +1,7 @@
 /**
  * 一次性抓取脚本：从 TMDB 拉取大量真实数据，烤成两个文件：
- *   src/service/modules/tmdb-catalog.json  —— 轻量目录（数百条，用于首页/媒体库网格），随包加载
- *   src/service/modules/tmdb-details.json  —— 完整详情（演职员/相似/系列/季集），详情页懒加载
+ *   src/service/mock/tmdb-catalog.json  —— 轻量目录（数百条，用于首页/媒体库网格），随包加载
+ *   src/service/mock/tmdb-details.json  —— 完整详情（演职员/相似/系列/季集），详情页懒加载
  *
  *   node scripts/fetch-tmdb.mjs
  *
@@ -289,8 +289,8 @@ async function main() {
     items: catalogRaw,
   };
 
-  writeFileSync(resolve(root, "src/service/modules/tmdb-catalog.json"), JSON.stringify(catalog));
-  writeFileSync(resolve(root, "src/service/modules/tmdb-details.json"), JSON.stringify(details));
+  writeFileSync(resolve(root, "src/service/mock/tmdb-catalog.json"), JSON.stringify(catalog));
+  writeFileSync(resolve(root, "src/service/mock/tmdb-details.json"), JSON.stringify(details));
 
   console.log(
     `\n完成：目录 ${catalogRaw.length} 条 · 详情 ${Object.keys(details).length} 条（含系列 ${collectionList.length}、演员 ${personList.length}）`,

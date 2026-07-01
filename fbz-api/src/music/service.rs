@@ -15,9 +15,7 @@ use crate::{
         ArtistListInput, BrowseItemsInput, ItemQueryOptions, ItemSortField, ItemTypeFilter,
         LibraryRepository, MediaItemBrowseRecord, SortDirection, StringListFilter,
     },
-    music::dto::{
-        AlbumDetailDto, AlbumDto, ArtistDetailDto, ArtistDto, ArtistListDto, TrackDto,
-    },
+    music::dto::{AlbumDetailDto, AlbumDto, ArtistDetailDto, ArtistDto, ArtistListDto, TrackDto},
 };
 
 /// Emby tick = 100ns，1 秒 = 10_000_000 ticks。
@@ -32,7 +30,9 @@ pub async fn list_artists(
     library_id: String,
 ) -> Result<ArtistListDto, sqlx::Error> {
     let repository = LibraryRepository::new(database);
-    let result = repository.list_user_artists(artist_input(user.id, library_id)).await?;
+    let result = repository
+        .list_user_artists(artist_input(user.id, library_id))
+        .await?;
     Ok(ArtistListDto {
         items: result
             .items

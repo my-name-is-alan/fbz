@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { MediaItem, PersonDetail } from "@/types/media.ts";
-import { getPersonDetail, imageUrl } from "@/service/modules/tmdb.ts";
+import { loadPersonDetail } from "@/service/modules/detail.ts";
 
 const route = useRoute();
-const id = computed(() => Number(route.params.id));
+const id = computed(() => String(route.params.id ?? ""));
 const person = ref<PersonDetail>();
 
 const isExpanded = ref(false);
@@ -27,7 +27,7 @@ const sortOptions = [
 watch(
   id,
   async (v) => {
-    person.value = await getPersonDetail(v);
+    person.value = await loadPersonDetail(v);
   },
   { immediate: true },
 );
@@ -69,7 +69,7 @@ const knownFor = computed<MediaItem[]>(
       detailType: c.type,
       title: c.title,
       meta: c.character ? `饰 ${c.character}` : "",
-      poster: imageUrl(c.poster_path, "w500"),
+      poster: c.poster_path ?? undefined,
       rating: c.rating ?? undefined,
       year: c.year ?? undefined,
     })) ?? [],
@@ -125,7 +125,7 @@ const creditSummary = computed(() => {
     <div class="person-backdrop">
       <img
         v-if="person.profile_path"
-        :src="imageUrl(person.profile_path, 'original')"
+        :src="person.profile_path"
         :alt="person.name"
         loading="lazy"
       />
@@ -138,7 +138,7 @@ const creditSummary = computed(() => {
       <div class="head">
         <div class="photo">
           <MediaPoster
-            :src="imageUrl(person.profile_path, 'w500')"
+            :src="person.profile_path ?? undefined"
             :title="person.name"
             ratio="poster"
           />
@@ -271,7 +271,7 @@ const creditSummary = computed(() => {
   </div>
 
   <main v-else class="detail-missing">
-    <p>未找到该人物</p>
+    <p>未找到该人物，或后端尚未提供该人物详情。</p>
     <RouterLink to="/" class="link">返回首页</RouterLink>
   </main>
 </template>

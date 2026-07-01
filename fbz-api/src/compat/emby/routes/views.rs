@@ -106,8 +106,16 @@ fn user_library_view_to_dto(record: UserLibraryViewRecord) -> UserViewDto {
     UserViewDto::from(LibraryViewSource {
         id: record.id,
         name: record.name,
-        collection_type: record.library_type,
+        collection_type: library_type_to_collection_type(&record.library_type),
     })
+}
+
+/// 把存储的 `library_type` 映射为 Emby 客户端识别的 `CollectionType`。
+/// 经单一事实源 [`crate::media_types::LibraryType`]，未知值原样保留作防御。
+fn library_type_to_collection_type(library_type: &str) -> String {
+    crate::media_types::LibraryType::parse(library_type)
+        .map(|kind| kind.collection_type().to_owned())
+        .unwrap_or_else(|| library_type.to_owned())
 }
 
 #[cfg(test)]
