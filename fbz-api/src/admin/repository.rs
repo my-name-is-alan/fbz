@@ -119,6 +119,93 @@ pub struct LibraryPathSelector {
     pub path_id: i64,
 }
 
+/// 转码全局设置（单行配置表 `transcode_settings`）。字段已按前端契约命名，
+/// 路由层负责 enum 白名单/长度校验，仓储层只做纯落库/读取。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscodeSettingsRecord {
+    pub hardware_acceleration: String,
+    pub preferred_encoder: String,
+    pub max_resolution: String,
+    pub segment_duration: i32,
+    pub throttle: bool,
+}
+
+impl Default for TranscodeSettingsRecord {
+    fn default() -> Self {
+        Self {
+            hardware_acceleration: "none".to_owned(),
+            preferred_encoder: "auto".to_owned(),
+            max_resolution: "original".to_owned(),
+            segment_duration: 6,
+            throttle: true,
+        }
+    }
+}
+
+impl TranscodeSettingsRecord {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            hardware_acceleration: row.try_get("hardware_acceleration")?,
+            preferred_encoder: row.try_get("preferred_encoder")?,
+            max_resolution: row.try_get("max_resolution")?,
+            segment_duration: row.try_get("segment_duration")?,
+            throttle: row.try_get("throttle")?,
+        })
+    }
+}
+
+/// 系统信息里的三个计数 + 数据库大小（字节）。全部来自单次聚合查询。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemCountsRecord {
+    pub library_count: i64,
+    pub user_count: i64,
+    pub media_item_count: i64,
+}
+
+impl SystemCountsRecord {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            library_count: row.try_get("library_count")?,
+            user_count: row.try_get("user_count")?,
+            media_item_count: row.try_get("media_item_count")?,
+        })
+    }
+}
+
+/// 活动日志合并条目：id 带来源段前缀（1=登录 2=任务 3=播放）保证跨源唯一。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityLogEntryRecord {
+    pub id: i64,
+    pub name: String,
+    pub overview: Option<String>,
+    pub entry_type: String,
+    pub item_id: Option<String>,
+    pub date: String,
+    pub user_id: Option<String>,
+    pub severity: String,
+}
+
+impl ActivityLogEntryRecord {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            overview: row.try_get("overview")?,
+            entry_type: row.try_get("entry_type")?,
+            item_id: row.try_get("item_id")?,
+            date: row.try_get("event_date")?,
+            user_id: row.try_get("user_id")?,
+            severity: row.try_get("severity")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityLogPage {
+    pub entries: Vec<ActivityLogEntryRecord>,
+    pub total_record_count: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetLibraryPathEnabledInput {
     pub library_id: String,
@@ -3948,6 +4035,224 @@ impl AdminRepository {
             next_cursor,
             has_more,
         }))
+    }
+
+    /// 读取转码全局设置。表内固定单行（id=1）；无行时返回 `None`，由路由层回退默认值。
+    pub async fn get_transcode_settings(
+        &self,
+    ) -> Result<Option<TranscodeSettingsRecord>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select
+                hardware_acceleration,
+                preferred_encoder,
+                max_resolution,
+                segment_duration,
+                throttle
+            from transcode_settings
+            where id = 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.as_ref().map(TranscodeSettingsRecord::from_row).transpose()
+    }
+
+    /// upsert 转码全局设置（固定单行 id=1），返回落库后的值。
+    pub async fn upsert_transcode_settings(
+        &self,
+        input: TranscodeSettingsRecord,
+    ) -> Result<TranscodeSettingsRecord, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            insert into transcode_settings (
+                id,
+                hardware_acceleration,
+                preferred_encoder,
+                max_resolution,
+                segment_duration,
+                throttle,
+                updated_at
+            )
+            values (1, $1, $2, $3, $4, $5, now())
+            on conflict (id) do update
+                set hardware_acceleration = excluded.hardware_acceleration,
+                    preferred_encoder = excluded.preferred_encoder,
+                    max_resolution = excluded.max_resolution,
+                    segment_duration = excluded.segment_duration,
+                    throttle = excluded.throttle,
+                    updated_at = now()
+            returning
+                hardware_acceleration,
+                preferred_encoder,
+                max_resolution,
+                segment_duration,
+                throttle
+            "#,
+        )
+        .bind(&input.hardware_acceleration)
+        .bind(&input.preferred_encoder)
+        .bind(&input.max_resolution)
+        .bind(input.segment_duration)
+        .bind(input.throttle)
+        .fetch_one(&self.pool)
+        .await?;
+
+        TranscodeSettingsRecord::from_row(&row)
+    }
+
+    /// 系统信息计数：库数 / 用户数 / 媒体条目数，单次聚合查询。
+    pub async fn system_counts(&self) -> Result<SystemCountsRecord, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select
+                (select count(*) from libraries)::bigint as library_count,
+                (select count(*) from users)::bigint as user_count,
+                (select count(*) from media_items)::bigint as media_item_count
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        SystemCountsRecord::from_row(&row)
+    }
+
+    /// 当前数据库占用字节数（`pg_database_size`）。
+    pub async fn database_size_bytes(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar::<_, i64>("select pg_database_size(current_database())::bigint")
+            .fetch_one(&self.pool)
+            .await
+    }
+
+    /// 活动日志聚合：登录（sessions）/ 任务收尾（jobs 终态）/ 播放开始
+    /// （playback_sessions）三路最近事件按时间合并。每路 top-N 有界探测
+    /// （probe = start_index + limit + 1，路由侧已钳制 start_index），返回
+    /// lower-bound 计数而非全表精确计数。`min_date` 由路由校验为时间戳形状。
+    pub async fn list_activity_log_entries(
+        &self,
+        min_date: Option<&str>,
+        start_index: i64,
+        limit: i64,
+    ) -> Result<ActivityLogPage, sqlx::Error> {
+        let probe_limit = start_index.saturating_add(limit).saturating_add(1);
+        let rows = sqlx::query(
+            r#"
+            with min_bound as (
+                select case
+                    when $1::text is null then null::timestamptz
+                    else $1::timestamptz
+                end as min_date
+            ),
+            login_events as (
+                select
+                    (1000000000000::bigint + s.id) as id,
+                    u.username || ' logged in' as name,
+                    null::text as overview,
+                    'SessionStarted' as entry_type,
+                    null::text as item_id,
+                    s.created_at as event_date,
+                    u.public_id::text as user_id,
+                    'info' as severity
+                from sessions s
+                join users u on u.id = s.user_id
+                cross join min_bound
+                where (min_bound.min_date is null or s.created_at >= min_bound.min_date)
+                order by s.created_at desc, s.id desc
+                limit $2
+            ),
+            job_events as (
+                select
+                    (2000000000000::bigint + j.id) as id,
+                    j.job_type
+                        || case when j.status = 'failed' then ' job failed' else ' job completed' end
+                        as name,
+                    j.last_error as overview,
+                    case
+                        when j.status = 'failed' then 'ScheduledTaskFailed'
+                        else 'ScheduledTaskCompleted'
+                    end as entry_type,
+                    null::text as item_id,
+                    j.finished_at as event_date,
+                    null::text as user_id,
+                    case when j.status = 'failed' then 'error' else 'info' end as severity
+                from jobs j
+                cross join min_bound
+                where j.status in ('succeeded', 'failed')
+                  and j.finished_at is not null
+                  and (min_bound.min_date is null or j.finished_at >= min_bound.min_date)
+                order by j.finished_at desc, j.id desc
+                limit $2
+            ),
+            playback_events as (
+                select
+                    (3000000000000::bigint + ps.id) as id,
+                    u.username || ' started playback of ' || mi.title as name,
+                    null::text as overview,
+                    'VideoPlayback' as entry_type,
+                    mi.public_id::text as item_id,
+                    ps.started_at as event_date,
+                    u.public_id::text as user_id,
+                    'info' as severity
+                from playback_sessions ps
+                join users u on u.id = ps.user_id
+                join media_items mi on mi.id = ps.media_item_id
+                cross join min_bound
+                where (min_bound.min_date is null or ps.started_at >= min_bound.min_date)
+                order by ps.started_at desc, ps.id desc
+                limit $2
+            )
+            select
+                merged.id,
+                merged.name,
+                merged.overview,
+                merged.entry_type,
+                merged.item_id,
+                to_char(merged.event_date at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                    as event_date,
+                merged.user_id,
+                merged.severity
+            from (
+                select * from login_events
+                union all
+                select * from job_events
+                union all
+                select * from playback_events
+            ) merged
+            order by merged.event_date desc, merged.id desc
+            offset $3
+            limit $4 + 1
+            "#,
+        )
+        .bind(min_date)
+        .bind(probe_limit)
+        .bind(start_index)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let visible_limit = limit.max(0) as usize;
+        let has_more = rows.len() > visible_limit;
+        let entries = rows
+            .into_iter()
+            .take(visible_limit)
+            .map(|row| ActivityLogEntryRecord::from_row(&row))
+            .collect::<Result<Vec<_>, _>>()?;
+        let total_record_count = if entries.is_empty() {
+            0
+        } else {
+            start_index
+                .max(0)
+                .saturating_add(entries.len() as i64)
+                .saturating_add(i64::from(has_more))
+                .try_into()
+                .unwrap_or(u32::MAX)
+        };
+
+        Ok(ActivityLogPage {
+            entries,
+            total_record_count,
+        })
     }
 }
 

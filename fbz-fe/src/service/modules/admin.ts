@@ -13,9 +13,22 @@ import type {
   AdminJob,
   AdminJobDetail,
   AdminJobQuery,
+  CleanCacheResult,
   CreateLibraryRequest,
+  CreateMarketSourceRequest,
   CreateUserRequest,
+  InstallMarketPluginRequest,
+  InstallPackageRequest,
+  InstalledPluginPackage,
   LibraryListQuery,
+  MaintenanceStats,
+  PluginMarketCatalogItem,
+  PluginMarketCatalogQuery,
+  PluginMarketSource,
+  SyncMarketSourceResult,
+  SystemInfo,
+  TranscodeSettings,
+  UploadedPluginPackage,
   LibraryMetadataRefreshQueue,
   LibraryPath,
   LibraryPhoto,
@@ -34,6 +47,7 @@ import type {
   PluginExecutionRunQuery,
   PluginHostApiCall,
   PluginListQuery,
+  PluginMenuItem,
   PluginPackageDetail,
   PluginPackageListQuery,
   PluginPackageSummary,
@@ -345,6 +359,12 @@ export async function listPlugins(query: PluginListQuery = {}): Promise<Paginate
   return paginationFromHeaders(response);
 }
 
+/** 列出已审批、已启用且声明 admin.menu 权限的插件管理菜单项（渲染进后台导航）。 */
+export async function listPluginMenuItems(): Promise<PluginMenuItem[]> {
+  const { data } = await request.get<PluginMenuItem[]>("/admin/plugins/menu-items");
+  return data;
+}
+
 /** 列出插件包。 */
 export async function listPluginPackages(
   query: PluginPackageListQuery = {},
@@ -454,4 +474,127 @@ export async function listPluginHostApiCalls(
     params,
   });
   return paginationFromHeaders(response);
+}
+
+/** 手工安装插件包（服务器读取 packagePath 指向的包，落 pending_approval）。 */
+export async function installPluginPackage(
+  payload: InstallPackageRequest,
+): Promise<InstalledPluginPackage> {
+  const { data } = await request.post<InstalledPluginPackage>("/admin/plugins/packages", payload);
+  return data;
+}
+
+/** 浏览器直传插件包（multipart），返回服务器上的相对 packagePath，随后调用安装接口。 */
+export async function uploadPluginPackage(file: File): Promise<UploadedPluginPackage> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const { data } = await request.post<UploadedPluginPackage>(
+    "/admin/plugins/packages/upload",
+    form,
+    { headers: { "Content-Type": "multipart/form-data" } },
+  );
+  return data;
+}
+
+/** 卸载插件（后端先 disable 再删，成功返回 204）。 */
+export async function uninstallPlugin(pluginId: string): Promise<void> {
+  await request.delete(`/admin/plugins/${encodeURIComponent(pluginId)}`);
+}
+
+// ---- 转码设置 ----
+
+/** 读取转码全局设置。 */
+export async function getTranscodeSettings(): Promise<TranscodeSettings> {
+  const { data } = await request.get<TranscodeSettings>("/admin/transcode/settings");
+  return data;
+}
+
+/** 保存转码全局设置，返回保存后的值。 */
+export async function updateTranscodeSettings(
+  payload: TranscodeSettings,
+): Promise<TranscodeSettings> {
+  const { data } = await request.put<TranscodeSettings>("/admin/transcode/settings", payload);
+  return data;
+}
+
+// ---- 系统信息 / 维护 ----
+
+/** 读取系统运行信息（版本、技术栈、连接状态、计数）。 */
+export async function getSystemInfo(): Promise<SystemInfo> {
+  const { data } = await request.get<SystemInfo>("/admin/system/info");
+  return data;
+}
+
+/** 读取存储占用统计（缓存/数据库体积、缓存文件数）。 */
+export async function getMaintenanceStats(): Promise<MaintenanceStats> {
+  const { data } = await request.get<MaintenanceStats>("/admin/system/maintenance/stats");
+  return data;
+}
+
+/** 清理图片缓存，返回删除文件数与释放字节数。 */
+export async function cleanCache(): Promise<CleanCacheResult> {
+  const { data } = await request.post<CleanCacheResult>("/admin/system/maintenance/clean-cache");
+  return data;
+}
+
+// ---- 插件市场 ----
+
+/** 列出所有插件市场源。 */
+export async function listMarketSources(): Promise<PluginMarketSource[]> {
+  const { data } = await request.get<PluginMarketSource[]>("/admin/plugins/market/sources");
+  return data;
+}
+
+/** 新增插件市场源。 */
+export async function createMarketSource(
+  payload: CreateMarketSourceRequest,
+): Promise<PluginMarketSource> {
+  const { data } = await request.post<PluginMarketSource>("/admin/plugins/market/sources", payload);
+  return data;
+}
+
+/** 删除插件市场源。 */
+export async function deleteMarketSource(sourceId: string): Promise<void> {
+  await request.delete(`/admin/plugins/market/sources/${encodeURIComponent(sourceId)}`);
+}
+
+/** 启停插件市场源（停用后目录浏览与安装均不露出该源）。 */
+export async function setMarketSourceEnabled(
+  sourceId: string,
+  enabled: boolean,
+): Promise<PluginMarketSource> {
+  const { data } = await request.post<PluginMarketSource>(
+    `/admin/plugins/market/sources/${encodeURIComponent(sourceId)}/enabled`,
+    { enabled },
+  );
+  return data;
+}
+
+/** 同步单个市场源的 catalog，返回新拉取条目数。 */
+export async function syncMarketSource(sourceId: string): Promise<SyncMarketSourceResult> {
+  const { data } = await request.post<SyncMarketSourceResult>(
+    `/admin/plugins/market/sources/${encodeURIComponent(sourceId)}/sync`,
+  );
+  return data;
+}
+
+/** 浏览市场 catalog（可按 sourceId 过滤、q 搜索）。 */
+export async function getMarketCatalog(
+  query: PluginMarketCatalogQuery = {},
+): Promise<PluginMarketCatalogItem[]> {
+  const { data } = await request.get<PluginMarketCatalogItem[]>("/admin/plugins/market/catalog", {
+    params: query,
+  });
+  return data;
+}
+
+/** 从市场安装插件（落 pending_approval，仍需审批+激活+启用）。 */
+export async function installMarketPlugin(
+  payload: InstallMarketPluginRequest,
+): Promise<InstalledPluginPackage> {
+  const { data } = await request.post<InstalledPluginPackage>(
+    "/admin/plugins/market/install",
+    payload,
+  );
+  return data;
 }

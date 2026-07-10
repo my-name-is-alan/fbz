@@ -8,6 +8,18 @@ const libraryStore = useLibraryStore();
 const authStore = useAuthStore();
 const { libraries } = storeToRefs(libraryStore);
 const accountMenuOpen = ref(false);
+const router = useRouter();
+
+// 桌面端顶部内联搜索：回车跳 /search?q=；空关键词跳 /search 引导态。
+const searchTerm = ref("");
+function submitSearch() {
+  const q = searchTerm.value.trim();
+  void router.push({ name: "search", query: q ? { q } : {} });
+}
+// 手机端搜索图标：直接进搜索页（输入框在页内）。
+function goSearch() {
+  void router.push({ name: "search" });
+}
 
 const accountLinks = [
   { label: "后台管理", to: "/admin" },
@@ -99,8 +111,19 @@ useEventListener(window, "keydown", (e) => {
       <RouterLink to="/" class="nav-item">最近添加</RouterLink>
     </nav>
 
-    <button class="header-search" type="button">搜索影片、人物...</button>
-    <button class="icon-search-btn" aria-label="搜索">⌕</button>
+    <form class="header-search" role="search" @submit.prevent="submitSearch">
+      <span class="search-icon" aria-hidden="true" />
+      <input
+        v-model="searchTerm"
+        class="header-search-input"
+        type="search"
+        name="q"
+        placeholder="搜索影片、人物..."
+        autocomplete="off"
+        aria-label="搜索"
+      />
+    </form>
+    <button class="icon-search-btn" aria-label="搜索" @click="goSearch">⌕</button>
     <div class="account-menu">
       <button
         class="avatar"
@@ -323,14 +346,38 @@ useEventListener(window, "keydown", (e) => {
   color: var(--fbz-color-text-muted);
   font-size: var(--fbz-font-size-sm);
   min-width: 200px;
+  transition: border-color var(--fbz-motion-fast);
 
-  &::before {
-    content: "";
+  &:focus-within {
+    border-color: var(--fbz-color-brand-500);
+  }
+
+  .search-icon {
+    flex: 0 0 auto;
     width: 13px;
     height: 13px;
     border-radius: 50%;
     border: 1.5px solid currentColor;
     opacity: 0.7;
+  }
+}
+
+.header-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: none;
+  outline: none;
+  color: var(--fbz-color-text);
+  font-size: var(--fbz-font-size-sm);
+
+  &::placeholder {
+    color: var(--fbz-color-text-muted);
+  }
+
+  &::-webkit-search-cancel-button {
+    appearance: none;
   }
 }
 

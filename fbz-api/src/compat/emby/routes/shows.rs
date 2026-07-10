@@ -10,7 +10,8 @@ use crate::{
     compat::emby::dto::{BaseItemDto, QueryResultDto},
     error::AppError,
     library::repository::{
-        ItemSortField, LibraryRepository, NextUpInput, ShowItemsInput, SortDirection, UpcomingInput,
+        BrowseItemsResult, ItemSortField, LibraryRepository, NextUpInput, ShowItemsInput,
+        SortDirection, UpcomingInput,
     },
     state::AppState,
 };
@@ -18,8 +19,8 @@ use crate::{
 use super::{
     access::authenticate_request_user,
     items::{
-        ItemWindow, MediaListQuery, item_query_options, media_items_to_dtos, media_query_result,
-        normalized_parent_id, requested_item_fields,
+        ItemWindow, MediaListQuery, item_query_options, media_items_to_dtos, normalized_parent_id,
+        requested_item_fields,
     },
 };
 
@@ -118,7 +119,8 @@ pub async fn seasons(
         SortDirection::Asc,
     );
     let _requested_fields = requested_item_fields(query.fields.as_deref());
-    let result = LibraryRepository::new(database.clone())
+    let repository = LibraryRepository::new(database.clone());
+    let result = repository
         .list_series_seasons(ShowItemsInput {
             user_id: user.id,
             series_id,
@@ -130,7 +132,7 @@ pub async fn seasons(
         .await
         .map_err(|err| AppError::internal(format!("failed to list seasons: {err}")))?;
 
-    Ok(Json(media_query_result(result, window)))
+    Ok(Json(show_items_result_with_overviews(&repository, result, window).await?))
 }
 
 pub async fn episodes(
@@ -163,7 +165,8 @@ pub async fn episodes(
         SortDirection::Asc,
     );
     let _requested_fields = requested_item_fields(query.fields.as_deref());
-    let result = LibraryRepository::new(database.clone())
+    let repository = LibraryRepository::new(database.clone());
+    let result = repository
         .list_series_episodes(ShowItemsInput {
             user_id: user.id,
             series_id,
@@ -175,7 +178,7 @@ pub async fn episodes(
         .await
         .map_err(|err| AppError::internal(format!("failed to list episodes: {err}")))?;
 
-    Ok(Json(media_query_result(result, window)))
+    Ok(Json(show_items_result_with_overviews(&repository, result, window).await?))
 }
 
 pub async fn next_up(
@@ -266,6 +269,41 @@ pub async fn upcoming(
         result.total_record_count,
         window.start_index as u32,
     )))
+}
+
+/// 季/集列表结果 → QueryResultDto，并按 public_id 批量回填 `Overview`。
+///
+/// 列表查询（list_series_seasons / list_series_episodes）出于性能不带 overview 列，
+/// 但扫描落库的 season/episode 行经元数据刷新（TMDB）后 media_items.overview 会有真实简介。
+/// 这里复用详情接口同款的 `fetch_item_overviews` 批量补简介，让前端分集卡片能显示真实剧情，
+/// 而不是回退到合成占位。无简介（未刷新元数据）的行自然保持 None，前端渲染空态。
+async fn show_items_result_with_overviews(
+    repository: &LibraryRepository,
+    result: BrowseItemsResult,
+    window: ItemWindow,
+) -> Result<QueryResultDto<BaseItemDto>, AppError> {
+    let total_record_count = result.total_record_count;
+    let mut items = media_items_to_dtos(result.items);
+
+    let ids = items
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let overviews = repository
+        .fetch_item_overviews(&ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get episode overviews: {err}")))?;
+    for item in &mut items {
+        if let Some(overview) = overviews.get(&item.id) {
+            item.overview = Some(overview.clone());
+        }
+    }
+
+    Ok(QueryResultDto::new(
+        items,
+        total_record_count,
+        window.start_index as u32,
+    ))
 }
 
 async fn authenticated_query_user(

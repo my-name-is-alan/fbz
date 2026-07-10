@@ -3,74 +3,102 @@ use sqlx::{Row, postgres::PgRow};
 use crate::db::DbPool;
 
 const USER_VIEW_LIMIT: i64 = 1_000;
+/// 播放列表列表：playlists 表按属主过滤（播放列表是用户私有资产，不走库权限）。
 const LIST_USER_PLAYLISTS_SQL: &str = r#"
-            with requested_parent as (
+            select
+                p.public_id::text as id,
+                p.name
+            from playlists p
+            where p.owner_user_id = $1
+              and (
+                    $4::text is null
+                 or lower(p.name) like '%' || lower($4::text) || '%'
+              )
+            order by
+                case when $5 = 'asc' then lower(p.name) end asc nulls last,
+                case when $5 = 'desc' then lower(p.name) end desc nulls last,
+                p.id asc
+            limit $2 + 1
+            offset $3
+            "#;
+/// 播放列表成员：playlist_entries 按 sort_order 分页；成员条目仍走库权限过滤，
+/// 属主看不见的条目（权限被回收）自动隐藏。playlist_item_id = 条目 EntryId。
+const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
+            with requested_playlist as (
                 select case
-                    when $2::text is null then null::uuid
                     when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     then $2::uuid
                     else null::uuid
                 end as public_id
             ),
-            visible_playlists as (
-                select
-                    c.id as internal_id,
-                    c.public_id::text as id,
-                    c.name
-                from collections c
-                left join libraries l on l.id = c.library_id
-                left join library_permissions lp on lp.library_id = c.library_id
-                    and lp.user_id = $1
-                cross join requested_parent rp
-                where (
-                        $2::text is null
-                     or (
-                            c.library_id is not null
-                        and l.public_id = rp.public_id
-                     )
-                  )
-                  and (
-                        c.library_id is null
-                     or (
-                            lp.can_view = true
-                        and l.is_hidden = false
-                     )
-                  )
-                  and (
-                        c.library_id is not null
-                     or exists (
-                            select 1
-                            from collection_items ci_visible
-                            join media_items mi_visible
-                              on mi_visible.id = ci_visible.media_item_id
-                            join libraries l_visible
-                              on l_visible.id = mi_visible.library_id
-                            join library_permissions lp_visible
-                              on lp_visible.library_id = mi_visible.library_id
-                            where ci_visible.collection_id = c.id
-                              and lp_visible.user_id = $1
-                              and lp_visible.can_view = true
-                              and mi_visible.is_deleted = false
-                              and l_visible.is_hidden = false
-                     )
-                  )
-                  and (
-                        $5::text is null
-                     or lower(c.name) like '%' || lower($5::text) || '%'
-                  )
+            playlist_scope as (
+                select p.id
+                from playlists p
+                cross join requested_playlist requested
+                where p.public_id = requested.public_id
+                  and p.owner_user_id = $1
             )
             select
-                id,
-                name
-            from visible_playlists
-            order by
-                case when $6 = 'asc' then lower(name) end asc nulls last,
-                case when $6 = 'desc' then lower(name) end desc nulls last,
-                internal_id asc
+                mi.public_id::text as id,
+                mi.title as name,
+                mi.item_type,
+                parent.public_id::text as parent_id,
+                coalesce(mi.runtime_ticks, primary_file.duration_ticks) as runtime_ticks,
+                primary_file.media_file_id,
+                primary_file.file_size as media_file_size,
+                primary_file.container as media_file_container,
+                primary_file.bitrate as media_file_bitrate,
+                primary_file.is_strm as media_file_is_strm,
+                (u.allow_transcode and lp.can_transcode) as supports_transcoding,
+                mi.production_year,
+                coalesce(up.position_ticks, 0) as playback_position_ticks,
+                coalesce(up.play_count, 0) as play_count,
+                coalesce(up.is_favorite, false) as is_favorite,
+                up.rating::double precision as rating,
+                coalesce(up.played, false) as played,
+                pe.public_id::text as playlist_item_id,
+                case
+                    when $5::boolean = true then coalesce(item_images.image_tags, array[]::text[])
+                    else array[]::text[]
+                end as image_tags,
+                0::bigint as total_record_count
+            from playlist_scope scope
+            join playlist_entries pe on pe.playlist_id = scope.id
+            join media_items mi on mi.id = pe.media_item_id
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+            join users u on u.id = lp.user_id
+            left join media_items parent on parent.id = mi.parent_id
+            left join lateral (
+                select mf.id as media_file_id,
+                       mf.file_size,
+                       mf.container,
+                       mf.duration_ticks,
+                       mf.bitrate,
+                       mf.is_strm
+                from media_files mf
+                where mf.media_item_id = mi.id
+                order by mf.is_primary desc, mf.id
+                limit 1
+            ) primary_file on true
+            left join user_playstates up on up.user_id = $1
+                and up.media_item_id = mi.id
+            left join lateral (
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
+                from artwork a
+                where a.media_item_id = mi.id
+            ) item_images on $5::boolean = true
+            where lp.user_id = $1
+              and lp.can_view = true
+              and mi.is_deleted = false
+              and l.is_hidden = false
+            order by pe.sort_order asc,
+                     pe.id asc
             limit $3 + 1
             offset $4
             "#;
-const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
+/// 系列/合集成员（collections/collection_items，`GET /Collections/{id}/Items` 用）。
+const LIST_USER_COLLECTION_ITEMS_SQL: &str = r#"
             with requested_playlist as (
                 select case
                     when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -117,7 +145,8 @@ const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
                 case
                     when $5::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
-                end as image_tags
+                end as image_tags,
+                0::bigint as total_record_count
             from playlist_scope scope
             join collection_items ci on ci.collection_id = scope.id
             join media_items mi on mi.id = ci.media_item_id
@@ -140,7 +169,7 @@ const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = mi.id
             left join lateral (
-                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $5::boolean = true
@@ -153,6 +182,34 @@ const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
                      mi.id asc
             limit $3 + 1
             offset $4
+            "#;
+/// 播放列表成员插入共用片段：请求 id 数组（携带序号）→ UUID 守卫 → 权限过滤后的
+/// 内部条目 id。调用侧负责拼上 sort_order 基准。
+const INSERT_PLAYLIST_ENTRIES_SQL: &str = r#"
+            with requested_items as (
+                select item_id::uuid as public_id, ordinality
+                from unnest($2::text[]) with ordinality as t(item_id, ordinality)
+                where item_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            ),
+            base as (
+                select coalesce(max(sort_order), 0) as base_order
+                from playlist_entries
+                where playlist_id = $1
+            )
+            insert into playlist_entries (playlist_id, media_item_id, sort_order)
+            select $1,
+                   mi.id,
+                   base.base_order + requested.ordinality::int
+            from requested_items requested
+            cross join base
+            join media_items mi on mi.public_id = requested.public_id
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+                and lp.user_id = $3
+            where lp.can_view = true
+              and l.is_hidden = false
+              and mi.is_deleted = false
+            returning id
             "#;
 
 #[derive(Clone)]
@@ -372,6 +429,9 @@ pub enum ItemSortField {
     Runtime,
     ProductionYear,
     IndexNumber,
+    /// 搜索相关度（仅在带 SearchTerm 的查询里作为默认排序使用）：
+    /// 完整标题命中 > 前缀命中 > tsvector 词组命中 > 其余（子串/拼音命中）。
+    Relevance,
 }
 
 impl ItemSortField {
@@ -382,6 +442,7 @@ impl ItemSortField {
             Self::Runtime => "runtime",
             Self::ProductionYear => "production_year",
             Self::IndexNumber => "index_number",
+            Self::Relevance => "relevance",
         }
     }
 }
@@ -573,7 +634,6 @@ pub struct SimilarItemsInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaylistListInput {
     pub user_id: i64,
-    pub parent_id: Option<String>,
     pub start_index: i64,
     pub limit: i64,
     pub search_term: Option<String>,
@@ -587,6 +647,55 @@ pub struct PlaylistItemsInput {
     pub start_index: i64,
     pub limit: i64,
     pub include_image_tags: bool,
+}
+
+/// 系列/合集成员读取（`GET /Collections/{id}/Items`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectionItemsListInput {
+    pub user_id: i64,
+    pub collection_id: String,
+    pub start_index: i64,
+    pub limit: i64,
+    pub include_image_tags: bool,
+}
+
+/// 创建播放列表：属主 + 名称 + 可选媒体类型 + 初始成员（按请求顺序，无权限条目静默跳过）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatePlaylistInput {
+    pub user_id: i64,
+    pub name: String,
+    pub media_type: Option<String>,
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistCreatedRecord {
+    pub id: String,
+    pub name: String,
+    pub item_added_count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectionCreatedRecord {
+    pub id: String,
+    pub name: String,
+}
+
+/// 单条条目详情增强字段（原名/分级/首播日期/题材），详情接口回填 DTO 用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemDetailExtrasRecord {
+    pub original_title: Option<String>,
+    pub official_rating: Option<String>,
+    pub premiere_date: Option<String>,
+    pub genres: Vec<String>,
+}
+
+/// 播放列表写操作结果：目标缺失 / 非属主 / 已应用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlaylistWriteOutcome<T> {
+    Applied(T),
+    NotFound,
+    Forbidden,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -968,11 +1077,16 @@ pub struct MediaItemBrowseRecord {
     pub media_file_is_strm: Option<bool>,
     pub supports_transcoding: bool,
     pub production_year: Option<i32>,
+    pub index_number: Option<i32>,
+    pub parent_index_number: Option<i32>,
+    pub premiere_date: Option<String>,
     pub playback_position_ticks: i64,
     pub play_count: i32,
     pub is_favorite: bool,
     pub rating: Option<f64>,
     pub played: bool,
+    /// 播放列表成员行的 EntryId（playlist_entries.public_id）；仅播放列表成员查询携带。
+    pub playlist_item_id: Option<String>,
     pub image_tags: Vec<String>,
     pub total_record_count: i64,
 }
@@ -985,6 +1099,7 @@ pub struct ItemPersonRecord {
     pub role_type: String,
     pub role_name: String,
     pub sort_order: i32,
+    pub has_image: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1179,6 +1294,49 @@ impl LibraryRepository {
         Ok(overviews)
     }
 
+    /// 按 `public_id` 取单条条目的详情增强字段（原名/分级/首播日期/题材列表）。
+    /// 供详情接口回填；调用方已完成可见性校验（find_user_item_by_id 命中后才会调用）。
+    pub async fn fetch_item_detail_extras(
+        &self,
+        public_id: &str,
+    ) -> Result<Option<ItemDetailExtrasRecord>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select
+                mi.original_title,
+                nullif(btrim(coalesce(mi.official_rating, '')), '') as official_rating,
+                mi.premiere_date::text as premiere_date,
+                coalesce(genre_list.genres, array[]::text[]) as genres
+            from media_items mi
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
+            where mi.is_deleted = false
+              and mi.public_id = case
+                  when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+            "#,
+        )
+        .bind(public_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok::<_, sqlx::Error>(ItemDetailExtrasRecord {
+                original_title: row.try_get("original_title")?,
+                official_rating: row.try_get("official_rating")?,
+                premiere_date: row.try_get("premiere_date")?,
+                genres: row.try_get("genres")?,
+            })
+        })
+        .transpose()
+    }
+
     /// 按 `public_id` 取单条条目的关联人物（演员/导演/编剧…），按 role_type 再 sort_order 排序。
     /// 供详情接口填充演职员与导演。绑参数 + UUID 正则防注入；非法/不存在 id 自然返回空。
     pub async fn fetch_item_people(
@@ -1192,7 +1350,11 @@ impl LibraryRepository {
                 p.name,
                 mip.role_type,
                 mip.role_name,
-                mip.sort_order
+                mip.sort_order,
+                exists(
+                    select 1 from artwork a
+                    where a.person_id = p.id and a.artwork_type = 'primary'
+                ) as has_image
             from media_items mi
             join media_item_people mip on mip.media_item_id = mi.id
             join people p on p.id = mip.person_id
@@ -1277,10 +1439,10 @@ impl LibraryRepository {
 
     /// 取系列/合集详情（按 public_id），含名称与简介。
     ///
-    /// 电影系列与 playlist 同存 `collections` 表（metadata 刮削 belongs_to_collection 时
-    /// find-or-create）。可见性同 [`list_user_playlist_items`](Self::list_user_playlist_items)
-    /// 的 scope：无 library_id 的全局集放行，挂库的集要求 can_view + 非隐藏库。成员列表复用
-    /// `list_user_playlist_items`。无可见集即 None。
+    /// 电影系列存 `collections` 表（metadata 刮削 belongs_to_collection 时 find-or-create，
+    /// 手工合集由 `create_collection` 写入）。可见性 scope：无 library_id 的全局集放行，
+    /// 挂库的集要求 can_view + 非隐藏库。成员列表用
+    /// [`list_user_collection_items`](Self::list_user_collection_items)。无可见集即 None。
     pub async fn find_user_collection_detail_by_id(
         &self,
         user_id: i64,
@@ -1465,7 +1627,6 @@ impl LibraryRepository {
     ) -> Result<PlaylistListResult, sqlx::Error> {
         let rows = sqlx::query(LIST_USER_PLAYLISTS_SQL)
             .bind(input.user_id)
-            .bind(input.parent_id)
             .bind(input.limit)
             .bind(input.start_index)
             .bind(input.search_term)
@@ -1490,6 +1651,309 @@ impl LibraryRepository {
             .await?;
 
         browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
+    }
+
+    pub async fn list_user_collection_items(
+        &self,
+        input: CollectionItemsListInput,
+    ) -> Result<BrowseItemsResult, sqlx::Error> {
+        let rows = sqlx::query(LIST_USER_COLLECTION_ITEMS_SQL)
+            .bind(input.user_id)
+            .bind(input.collection_id)
+            .bind(input.limit)
+            .bind(input.start_index)
+            .bind(input.include_image_tags)
+            .fetch_all(&self.pool)
+            .await?;
+
+        browse_result_lower_bound_from_rows(rows, input.start_index, input.limit)
+    }
+
+    /// 创建手工合集（BoxSet，library_id 为空）并写入初始成员。合集写入是管理员操作，
+    /// 成员只校验条目存在且未删除（不做库权限过滤——管理员全局可见）。
+    pub async fn create_collection(
+        &self,
+        name: &str,
+        item_ids: &[String],
+    ) -> Result<CollectionCreatedRecord, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let row = sqlx::query(
+            r#"
+            insert into collections (library_id, name, name_normalized)
+            values (null, $1, lower($1))
+            returning id, public_id::text as public_id, name
+            "#,
+        )
+        .bind(name)
+        .fetch_one(&mut *tx)
+        .await?;
+        let internal_id = row.try_get::<i64, _>("id")?;
+        let public_id = row.try_get::<String, _>("public_id")?;
+        let name = row.try_get::<String, _>("name")?;
+
+        if !item_ids.is_empty() {
+            insert_collection_members(&mut tx, internal_id, item_ids).await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(CollectionCreatedRecord {
+            id: public_id,
+            name,
+        })
+    }
+
+    /// 向合集追加成员（管理员操作，重复成员静默跳过）。返回 None = 合集不存在。
+    pub async fn add_collection_items(
+        &self,
+        collection_id: &str,
+        item_ids: &[String],
+    ) -> Result<Option<u64>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some(internal_id) = lock_collection_for_update(&mut tx, collection_id).await? else {
+            return Ok(None);
+        };
+        let added = insert_collection_members(&mut tx, internal_id, item_ids).await?;
+        touch_collection(&mut tx, internal_id).await?;
+
+        tx.commit().await?;
+
+        Ok(Some(added))
+    }
+
+    /// 从合集移除成员（管理员操作）。返回 None = 合集不存在。
+    pub async fn remove_collection_items(
+        &self,
+        collection_id: &str,
+        item_ids: &[String],
+    ) -> Result<Option<u64>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some(internal_id) = lock_collection_for_update(&mut tx, collection_id).await? else {
+            return Ok(None);
+        };
+        let removed = sqlx::query(
+            r#"
+            with requested_items as (
+                select item_id::uuid as public_id
+                from unnest($2::text[]) as item_id
+                where item_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            )
+            delete from collection_items ci
+            using media_items mi, requested_items requested
+            where ci.collection_id = $1
+              and mi.id = ci.media_item_id
+              and mi.public_id = requested.public_id
+            "#,
+        )
+        .bind(internal_id)
+        .bind(item_ids)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        touch_collection(&mut tx, internal_id).await?;
+
+        tx.commit().await?;
+
+        Ok(Some(removed))
+    }
+
+    /// 创建播放列表并按请求顺序写入初始成员。成员经权限过滤（不可见条目静默跳过），
+    /// 整体单事务，返回实际写入数。
+    pub async fn create_playlist(
+        &self,
+        input: CreatePlaylistInput,
+    ) -> Result<PlaylistCreatedRecord, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let row = sqlx::query(
+            r#"
+            insert into playlists (owner_user_id, name, media_type)
+            values ($1, $2, $3)
+            returning id, public_id::text as public_id, name
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(&input.name)
+        .bind(&input.media_type)
+        .fetch_one(&mut *tx)
+        .await?;
+        let internal_id = row.try_get::<i64, _>("id")?;
+        let public_id = row.try_get::<String, _>("public_id")?;
+        let name = row.try_get::<String, _>("name")?;
+
+        let item_added_count = if input.item_ids.is_empty() {
+            0
+        } else {
+            sqlx::query(INSERT_PLAYLIST_ENTRIES_SQL)
+                .bind(internal_id)
+                .bind(&input.item_ids)
+                .bind(input.user_id)
+                .fetch_all(&mut *tx)
+                .await?
+                .len() as i64
+        };
+
+        tx.commit().await?;
+
+        Ok(PlaylistCreatedRecord {
+            id: public_id,
+            name,
+            item_added_count,
+        })
+    }
+
+    /// 追加播放列表成员（属主限定）。锁 playlists 行序列化同一列表的并发写。
+    pub async fn add_playlist_entries(
+        &self,
+        user_id: i64,
+        playlist_id: &str,
+        item_ids: &[String],
+    ) -> Result<PlaylistWriteOutcome<i64>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some((internal_id, owner_user_id)) =
+            lock_playlist_for_update(&mut tx, playlist_id).await?
+        else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        if owner_user_id != user_id {
+            return Ok(PlaylistWriteOutcome::Forbidden);
+        }
+
+        let added = sqlx::query(INSERT_PLAYLIST_ENTRIES_SQL)
+            .bind(internal_id)
+            .bind(item_ids)
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await?
+            .len() as i64;
+        touch_playlist(&mut tx, internal_id).await?;
+
+        tx.commit().await?;
+
+        Ok(PlaylistWriteOutcome::Applied(added))
+    }
+
+    /// 按 EntryId（playlist_entries.public_id）删除播放列表成员（属主限定）。
+    pub async fn remove_playlist_entries(
+        &self,
+        user_id: i64,
+        playlist_id: &str,
+        entry_ids: &[String],
+    ) -> Result<PlaylistWriteOutcome<u64>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some((internal_id, owner_user_id)) =
+            lock_playlist_for_update(&mut tx, playlist_id).await?
+        else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        if owner_user_id != user_id {
+            return Ok(PlaylistWriteOutcome::Forbidden);
+        }
+
+        let removed = sqlx::query(
+            r#"
+            with requested_entries as (
+                select entry_id::uuid as public_id
+                from unnest($2::text[]) as entry_id
+                where entry_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            )
+            delete from playlist_entries pe
+            using requested_entries requested
+            where pe.playlist_id = $1
+              and pe.public_id = requested.public_id
+            "#,
+        )
+        .bind(internal_id)
+        .bind(entry_ids)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        touch_playlist(&mut tx, internal_id).await?;
+
+        tx.commit().await?;
+
+        Ok(PlaylistWriteOutcome::Applied(removed))
+    }
+
+    /// 把 EntryId 指定的成员移动到新下标（0 基，越界钳制到末尾），事务内整表重排该列表。
+    pub async fn move_playlist_entry(
+        &self,
+        user_id: i64,
+        playlist_id: &str,
+        entry_id: &str,
+        new_index: u32,
+    ) -> Result<PlaylistWriteOutcome<()>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some((internal_id, owner_user_id)) =
+            lock_playlist_for_update(&mut tx, playlist_id).await?
+        else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        if owner_user_id != user_id {
+            return Ok(PlaylistWriteOutcome::Forbidden);
+        }
+
+        let rows = sqlx::query(
+            r#"
+            select id, public_id::text as public_id
+            from playlist_entries
+            where playlist_id = $1
+            order by sort_order asc, id asc
+            "#,
+        )
+        .bind(internal_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut ordered = Vec::with_capacity(rows.len());
+        for row in rows {
+            ordered.push((
+                row.try_get::<i64, _>("id")?,
+                row.try_get::<String, _>("public_id")?,
+            ));
+        }
+
+        let Some(current_index) = ordered
+            .iter()
+            .position(|(_, public_id)| public_id.eq_ignore_ascii_case(entry_id))
+        else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        let target_index = (new_index as usize).min(ordered.len().saturating_sub(1));
+        if target_index != current_index {
+            let moved = ordered.remove(current_index);
+            ordered.insert(target_index, moved);
+
+            let ids = ordered.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+            let orders = (1..=ids.len() as i32).collect::<Vec<_>>();
+            sqlx::query(
+                r#"
+                update playlist_entries pe
+                set sort_order = updates.sort_order
+                from (
+                    select unnest($2::bigint[]) as id,
+                           unnest($3::integer[]) as sort_order
+                ) updates
+                where pe.playlist_id = $1
+                  and pe.id = updates.id
+                "#,
+            )
+            .bind(internal_id)
+            .bind(&ids)
+            .bind(&orders)
+            .execute(&mut *tx)
+            .await?;
+        }
+        touch_playlist(&mut tx, internal_id).await?;
+
+        tx.commit().await?;
+
+        Ok(PlaylistWriteOutcome::Applied(()))
     }
 
     pub async fn list_user_item_filters(
@@ -3060,7 +3524,7 @@ impl LibraryRepository {
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = mi.id
             left join lateral (
-                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
@@ -3085,6 +3549,7 @@ impl LibraryRepository {
               and ($13::boolean = false or mi.production_year = any($14::integer[]))
               and (
                     $15::text is null
+                 or mi.search_vector @@ plainto_tsquery('simple', lower($15::text))
                  or lower(mi.title) like '%' || lower($15::text) || '%'
                  or lower(mi.original_title) like '%' || lower($15::text) || '%'
                  or lower(mi.sort_title) like '%' || lower($15::text) || '%'
@@ -3382,6 +3847,16 @@ impl LibraryRepository {
                  or (scope.is_library = false and mi.parent_id = scope.parent_item_id)
               )
             order by
+                case when $70 = 'relevance' and $15::text is not null then
+                    case
+                        when lower(mi.title) = lower($15::text) then 0
+                        when lower(mi.title) like lower($15::text) || '%' then 1
+                        when mi.search_vector @@ plainto_tsquery('simple', lower($15::text)) then 2
+                        when lower(mi.title) like '%' || lower($15::text) || '%' then 3
+                        else 4
+                    end
+                end asc,
+                case when $70 = 'relevance' then coalesce(nullif(mi.sort_title, ''), mi.title) end asc nulls last,
                 case when $70 = 'sort_name' and $71 = 'asc' then coalesce(nullif(mi.sort_title, ''), mi.title) end asc nulls last,
                 case when $70 = 'sort_name' and $71 = 'desc' then coalesce(nullif(mi.sort_title, ''), mi.title) end desc nulls last,
                 case when $70 = 'date_created' and $71 = 'asc' then mi.created_at end asc nulls last,
@@ -3592,7 +4067,7 @@ impl LibraryRepository {
                 limit 1
             ) primary_file on true
             left join lateral (
-                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
@@ -3707,6 +4182,7 @@ impl LibraryRepository {
                   and ($6::boolean = false or mi.item_type = any($7::text[]))
                   and (
                         $8::text is null
+                     or mi.search_vector @@ plainto_tsquery('simple', lower($8::text))
                      or lower(mi.title) like '%' || lower($8::text) || '%'
                      or lower(mi.original_title) like '%' || lower($8::text) || '%'
                      or lower(mi.sort_title) like '%' || lower($8::text) || '%'
@@ -3855,7 +4331,7 @@ impl LibraryRepository {
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = mi.id
             left join lateral (
-                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
@@ -4004,7 +4480,7 @@ impl LibraryRepository {
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = mi.id
             left join lateral (
-                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
@@ -4106,7 +4582,7 @@ impl LibraryRepository {
                 limit 1
             ) primary_file on true
             left join lateral (
-                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id) as image_tags
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on true
@@ -4428,12 +4904,15 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                 season.production_year,
+                season.index_number as index_number,
+                season.parent_index_number as parent_index_number,
+                season.premiere_date::text as premiere_date,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
-                array[]::text[] as image_tags,
+                coalesce(item_images.image_tags, array[]::text[]) as image_tags,
                 0::bigint as total_record_count
             from media_items series
             join libraries l on l.id = series.library_id
@@ -4452,6 +4931,11 @@ impl LibraryRepository {
                 order by mf.is_primary desc, mf.id
                 limit 1
             ) primary_file on true
+            left join lateral (
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
+                from artwork a
+                where a.media_item_id = season.id
+            ) item_images on true
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = season.id
             where series.public_id = case
@@ -4546,12 +5030,15 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce(access.supports_transcoding, false) as supports_transcoding,
                 episode.production_year,
+                episode.index_number as index_number,
+                episode.parent_index_number as parent_index_number,
+                episode.premiere_date::text as premiere_date,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
-                array[]::text[] as image_tags,
+                coalesce(item_images.image_tags, array[]::text[]) as image_tags,
                 0::bigint as total_record_count
             from episode_parent_scope episode_parent
             join media_items episode on episode.parent_id = episode_parent.id
@@ -4569,6 +5056,11 @@ impl LibraryRepository {
                 order by mf.is_primary desc, mf.id
                 limit 1
             ) primary_file on true
+            left join lateral (
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
+                from artwork a
+                where a.media_item_id = episode.id
+            ) item_images on true
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = episode.id
             where episode.item_type = 'episode'
@@ -5327,6 +5819,122 @@ fn lower_bound_total_record_count(start_index: i64, item_count: usize, has_more:
     }
 }
 
+/// 行锁定位合集（UUID 守卫），返回内部 id。串行化同一合集的并发成员写。
+async fn lock_collection_for_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    collection_id: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        select c.id
+        from collections c
+        where c.public_id = case
+            when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            then $1::uuid
+            else null::uuid
+        end
+        for update
+        "#,
+    )
+    .bind(collection_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.map(|row| row.try_get::<i64, _>("id")).transpose()
+}
+
+/// 合集成员批量插入：UUID 守卫 + 条目存在校验，重复成员 on conflict 跳过，
+/// sort_order 从现有最大值向后编号。返回实际插入行数。
+async fn insert_collection_members(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    collection_internal_id: i64,
+    item_ids: &[String],
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query(
+        r#"
+        with requested_items as (
+            select item_id::uuid as public_id, ordinality
+            from unnest($2::text[]) with ordinality as t(item_id, ordinality)
+            where item_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        ),
+        base as (
+            select coalesce(max(sort_order), 0) as base_order
+            from collection_items
+            where collection_id = $1
+        )
+        insert into collection_items (collection_id, media_item_id, sort_order)
+        select $1,
+               mi.id,
+               base.base_order + requested.ordinality::int
+        from requested_items requested
+        cross join base
+        join media_items mi on mi.public_id = requested.public_id
+        where mi.is_deleted = false
+        on conflict (collection_id, media_item_id) do nothing
+        "#,
+    )
+    .bind(collection_internal_id)
+    .bind(item_ids)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected())
+}
+
+async fn touch_collection(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    collection_internal_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("update collections set updated_at = now() where id = $1")
+        .bind(collection_internal_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
+/// 行锁定位播放列表（UUID 守卫），返回 (内部 id, 属主 user id)。用于串行化同一
+/// 播放列表的并发写：并发 add/remove/move 在此排队，保证 sort_order 重排原子。
+async fn lock_playlist_for_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    playlist_id: &str,
+) -> Result<Option<(i64, i64)>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        select p.id, p.owner_user_id
+        from playlists p
+        where p.public_id = case
+            when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            then $1::uuid
+            else null::uuid
+        end
+        for update
+        "#,
+    )
+    .bind(playlist_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.map(|row| {
+        Ok::<_, sqlx::Error>((
+            row.try_get::<i64, _>("id")?,
+            row.try_get::<i64, _>("owner_user_id")?,
+        ))
+    })
+    .transpose()
+}
+
+async fn touch_playlist(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    playlist_internal_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("update playlists set updated_at = now() where id = $1")
+        .bind(playlist_internal_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
 fn playlist_result_lower_bound_from_rows(
     rows: Vec<PgRow>,
     start_index: i64,
@@ -5580,11 +6188,15 @@ impl MediaItemBrowseRecord {
             media_file_is_strm: row.try_get("media_file_is_strm")?,
             supports_transcoding: row.try_get("supports_transcoding")?,
             production_year: row.try_get("production_year")?,
+            index_number: row.try_get("index_number").unwrap_or(None),
+            parent_index_number: row.try_get("parent_index_number").unwrap_or(None),
+            premiere_date: row.try_get("premiere_date").unwrap_or(None),
             playback_position_ticks: row.try_get("playback_position_ticks")?,
             play_count: row.try_get("play_count")?,
             is_favorite: row.try_get("is_favorite")?,
             rating: row.try_get("rating")?,
             played: row.try_get("played")?,
+            playlist_item_id: row.try_get("playlist_item_id").unwrap_or(None),
             image_tags: row.try_get("image_tags")?,
             total_record_count: row.try_get("total_record_count")?,
         })
@@ -5599,6 +6211,7 @@ impl ItemPersonRecord {
             role_type: row.try_get("role_type")?,
             role_name: row.try_get("role_name")?,
             sort_order: row.try_get("sort_order")?,
+            has_image: row.try_get("has_image")?,
         })
     }
 }
@@ -6071,35 +6684,58 @@ mod tests {
         let repository = include_str!("repository.rs");
         let list_query = LIST_USER_PLAYLISTS_SQL;
         let items_query = LIST_USER_PLAYLIST_ITEMS_SQL;
+        let collection_items_query = LIST_USER_COLLECTION_ITEMS_SQL;
 
-        assert!(list_query.contains("with requested_parent as"));
-        assert!(list_query.contains("then $2::uuid"));
-        assert!(list_query.contains("left join library_permissions lp"));
-        assert!(list_query.contains("lp.user_id = $1"));
-        assert!(list_query.contains("lp.can_view = true"));
-        assert!(list_query.contains("l.is_hidden = false"));
-        assert!(list_query.contains("exists ("));
+        assert!(list_query.contains("p.owner_user_id = $1"));
         assert!(!list_query.contains("count(*) over()"));
-        assert!(list_query.contains("limit $3 + 1"));
+        assert!(list_query.contains("limit $2 + 1"));
         assert!(
             repository.contains("playlist_result_lower_bound_from_rows(rows, input.start_index")
         );
-        assert!(!list_query.contains("c.public_id::text = $2"));
+        assert!(!list_query.contains("p.public_id::text ="));
 
         assert!(items_query.contains("with requested_playlist as"));
         assert!(items_query.contains("then $2::uuid"));
-        assert!(items_query.contains("join collection_items ci on ci.collection_id = scope.id"));
+        assert!(items_query.contains("p.owner_user_id = $1"));
+        assert!(items_query.contains("join playlist_entries pe on pe.playlist_id = scope.id"));
         assert!(
             items_query.contains("join library_permissions lp on lp.library_id = mi.library_id")
         );
         assert!(items_query.contains("lp.user_id = $1"));
         assert!(items_query.contains("lp.can_view = true"));
         assert!(items_query.contains("l.is_hidden = false"));
-        assert!(items_query.contains("order by ci.sort_order asc"));
+        assert!(items_query.contains("pe.public_id::text as playlist_item_id"));
+        assert!(items_query.contains("order by pe.sort_order asc"));
         assert!(!items_query.contains("count(*) over()"));
         assert!(items_query.contains("limit $3 + 1"));
         assert!(repository.contains("browse_result_lower_bound_from_rows(rows, input.start_index"));
-        assert!(!items_query.contains("c.public_id::text = $2"));
+        assert!(!items_query.contains("p.public_id::text = $2"));
+
+        assert!(collection_items_query.contains("with requested_playlist as"));
+        assert!(collection_items_query.contains("then $2::uuid"));
+        assert!(
+            collection_items_query
+                .contains("join collection_items ci on ci.collection_id = scope.id")
+        );
+        assert!(
+            collection_items_query
+                .contains("join library_permissions lp on lp.library_id = mi.library_id")
+        );
+        assert!(collection_items_query.contains("lp.user_id = $1"));
+        assert!(collection_items_query.contains("lp.can_view = true"));
+        assert!(collection_items_query.contains("l.is_hidden = false"));
+        assert!(collection_items_query.contains("order by ci.sort_order asc"));
+        assert!(!collection_items_query.contains("count(*) over()"));
+        assert!(collection_items_query.contains("limit $3 + 1"));
+        assert!(!collection_items_query.contains("c.public_id::text = $2"));
+
+        let insert_query = INSERT_PLAYLIST_ENTRIES_SQL;
+        assert!(insert_query.contains("with ordinality"));
+        assert!(insert_query.contains("item_id::uuid as public_id"));
+        assert!(insert_query.contains("join library_permissions lp on lp.library_id = mi.library_id"));
+        assert!(insert_query.contains("lp.can_view = true"));
+        assert!(insert_query.contains("l.is_hidden = false"));
+        assert!(insert_query.contains("mi.is_deleted = false"));
     }
 
     // Live-DB smoke: validates the production playlist SQL parses and plans
@@ -6123,7 +6759,6 @@ mod tests {
 
         let playlist_rows = sqlx::query(&format!("explain {LIST_USER_PLAYLISTS_SQL}"))
             .bind(-1_i64)
-            .bind(Option::<String>::None)
             .bind(20_i64)
             .bind(0_i64)
             .bind(Option::<String>::None)
@@ -6148,6 +6783,20 @@ mod tests {
         assert!(
             !item_rows.is_empty(),
             "EXPLAIN should return a plan for playlist item SQL"
+        );
+
+        let collection_rows = sqlx::query(&format!("explain {LIST_USER_COLLECTION_ITEMS_SQL}"))
+            .bind(-1_i64)
+            .bind("bbbbbbbb-0000-0000-0000-000000000001")
+            .bind(20_i64)
+            .bind(0_i64)
+            .bind(false)
+            .fetch_all(&pool)
+            .await
+            .expect("collection item SQL should plan against the live schema");
+        assert!(
+            !collection_rows.is_empty(),
+            "EXPLAIN should return a plan for collection item SQL"
         );
     }
 
@@ -6715,16 +7364,15 @@ mod tests {
 
     #[test]
     fn artwork_image_tag_index_matches_browse_aggregation_order() {
-        let migration = include_str!("../../migrations/0037_artwork_media_item_tag_order.sql");
+        let migration = include_str!("../../migrations/0094_artwork_sort_order.sql");
         let repository = include_str!("repository.rs");
 
-        assert!(migration.contains("idx_artwork_media_item_type_primary_id"));
-        assert!(migration.contains("media_item_id, artwork_type, is_primary desc, id"));
-        assert!(migration.contains("where media_item_id is not null"));
+        assert!(migration.contains("idx_artwork_item_type_order"));
+        assert!(migration.contains("media_item_id, artwork_type, is_primary desc, sort_order, id"));
         assert!(repository.contains("from artwork a"));
         assert!(
             repository.contains(
-                "array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.id)"
+                "array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id)"
             )
         );
         assert!(repository.contains("item_images on $6::boolean = true"));

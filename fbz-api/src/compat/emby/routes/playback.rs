@@ -490,36 +490,63 @@ async fn playback_info_for_user(
         return Err(AppError::internal("database is not configured"));
     };
 
-    let Some(source) = MediaRepository::new(database.clone())
-        .find_playback_media_source(
-            user.id,
-            &item_id,
-            media_source_id_as_i64(request.media_source_id.as_deref()),
-        )
-        .await
-        .map_err(|err| AppError::internal(format!("failed to get playback source: {err}")))?
-    else {
-        return Err(AppError::not_found("playback source not found"));
+    let repository = MediaRepository::new(database.clone());
+    let requested_media_file_id = media_source_id_as_i64(request.media_source_id.as_deref());
+
+    // 无显式 MediaSourceId 时返回条目的全部版本（多文件条目 → 多 MediaSource，
+    // 客户端据此渲染版本切换）；显式指定时只返回该版本。转码只为首选版本入队，
+    // 客户端切换版本会带 MediaSourceId 重新请求 PlaybackInfo。
+    let media_file_ids: Vec<Option<i64>> = match requested_media_file_id {
+        Some(id) => vec![Some(id)],
+        None => {
+            let ids = repository
+                .list_playback_media_file_ids(user.id, &item_id)
+                .await
+                .map_err(|err| {
+                    AppError::internal(format!("failed to list playback sources: {err}"))
+                })?;
+            if ids.is_empty() {
+                vec![None]
+            } else {
+                ids.into_iter().map(Some).collect()
+            }
+        }
     };
 
     let play_session_id = issue_access_token().token;
-    let transcode = queue_transcode_if_needed(
-        state,
-        user.id,
-        &source,
-        request,
-        &play_session_id,
-        access_token,
-        device_id,
-    )
-    .await?;
+    let mut media_sources = Vec::with_capacity(media_file_ids.len());
+    for (index, media_file_id) in media_file_ids.into_iter().enumerate() {
+        let Some(source) = repository
+            .find_playback_media_source(user.id, &item_id, media_file_id)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get playback source: {err}")))?
+        else {
+            continue;
+        };
+
+        let transcode = if index == 0 {
+            queue_transcode_if_needed(
+                state,
+                user.id,
+                &source,
+                request,
+                &play_session_id,
+                access_token,
+                device_id,
+            )
+            .await?
+        } else {
+            None
+        };
+        media_sources.push(media_source_to_dto(&source, transcode.as_ref(), access_token));
+    }
+
+    if media_sources.is_empty() {
+        return Err(AppError::not_found("playback source not found"));
+    }
 
     Ok(Json(PlaybackInfoResponseDto {
-        media_sources: vec![media_source_to_dto(
-            &source,
-            transcode.as_ref(),
-            access_token,
-        )],
+        media_sources,
         play_session_id,
         error_code: None,
     }))

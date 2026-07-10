@@ -24,7 +24,7 @@ use crate::{
     config::StorageConfig,
     error::AppError,
     library::repository::LibraryRepository,
-    media::repository::{ArtworkRecord, MediaRepository},
+    media::repository::{ArtworkRecord, InsertArtworkInput, MediaRepository},
     state::AppState,
     users::repository::UsersRepository,
 };
@@ -420,15 +420,8 @@ pub async fn upload_item_image(
     ensure_remote_image_admin(&user)?;
     let input = item_image_upload_input(&item_id, &image_type, None, query, &body)?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = (
-        input.image_type,
-        input.image_index,
-        input.body_len,
-        input.new_index,
-        input.image_url,
-    );
 
-    Err(item_image_write_disabled_error())
+    apply_item_image_upload(&state, input, &body).await
 }
 
 pub async fn upload_item_image_index(
@@ -443,15 +436,8 @@ pub async fn upload_item_image_index(
     ensure_remote_image_admin(&user)?;
     let input = item_image_upload_input(&item_id, &image_type, Some(index), query, &body)?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = (
-        input.image_type,
-        input.image_index,
-        input.body_len,
-        input.new_index,
-        input.image_url,
-    );
 
-    Err(item_image_write_disabled_error())
+    apply_item_image_upload(&state, input, &body).await
 }
 
 pub async fn delete_item_image(
@@ -465,15 +451,8 @@ pub async fn delete_item_image(
     ensure_remote_image_admin(&user)?;
     let input = item_image_delete_input(&item_id, &image_type, None, query)?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = (
-        input.image_type,
-        input.image_index,
-        input.new_index,
-        input.image_url,
-        input.body_len,
-    );
 
-    Err(item_image_write_disabled_error())
+    apply_item_image_delete(&state, input).await
 }
 
 pub async fn delete_item_image_index(
@@ -487,15 +466,8 @@ pub async fn delete_item_image_index(
     ensure_remote_image_admin(&user)?;
     let input = item_image_delete_input(&item_id, &image_type, Some(index), query)?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = (
-        input.image_type,
-        input.image_index,
-        input.new_index,
-        input.image_url,
-        input.body_len,
-    );
 
-    Err(item_image_write_disabled_error())
+    apply_item_image_delete(&state, input).await
 }
 
 pub async fn reindex_item_image(
@@ -509,15 +481,26 @@ pub async fn reindex_item_image(
     ensure_remote_image_admin(&user)?;
     let input = item_image_reindex_input(&item_id, &image_type, index, query)?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = (
-        input.image_type,
-        input.image_index,
-        input.new_index,
-        input.image_url,
-        input.body_len,
-    );
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let artwork_types = artwork_types_for_emby(&input.image_type)
+        .ok_or_else(|| AppError::unprocessable("unsupported image type"))?;
 
-    Err(item_image_write_disabled_error())
+    let moved = MediaRepository::new(database.clone())
+        .reindex_item_artwork(
+            &input.item_id,
+            &artwork_types,
+            i64::from(input.image_index.unwrap_or(0)),
+            i64::from(input.new_index.unwrap_or(0)),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to reindex item image: {err}")))?;
+    if !moved {
+        return Err(AppError::not_found("item image not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn update_item_image_url(
@@ -531,15 +514,31 @@ pub async fn update_item_image_url(
     ensure_remote_image_admin(&user)?;
     let input = item_image_url_input(&item_id, &image_type, index, query)?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = (
-        input.image_type,
-        input.image_index,
-        input.new_index,
-        input.image_url,
-        input.body_len,
-    );
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let artwork_types = artwork_types_for_emby(&input.image_type)
+        .ok_or_else(|| AppError::unprocessable("unsupported image type"))?;
+    let image_url = input
+        .image_url
+        .as_deref()
+        .ok_or_else(|| AppError::unprocessable("Url is required"))?;
+    ensure_public_remote_image_url(image_url)?;
 
-    Err(item_image_write_disabled_error())
+    let applied = MediaRepository::new(database.clone())
+        .update_item_artwork_url(
+            &input.item_id,
+            &artwork_types,
+            i64::from(input.image_index.unwrap_or(0)),
+            image_url,
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to update item image url: {err}")))?;
+    if !applied {
+        return Err(AppError::not_found("item not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn item_images(
@@ -572,8 +571,80 @@ pub async fn remote_images(
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     let input = remote_images_input(query)?;
     ensure_user_can_access_item(&state, user.id, &item_id).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Ok(Json(empty_remote_image_result(input)))
+    // Provider 过滤：显式指定且不是 TMDB → 空结果（当前只接了 TMDB 的图片目录）。
+    if let Some(provider) = input.provider_name.as_deref()
+        && !matches!(
+            provider.trim().to_ascii_lowercase().as_str(),
+            "tmdb" | "themoviedb"
+        )
+    {
+        return Ok(Json(empty_remote_image_result(input)));
+    }
+
+    let Some(item) = LibraryRepository::new(database.clone())
+        .find_user_item_by_id(user.id, &item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get media item: {err}")))?
+    else {
+        return Err(AppError::not_found("item not found"));
+    };
+    let Some(tmdb_id) = MediaRepository::new(database.clone())
+        .find_item_external_id(&item_id, "tmdb")
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get external id: {err}")))?
+    else {
+        return Ok(Json(empty_remote_image_result(input)));
+    };
+
+    let config = state.config();
+    let candidates = crate::metadata::remote_search::RemoteSearchService::new(
+        database.clone(),
+        config.metadata.clone(),
+        config.proxy.clone(),
+        config.secrets.clone(),
+    )
+    .list_images(&item.item_type, &tmdb_id)
+    .await
+    .map_err(|err| AppError::internal(format!("remote image listing failed: {err}")))?;
+
+    let type_filter = input.image_type.clone();
+    let filtered = candidates
+        .into_iter()
+        .filter(|candidate| {
+            type_filter
+                .as_deref()
+                .is_none_or(|image_type| candidate.image_type.eq_ignore_ascii_case(image_type))
+        })
+        .collect::<Vec<_>>();
+    let total = filtered.len() as u32;
+    let images = filtered
+        .into_iter()
+        .skip(input.start_index as usize)
+        .take(input.limit.max(1) as usize)
+        .map(|candidate| RemoteImageInfoDto {
+            provider_name: Some("TheMovieDb".to_owned()),
+            url: Some(candidate.url),
+            thumbnail_url: candidate.thumbnail_url,
+            height: candidate.height,
+            width: candidate.width,
+            community_rating: candidate.community_rating,
+            vote_count: candidate.vote_count,
+            language: candidate.language.clone(),
+            display_language: candidate.language,
+            r#type: candidate.image_type,
+            rating_type: Some("Score".to_owned()),
+        })
+        .collect();
+
+    Ok(Json(RemoteImageResultDto {
+        images,
+        total_record_count: total,
+        providers: vec!["TheMovieDb".to_owned()],
+    }))
 }
 
 pub async fn remote_image_providers(
@@ -601,16 +672,48 @@ pub async fn download_remote_image(
     let body = parse_optional_remote_image_download_body(&headers, &body)?;
     let input = remote_image_download_input(&item_id, query, body)?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = (
-        &input.image_type,
-        &input.provider_name,
-        &input.image_url,
-        input.image_index,
-    );
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let artwork_types = artwork_types_for_emby(&input.image_type)
+        .ok_or_else(|| AppError::unprocessable("unsupported image type"))?;
+    let image_url = input
+        .image_url
+        .as_deref()
+        .ok_or_else(|| AppError::unprocessable("ImageUrl is required"))?;
+    ensure_public_remote_image_url(image_url)?;
 
-    Err(AppError::conflict(
-        "remote image downloads are not configured",
-    ))
+    let bytes = fetch_remote_image_bytes(image_url).await?;
+    let decoded = decode_item_image_payload(&bytes)?;
+    let storage_key = store_item_image_file(
+        &state.config().storage.artwork_cache_dir,
+        &input.item_id,
+        &decoded,
+    )
+    .await?;
+
+    let inserted = MediaRepository::new(database.clone())
+        .insert_item_artwork(InsertArtworkInput {
+            item_id: input.item_id.clone(),
+            artwork_type: artwork_types[0].clone(),
+            source: input
+                .provider_name
+                .as_deref()
+                .unwrap_or("remote")
+                .to_ascii_lowercase(),
+            storage_key: Some(storage_key),
+            remote_url: Some(image_url.to_owned()),
+            width: decoded.width,
+            height: decoded.height,
+            make_primary: true,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to save downloaded image: {err}")))?;
+    if !inserted {
+        return Err(AppError::not_found("item not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn remote_image_proxy(
@@ -618,14 +721,37 @@ pub async fn remote_image_proxy(
     Query(query): Query<RemoteImageProxyQuery>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<StatusCode, AppError> {
+) -> Result<Response, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_remote_image_admin(&user)?;
-    normalize_required_remote_image_url(query.image_url.as_deref())?;
+    let image_url = normalize_required_remote_image_url(query.image_url.as_deref())?;
+    ensure_public_remote_image_url(&image_url)?;
 
-    Err(AppError::conflict(
-        "remote image proxying is not configured",
-    ))
+    remote_image_passthrough_response(&image_url).await
+}
+
+/// 拉取远端图片并作为图片响应回传（RemoteSearch/Image 与 Images/Remote 共用）。
+pub(super) async fn remote_image_passthrough_response(image_url: &str) -> Result<Response, AppError> {
+    let bytes = fetch_remote_image_bytes(image_url).await?;
+    let content_type = probe_image_bytes(&bytes)
+        .map(|(extension, _, _)| match extension {
+            "png" => "image/png",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => "image/jpeg",
+        })
+        .ok_or_else(|| AppError::unprocessable("remote content is not a supported image"))?;
+
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static(IMAGE_CACHE_CONTROL));
+
+    Ok(response)
 }
 
 pub async fn global_image_catalog(
@@ -676,7 +802,30 @@ async fn named_entity_image_response(
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     let input = named_entity_image_input(uri.path(), &name, &image_type, index)?;
     ensure_named_entity_visible(&state, user.id, &input).await?;
-    let _ = (&input.image_type, input.index);
+
+    // 人物头像：查 artwork 表并直通 remote_url（TMDB CDN），跟条目海报同机制。
+    // 其他 kind（Artist/Genre/Studio）本次不支持，仍返回 not_found。
+    if input.kind == NamedEntityImageKind::Person {
+        let artwork_types = artwork_types_for_emby(&input.image_type)
+            .ok_or_else(|| AppError::unprocessable("unsupported image type"))?;
+        let Some(database) = state.database() else {
+            return Err(AppError::internal("database is not configured"));
+        };
+
+        let artwork = MediaRepository::new(database.clone())
+            .find_person_artwork_by_name(
+                user.id,
+                &input.name,
+                &artwork_types,
+                i64::from(input.index),
+            )
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get person image: {err}")))?;
+
+        if let Some(artwork) = artwork {
+            return artwork_response(&state.config().storage, artwork, None).await;
+        }
+    }
 
     Err(AppError::not_found("named entity image not found"))
 }
@@ -1607,8 +1756,288 @@ fn ensure_remote_image_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
     Err(AppError::forbidden("server management permission required"))
 }
 
-fn item_image_write_disabled_error() -> AppError {
-    AppError::conflict("item image mutations are not configured")
+/// 上传主流程：解码（裸字节或 base64）→ 落盘 artwork 缓存 → 写 artwork 行。
+/// 无 Index 或 Index=0 时该图成为该类型主图（旧主图降级为备选）。
+async fn apply_item_image_upload(
+    state: &AppState,
+    input: ItemImageMutationInput,
+    body: &Bytes,
+) -> Result<StatusCode, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let artwork_types = artwork_types_for_emby(&input.image_type)
+        .ok_or_else(|| AppError::unprocessable("unsupported image type"))?;
+
+    let decoded = decode_item_image_payload(body)?;
+    let storage_key = store_item_image_file(
+        &state.config().storage.artwork_cache_dir,
+        &input.item_id,
+        &decoded,
+    )
+    .await?;
+
+    let make_primary = input.image_index.unwrap_or(0) == 0;
+    let inserted = MediaRepository::new(database.clone())
+        .insert_item_artwork(InsertArtworkInput {
+            item_id: input.item_id.clone(),
+            artwork_type: artwork_types[0].clone(),
+            source: "upload".to_owned(),
+            storage_key: Some(storage_key),
+            remote_url: None,
+            width: decoded.width,
+            height: decoded.height,
+            make_primary,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to save uploaded image: {err}")))?;
+    if !inserted {
+        return Err(AppError::not_found("item not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 删除类型序中第 Index 张图；本地缓存文件一并尽力删除（失败不影响响应）。
+async fn apply_item_image_delete(
+    state: &AppState,
+    input: ItemImageMutationInput,
+) -> Result<StatusCode, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let artwork_types = artwork_types_for_emby(&input.image_type)
+        .ok_or_else(|| AppError::unprocessable("unsupported image type"))?;
+
+    let removed = MediaRepository::new(database.clone())
+        .delete_item_artwork_at_index(
+            &input.item_id,
+            &artwork_types,
+            i64::from(input.image_index.unwrap_or(0)),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to delete item image: {err}")))?;
+
+    match removed {
+        Some(storage_key) => {
+            if let Some(storage_key) = storage_key {
+                remove_artwork_cache_file(&state.config().storage.artwork_cache_dir, &storage_key)
+                    .await;
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
+        None => Err(AppError::not_found("item image not found")),
+    }
+}
+
+/// 已解码的上传图片：有效字节（base64 已剥壳）+ 规范扩展名 + 尺寸。
+struct DecodedItemImage {
+    bytes: Vec<u8>,
+    extension: &'static str,
+    width: Option<i32>,
+    height: Option<i32>,
+}
+
+/// Emby 客户端上传图片走 base64 文本体（官方行为），也有客户端直接发裸字节。
+/// 先按裸字节识别格式，识别失败再尝试 base64 解码后识别。
+fn decode_item_image_payload(body: &[u8]) -> Result<DecodedItemImage, AppError> {
+    if body.is_empty() {
+        return Err(AppError::unprocessable("image body is required"));
+    }
+
+    if let Some(decoded) = probe_image_bytes(body) {
+        return Ok(DecodedItemImage {
+            bytes: body.to_vec(),
+            extension: decoded.0,
+            width: decoded.1,
+            height: decoded.2,
+        });
+    }
+
+    let raw = decode_base64_payload(body)
+        .ok_or_else(|| AppError::unprocessable("image body is not a supported image"))?;
+    let decoded = probe_image_bytes(&raw)
+        .ok_or_else(|| AppError::unprocessable("image body is not a supported image"))?;
+
+    Ok(DecodedItemImage {
+        bytes: raw,
+        extension: decoded.0,
+        width: decoded.1,
+        height: decoded.2,
+    })
+}
+
+/// 识别图片格式与尺寸；仅接受 artwork 缓存支持的格式。
+fn probe_image_bytes(bytes: &[u8]) -> Option<(&'static str, Option<i32>, Option<i32>)> {
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let extension = match reader.format()? {
+        image::ImageFormat::Jpeg => "jpg",
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::WebP => "webp",
+        image::ImageFormat::Gif => "gif",
+        _ => return None,
+    };
+    let (width, height) = reader.into_dimensions().ok()?;
+
+    Some((
+        extension,
+        i32::try_from(width).ok().filter(|value| *value > 0),
+        i32::try_from(height).ok().filter(|value| *value > 0),
+    ))
+}
+
+/// 标准 base64（含 URL-safe 变体）解码，忽略空白，容忍缺省 padding。
+fn decode_base64_payload(body: &[u8]) -> Option<Vec<u8>> {
+    fn value_of(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            _ => None,
+        }
+    }
+
+    let mut output = Vec::with_capacity(body.len() / 4 * 3);
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    for &byte in body {
+        if byte.is_ascii_whitespace() || byte == b'=' {
+            continue;
+        }
+        let value = value_of(byte)?;
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+        }
+    }
+
+    (!output.is_empty()).then_some(output)
+}
+
+/// 上传/下载图片落盘：`uploads/{item uuid}/{纳秒时间戳}.{ext}`，返回 storage_key。
+async fn store_item_image_file(
+    artwork_cache_dir: &Path,
+    item_id: &str,
+    decoded: &DecodedItemImage,
+) -> Result<String, AppError> {
+    let item_segment = item_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .collect::<String>();
+    if item_segment.is_empty() {
+        return Err(AppError::unprocessable("item id is invalid"));
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let storage_key = format!(
+        "uploads/{item_segment}/{nanos}.{extension}",
+        extension = decoded.extension
+    );
+
+    let output_path = artwork_cache_dir.join(&storage_key);
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to create image directory: {err}")))?;
+    }
+    tokio::fs::write(&output_path, &decoded.bytes)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to write image file: {err}")))?;
+
+    Ok(storage_key)
+}
+
+/// 尽力删除 artwork 缓存文件（拒绝越界 storage_key；失败仅记日志语义，静默）。
+async fn remove_artwork_cache_file(artwork_cache_dir: &Path, storage_key: &str) {
+    let Ok(relative_path) = safe_storage_key_path(storage_key) else {
+        return;
+    };
+    let _ = tokio::fs::remove_file(artwork_cache_dir.join(relative_path)).await;
+}
+
+/// 管理员触发的远端图片抓取仍要做基本 SSRF 防护：仅 http(s)、无凭据、
+/// 拒绝回环/私网/链路本地字面量主机。
+pub(super) fn ensure_public_remote_image_url(url: &str) -> Result<(), AppError> {
+    let parsed = url
+        .parse::<Uri>()
+        .map_err(|_| AppError::unprocessable("ImageUrl is invalid"))?;
+    if !matches!(parsed.scheme_str(), Some("http" | "https")) {
+        return Err(AppError::unprocessable("ImageUrl is invalid"));
+    }
+    let Some(host) = parsed.host() else {
+        return Err(AppError::unprocessable("ImageUrl is invalid"));
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if is_private_or_loopback_host(host) {
+        return Err(AppError::unprocessable(
+            "ImageUrl must point to a public host",
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_private_or_loopback_host(host: &str) -> bool {
+    let normalized = host.to_ascii_lowercase();
+    if normalized == "localhost" || normalized.ends_with(".localhost") || normalized.ends_with(".local")
+    {
+        return true;
+    }
+    if let Ok(address) = normalized.parse::<std::net::IpAddr>() {
+        return match address {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
+        };
+    }
+
+    false
+}
+
+/// 拉取远端图片字节：20 秒超时、16MiB 上限、要求 2xx。
+async fn fetch_remote_image_bytes(url: &str) -> Result<Vec<u8>, AppError> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|err| AppError::internal(format!("failed to build HTTP client: {err}")))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| AppError::unprocessable(format!("image download failed: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::unprocessable(format!(
+            "image download returned status {}",
+            response.status()
+        )));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| AppError::unprocessable(format!("image download read failed: {err}")))?;
+    if bytes.len() > MAX_ITEM_IMAGE_MUTATION_BODY_BYTES {
+        return Err(AppError::unprocessable("downloaded image is too large"));
+    }
+
+    Ok(bytes.to_vec())
 }
 
 fn remote_artwork_response(remote_url: &str) -> Result<Response, AppError> {

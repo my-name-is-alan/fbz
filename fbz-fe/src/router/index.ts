@@ -16,6 +16,11 @@ export const routes = [
         component: () => import("@/views/home/index.vue"),
       },
       {
+        path: "search",
+        name: "search",
+        component: () => import("@/views/search/index.vue"),
+      },
+      {
         path: "library",
         name: "library",
         component: () => import("@/views/library/index.vue"),
@@ -82,6 +87,19 @@ export const routes = [
       { path: "users/create", name: "admin-users-create", component: adminPage },
       { path: "users/:id", name: "admin-users-edit", component: adminPage },
       { path: "plugins", name: "admin-plugins", component: adminPage },
+      { path: "plugin-market", name: "admin-plugin-market", component: adminPage },
+      // 独立配置页须写在 plugins/:pluginId/:menuPath 之前，避免被吞
+      {
+        path: "plugins/:pluginId/config",
+        name: "admin-plugin-config",
+        component: adminPage,
+      },
+      // 插件声明的管理菜单页（manifest menu，路径命名空间 /admin/plugins/{pluginId}/...）
+      {
+        path: "plugins/:pluginId/:menuPath(.*)*",
+        name: "admin-plugin-page",
+        component: adminPage,
+      },
       { path: "scheduled-tasks", name: "admin-scheduled-tasks", component: adminPage },
       { path: "metadata-mgr", name: "admin-metadata-mgr", component: adminPage },
       { path: "logs", name: "admin-logs", component: adminPage },

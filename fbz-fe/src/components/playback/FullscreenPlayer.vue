@@ -1,4 +1,10 @@
 <script setup lang="ts">
+import {
+  newPlaySessionId,
+  reportPlaybackProgress,
+  reportPlaybackStart,
+  reportPlaybackStopped,
+} from "@/service/modules/playbackReport.ts";
 import type {
   PlaybackChapter,
   PlaybackEpisode,
@@ -39,14 +45,21 @@ const isBuffering = shallowRef(false);
 const currentTime = shallowRef(0);
 const videoDuration = shallowRef(0);
 const volume = shallowRef(0.82);
-const selectedAudioTrack = shallowRef("zh-main");
-const selectedSubtitleTrack = shallowRef("zh-cn");
+const selectedAudioTrack = shallowRef("");
+const selectedSubtitleTrack = shallowRef("off");
 const loadState = shallowRef("等待媒体源");
 const loadError = shallowRef("");
 const selectedInfoTab = shallowRef<"episodes" | "chapters" | "info">("episodes");
+// 真实音轨/字幕（媒体加载后从 shaka 读出；无流时为空并显示空态）。
+const realAudioTracks = ref<PlaybackTrack[]>([]);
+const realSubtitleTracks = ref<PlaybackTrack[]>([]);
 
 let hideTimer: number | undefined;
 let shakaApiPromise: Promise<ShakaApi> | undefined;
+// 播放进度上报：一次播放（open→close/切集）一个会话 id，周期 + 关键事件上报。
+let progressTimer: number | undefined;
+let playSessionId = "";
+let reportedItemId = "";
 
 const hasSource = computed(() => Boolean(props.item.source?.uri));
 const duration = computed(() => props.item.duration ?? (videoDuration.value || 45 * 60));
@@ -56,24 +69,14 @@ const progressPercent = computed(() => {
 });
 
 const audioTracks = computed<PlaybackTrack[]>(() =>
-  props.item.audioTracks?.length
-    ? props.item.audioTracks
-    : [
-        { id: "zh-main", label: "中文主音轨", language: "zh", active: true },
-        { id: "en-original", label: "英文原声", language: "en" },
-      ],
+  props.item.audioTracks?.length ? props.item.audioTracks : realAudioTracks.value,
 );
 
-const subtitleTracks = computed<PlaybackTrack[]>(() =>
-  props.item.subtitleTracks?.length
-    ? props.item.subtitleTracks
-    : [
-        { id: "off", label: "关闭字幕" },
-        { id: "zh-cn", label: "简体中文", language: "zh", active: true },
-        { id: "zh-tw", label: "繁体中文", language: "zh" },
-        { id: "en", label: "English", language: "en" },
-      ],
-);
+const subtitleTracks = computed<PlaybackTrack[]>(() => {
+  if (props.item.subtitleTracks?.length) return props.item.subtitleTracks;
+  if (!realSubtitleTracks.value.length) return [];
+  return [{ id: "off", label: "关闭字幕" }, ...realSubtitleTracks.value];
+});
 
 const chapters = computed<PlaybackChapter[]>(() => {
   if (props.item.chapters?.length) return props.item.chapters;
@@ -120,7 +123,7 @@ const mediaStats = computed<MediaStat[]>(() => {
 });
 
 watch(
-  () => props.item.id,
+  () => [props.item.id, props.item.source?.uri] as const,
   async () => {
     await resetPlayer();
   },
@@ -137,16 +140,23 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   clearTimers();
+  void reportStopped();
   void shakaPlayer.value?.destroy();
 });
 
 async function resetPlayer() {
   clearTimers();
+  // 切换条目前把上一条的最终进度落掉。
+  await reportStopped();
   currentTime.value = 0;
   videoDuration.value = 0;
   isPlaying.value = false;
   isBuffering.value = false;
   loadError.value = "";
+  realAudioTracks.value = [];
+  realSubtitleTracks.value = [];
+  selectedAudioTrack.value = "";
+  selectedSubtitleTrack.value = "off";
   loadState.value = "初始化播放核心";
 
   await nextTick();
@@ -180,12 +190,129 @@ async function resetPlayer() {
     player.addEventListener("buffering", (event) => {
       isBuffering.value = Boolean((event as CustomEvent<boolean>).detail);
     });
-    await player.load(props.item.source!.uri!);
+    // 续播：直接从上次位置开始加载（比 load 后 seek 少一次缓冲往返）。
+    const startAt = props.item.startPositionSeconds;
+    await player.load(props.item.source!.uri!, startAt && startAt > 0 ? startAt : undefined);
     videoDuration.value = video.duration || props.item.duration || 0;
+    refreshRealTracks();
     loadState.value = "媒体已就绪";
+
+    // 开始上报播放会话（进度写入 user_playstates → 继续观看）。
+    playSessionId = newPlaySessionId();
+    reportedItemId = props.item.id;
+    void reportPlaybackStart({
+      itemId: reportedItemId,
+      playSessionId,
+      positionSeconds: startAt ?? 0,
+    }).catch(() => {});
+    startProgressTimer();
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : "媒体加载失败";
     loadState.value = "媒体加载失败";
+  }
+}
+
+/** 从 shaka 读取真实音轨（按语言聚合）与字幕轨。 */
+function refreshRealTracks() {
+  const player = shakaPlayer.value;
+  if (!player) return;
+
+  const languages = player.getAudioLanguages();
+  const activeVariant = player.getVariantTracks().find((track) => track.active);
+  realAudioTracks.value = languages.map((language) => ({
+    id: language,
+    label: languageLabel(language),
+    language,
+    active: activeVariant?.language === language,
+  }));
+  if (activeVariant?.language) selectedAudioTrack.value = activeVariant.language;
+
+  const textTracks = player.getTextTracks();
+  realSubtitleTracks.value = textTracks.map((track, index) => ({
+    id: String(track.id),
+    label: track.label || languageLabel(track.language ?? "") || `字幕 ${index + 1}`,
+    language: track.language ?? undefined,
+    active: track.active,
+  }));
+  const activeText = textTracks.find((track) => track.active);
+  selectedSubtitleTrack.value =
+    activeText && player.isTextTrackVisible() ? String(activeText.id) : "off";
+}
+
+/** 语言码 → 展示名（浏览器 Intl 有则用，缺省回显原码）。 */
+function languageLabel(language: string): string {
+  if (!language) return "";
+  try {
+    const display = new Intl.DisplayNames(["zh-CN"], { type: "language" });
+    return display.of(language) ?? language;
+  } catch {
+    return language;
+  }
+}
+
+/** 切换音轨（按语言）。 */
+function selectAudioTrack(track: PlaybackTrack) {
+  selectedAudioTrack.value = track.id;
+  if (track.language) shakaPlayer.value?.selectAudioLanguage(track.language);
+}
+
+/** 切换字幕轨（off = 关闭显示）。 */
+function selectSubtitleTrack(track: PlaybackTrack) {
+  selectedSubtitleTrack.value = track.id;
+  const player = shakaPlayer.value;
+  if (!player) return;
+  if (track.id === "off") {
+    void player.setTextTrackVisibility(false);
+    return;
+  }
+  const target = player.getTextTracks().find((candidate) => String(candidate.id) === track.id);
+  if (target) {
+    player.selectTextTrack(target);
+    void player.setTextTrackVisibility(true);
+  }
+}
+
+function startProgressTimer() {
+  stopProgressTimer();
+  progressTimer = window.setInterval(() => {
+    void reportProgress();
+  }, 10_000);
+}
+
+function stopProgressTimer() {
+  if (progressTimer) window.clearInterval(progressTimer);
+  progressTimer = undefined;
+}
+
+async function reportProgress() {
+  if (!playSessionId || !reportedItemId) return;
+  try {
+    await reportPlaybackProgress({
+      itemId: reportedItemId,
+      playSessionId,
+      positionSeconds: currentTime.value,
+      isPaused: !isPlaying.value,
+    });
+  } catch {
+    // 进度上报失败不打断播放。
+  }
+}
+
+async function reportStopped() {
+  stopProgressTimer();
+  if (!playSessionId || !reportedItemId) return;
+  const sessionId = playSessionId;
+  const itemId = reportedItemId;
+  playSessionId = "";
+  reportedItemId = "";
+  try {
+    await reportPlaybackStopped({
+      itemId,
+      playSessionId: sessionId,
+      positionSeconds: currentTime.value,
+    });
+  } catch {
+    // 停止上报失败不打断关闭流程。
   }
 }
 
@@ -197,6 +324,7 @@ async function loadShaka() {
 function clearTimers() {
   if (hideTimer) window.clearTimeout(hideTimer);
   hideTimer = undefined;
+  stopProgressTimer();
 }
 
 function handlePointerMove() {
@@ -227,6 +355,16 @@ function onVideoPlay() {
 
 function onVideoPause() {
   isPlaying.value = false;
+  // 暂停即落一次进度（用户此时最可能离开）。
+  void reportProgress();
+}
+
+function onVideoEnded() {
+  isPlaying.value = false;
+  currentTime.value = duration.value;
+  void reportStopped();
+  // 剧集看完自动接下一集。
+  if (props.hasNextEpisode) emit("nextEpisode");
 }
 
 function onTimeUpdate() {
@@ -286,6 +424,7 @@ function handleKeydown(event: KeyboardEvent) {
       :poster="props.item.backdrop ?? props.item.poster"
       @play="onVideoPlay"
       @pause="onVideoPause"
+      @ended="onVideoEnded"
       @timeupdate="onTimeUpdate"
       @loadedmetadata="onLoadedMetadata"
       @waiting="isBuffering = true"
@@ -403,10 +542,11 @@ function handleKeydown(event: KeyboardEvent) {
           :key="track.id"
           type="button"
           :class="{ active: selectedAudioTrack === track.id }"
-          @click="selectedAudioTrack = track.id"
+          @click="selectAudioTrack(track)"
         >
           {{ track.label }}
         </button>
+        <p v-if="!audioTracks.length" class="empty-note">当前媒体未上报可切换音轨。</p>
       </section>
       <section>
         <h3>字幕</h3>
@@ -415,10 +555,11 @@ function handleKeydown(event: KeyboardEvent) {
           :key="track.id"
           type="button"
           :class="{ active: selectedSubtitleTrack === track.id }"
-          @click="selectedSubtitleTrack = track.id"
+          @click="selectSubtitleTrack(track)"
         >
           {{ track.label }}
         </button>
+        <p v-if="!subtitleTracks.length" class="empty-note">当前媒体没有内嵌/外挂字幕轨。</p>
       </section>
     </div>
 

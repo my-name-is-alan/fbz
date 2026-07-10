@@ -21,6 +21,7 @@ use crate::{
         SimilarItemsInput, SortDirection, StringListFilter, UserItemAncestorRecord,
         UserLibraryViewRecord,
     },
+    media::repository::MediaRepository,
     state::AppState,
 };
 
@@ -849,7 +850,6 @@ pub(super) async fn list_items_for_authenticated_user(
         let result = repository
             .list_user_playlists(PlaylistListInput {
                 user_id: authenticated_user.id,
-                parent_id: normalized_parent_id(query.parent_id),
                 start_index: window.start_index,
                 limit: window.limit,
                 search_term: normalized_text_filter(query.search_term.as_deref()),
@@ -882,11 +882,17 @@ pub(super) async fn list_items_for_authenticated_user(
     let association_filter = association_filter_from_query(&query);
     let parent_id = normalized_parent_id(query.parent_id);
     let recursive = query.recursive.unwrap_or(false);
+    // 带 SearchTerm 且客户端未显式指定排序时按相关度排序（命中质量优先于字典序）。
+    let default_sort = if scalar_filter.search_term.is_some() {
+        ItemSortField::Relevance
+    } else {
+        ItemSortField::SortName
+    };
     let options = item_query_options_with_filters(
         query.include_item_types.as_deref(),
         query.sort_by.as_deref(),
         query.sort_order.as_deref(),
-        ItemSortField::SortName,
+        default_sort,
         SortDirection::Asc,
         scalar_filter,
         user_data_filter,
@@ -1068,8 +1074,6 @@ fn search_hints_items_query(query: SearchHintsQuery) -> ItemsQuery {
         include_item_types: query.include_item_types,
         search_term: query.search_term,
         media_types: query.media_types,
-        sort_by: Some("SortName".to_owned()),
-        sort_order: Some("Ascending".to_owned()),
         ..ItemsQuery::default()
     }
 }
@@ -1463,11 +1467,20 @@ pub async fn delete_video_alternate_sources(
 ) -> Result<StatusCode, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_server_admin(&user)?;
-    let _item_id = video_version_item_id(&item_id)?;
+    let item_id = video_version_item_id(&item_id)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict(
-        "video alternate source deletion is not configured",
-    ))
+    let split = MediaRepository::new(database.clone())
+        .split_video_alternate_sources(&item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to split alternate sources: {err}")))?;
+    if split.is_none() {
+        return Err(AppError::not_found("item not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn merge_video_versions(
@@ -1478,11 +1491,22 @@ pub async fn merge_video_versions(
 ) -> Result<StatusCode, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_server_admin(&user)?;
-    let _input = merge_versions_input(&query)?;
+    let input = merge_versions_input(&query)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict(
-        "video version merging is not configured",
-    ))
+    let merged = MediaRepository::new(database.clone())
+        .merge_video_versions(&input.ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to merge video versions: {err}")))?;
+    if merged.is_none() {
+        return Err(AppError::unprocessable(
+            "at least two existing items are required to merge",
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn item_delete_info(
@@ -1847,6 +1871,22 @@ async fn item_by_id_for_user(
         .map_err(|err| AppError::internal(format!("failed to get item people: {err}")))?;
     base_item.people = people.into_iter().map(item_person_to_dto).collect();
 
+    // 详情增强字段：原名/分级/首播日期/题材（列表接口不带，详情单查回填）。
+    if let Some(extras) = repository
+        .fetch_item_detail_extras(&base_item.id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get item extras: {err}")))?
+    {
+        base_item.genres = extras.genres;
+        base_item.original_title = extras
+            .original_title
+            .filter(|value| !value.trim().is_empty() && *value != base_item.name);
+        base_item.official_rating = extras.official_rating;
+        if base_item.premiere_date.is_none() {
+            base_item.premiere_date = extras.premiere_date;
+        }
+    }
+
     Ok(Json(base_item))
 }
 
@@ -1869,7 +1909,7 @@ fn item_person_to_dto(record: crate::library::repository::ItemPersonRecord) -> B
         name: record.name,
         role: record.role_name,
         person_type: emby_person_type(&record.role_type).to_owned(),
-        primary_image_tag: None,
+        primary_image_tag: record.has_image.then(|| "primary".to_owned()),
         sort_order: record.sort_order,
     }
 }
@@ -2884,9 +2924,13 @@ fn media_item_to_base_item_with_images(
         production_year: record.production_year,
     });
     item.user_data = Some(user_data);
+    item.index_number = record.index_number;
+    item.parent_index_number = record.parent_index_number;
+    item.premiere_date = record.premiere_date.clone();
     item.size = record.media_file_size;
     item.container = record.media_file_container.clone();
     item.bitrate = record.media_file_bitrate;
+    item.playlist_item_id = record.playlist_item_id.clone();
     item.media_sources = media_source.into_iter().collect();
     apply_requested_image_tags(&mut item, &record.image_tags, requested_images);
     synthesize_photo_primary_tag(&mut item, &record.item_type, requested_images);
@@ -4788,11 +4832,15 @@ mod tests {
             media_file_is_strm: Some(false),
             supports_transcoding: true,
             production_year: Some(2026),
+            index_number: None,
+            parent_index_number: None,
+            premiere_date: None,
             playback_position_ticks: 100,
             play_count: 2,
             is_favorite: true,
             rating: Some(8.5),
             played: true,
+            playlist_item_id: None,
             image_tags: Vec::new(),
             total_record_count: 1,
         });
@@ -4854,11 +4902,15 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: None,
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
                 playback_position_ticks: 0,
                 play_count: 0,
                 is_favorite: false,
                 rating: None,
                 played: false,
+                playlist_item_id: None,
                 image_tags: vec![
                     "poster=poster-tag".to_owned(),
                     "primary=primary-tag".to_owned(),
@@ -4905,11 +4957,15 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: None,
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
                 playback_position_ticks: 0,
                 play_count: 0,
                 is_favorite: false,
                 rating: None,
                 played: false,
+                playlist_item_id: None,
                 // 照片缩略图不在 artwork 表，浏览聚合不出 image_tags。
                 image_tags: Vec::new(),
                 total_record_count: 1,
@@ -4948,11 +5004,15 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: None,
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
                 playback_position_ticks: 0,
                 play_count: 0,
                 is_favorite: false,
                 rating: None,
                 played: false,
+                playlist_item_id: None,
                 image_tags: Vec::new(),
                 total_record_count: 1,
             },
@@ -5002,11 +5062,15 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: Some(2026),
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
                 playback_position_ticks: 0,
                 play_count: 0,
                 is_favorite: false,
                 rating: None,
                 played: false,
+                playlist_item_id: None,
                 image_tags: Vec::new(),
                 total_record_count: 1,
             }));

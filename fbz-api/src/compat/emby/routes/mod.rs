@@ -1,9 +1,13 @@
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{delete, get, post},
 };
 
 use crate::state::AppState;
+
+/// 相机上传单文件上限（含少量请求头冗余）。
+const MAX_CAMERA_UPLOAD_BODY_BYTES: usize = 256 * 1024 * 1024 + 64 * 1024;
 
 mod access;
 mod activity_log;
@@ -50,6 +54,7 @@ mod transcoding;
 mod user_data;
 mod users;
 mod views;
+mod ws;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -856,11 +861,15 @@ pub fn router() -> Router<AppState> {
         .route("/Devices/Info", get(devices::device_info))
         .route(
             "/emby/Devices/CameraUploads",
-            get(devices::camera_upload_history).post(devices::camera_upload_disabled),
+            get(devices::camera_upload_history)
+                .post(devices::camera_upload)
+                .layer(DefaultBodyLimit::max(MAX_CAMERA_UPLOAD_BODY_BYTES)),
         )
         .route(
             "/Devices/CameraUploads",
-            get(devices::camera_upload_history).post(devices::camera_upload_disabled),
+            get(devices::camera_upload_history)
+                .post(devices::camera_upload)
+                .layer(DefaultBodyLimit::max(MAX_CAMERA_UPLOAD_BODY_BYTES)),
         )
         .route("/emby/Devices/Delete", post(devices::delete_device))
         .route("/Devices/Delete", post(devices::delete_device))
@@ -1008,6 +1017,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/emby/Sessions/{session_id}", get(sessions::session_by_id))
         .route("/Sessions/{session_id}", get(sessions::session_by_id))
+        .route("/embywebsocket", get(ws::emby_websocket))
+        .route("/emby/embywebsocket", get(ws::emby_websocket))
+        .route("/socket", get(ws::emby_websocket))
+        .route("/emby/socket", get(ws::emby_websocket))
         .route(
             "/emby/Sessions/{session_id}/Playing",
             post(sessions::remote_play),

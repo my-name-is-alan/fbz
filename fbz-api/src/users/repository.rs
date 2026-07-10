@@ -55,6 +55,21 @@ pub struct UsersQueryPage {
     pub total_record_count: i64,
 }
 
+/// 显示偏好行（sort 键 + CustomPrefs jsonb）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisplayPreferencesRecord {
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    pub custom_prefs: serde_json::Value,
+}
+
+/// 用户设置行（key → jsonb 值）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserSettingRecord {
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
 impl UsersRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
@@ -301,6 +316,281 @@ impl UsersRepository {
         .await?;
         Ok(result.rows_affected())
     }
+
+    /// 读取显示偏好（(user, client, key) 一行）。缺省返回 None（路由回默认 DTO）。
+    pub async fn find_display_preferences(
+        &self,
+        user_internal_id: i64,
+        client: &str,
+        preferences_key: &str,
+    ) -> Result<Option<DisplayPreferencesRecord>, sqlx::Error> {
+        sqlx::query(
+            r#"
+            select sort_by, sort_order, custom_prefs
+            from user_display_preferences
+            where user_id = $1
+              and client = $2
+              and preferences_key = $3
+            "#,
+        )
+        .bind(user_internal_id)
+        .bind(client)
+        .bind(preferences_key)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(DisplayPreferencesRecord::from_row)
+        .transpose()
+    }
+
+    /// upsert 显示偏好（整行替换语义：sort/custom_prefs 一起写入）。
+    pub async fn upsert_display_preferences(
+        &self,
+        user_internal_id: i64,
+        client: &str,
+        preferences_key: &str,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        custom_prefs: &serde_json::Value,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            insert into user_display_preferences
+                (user_id, client, preferences_key, sort_by, sort_order, custom_prefs)
+            values ($1, $2, $3, $4, $5, $6)
+            on conflict (user_id, client, preferences_key)
+            do update set
+                sort_by = excluded.sort_by,
+                sort_order = excluded.sort_order,
+                custom_prefs = excluded.custom_prefs,
+                updated_at = now()
+            "#,
+        )
+        .bind(user_internal_id)
+        .bind(client)
+        .bind(preferences_key)
+        .bind(sort_by)
+        .bind(sort_order)
+        .bind(custom_prefs)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// 列出用户全部设置行（key → jsonb 值）。
+    pub async fn list_user_settings(
+        &self,
+        user_internal_id: i64,
+    ) -> Result<Vec<UserSettingRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select setting_key, setting_value
+            from user_settings
+            where user_id = $1
+            order by setting_key
+            "#,
+        )
+        .bind(user_internal_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(UserSettingRecord::from_row).collect()
+    }
+
+    /// 读取单个设置（typed setting）。
+    pub async fn find_user_setting(
+        &self,
+        user_internal_id: i64,
+        setting_key: &str,
+    ) -> Result<Option<serde_json::Value>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select setting_value
+            from user_settings
+            where user_id = $1
+              and setting_key = $2
+            "#,
+        )
+        .bind(user_internal_id)
+        .bind(setting_key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| row.try_get::<serde_json::Value, _>("setting_value"))
+            .transpose()
+    }
+
+    /// upsert 单个设置。
+    pub async fn upsert_user_setting(
+        &self,
+        user_internal_id: i64,
+        setting_key: &str,
+        setting_value: &serde_json::Value,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            insert into user_settings (user_id, setting_key, setting_value)
+            values ($1, $2, $3)
+            on conflict (user_id, setting_key)
+            do update set
+                setting_value = excluded.setting_value,
+                updated_at = now()
+            "#,
+        )
+        .bind(user_internal_id)
+        .bind(setting_key)
+        .bind(setting_value)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// 取用户内部 id（Emby 用户写接口定位目标用）。
+    pub async fn find_internal_id_by_public_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select id
+            from users
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| row.try_get::<i64, _>("id")).transpose()
+    }
+
+    /// 取用户当前密码哈希（自助改密时校验旧密码）。`Ok(None)` = 用户不存在；
+    /// `Ok(Some(None))` = 用户无密码。
+    pub async fn find_password_hash_by_public_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<Option<String>>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select password_hash
+            from users
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| row.try_get::<Option<String>, _>("password_hash"))
+            .transpose()
+    }
+
+    /// 取用户当前显示名（policy 更新时保留现值用）。`Ok(None)` = 用户不存在。
+    pub async fn find_display_name_by_public_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<Option<String>>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select display_name
+            from users
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| row.try_get::<Option<String>, _>("display_name"))
+            .transpose()
+    }
+
+    /// 设置/重置用户密码哈希（None = 清空密码）。返回受影响行数。
+    pub async fn set_user_password_hash(
+        &self,
+        user_id: &str,
+        password_hash: Option<&str>,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            update users
+            set password_hash = $2,
+                updated_at = now()
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .bind(password_hash)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// 更新用户显示名（Emby `POST /Users/{Id}` 的 Name 映射到 display_name，
+    /// 不动登录用 username）。返回受影响行数。
+    pub async fn set_display_name(
+        &self,
+        user_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            update users
+            set display_name = $2,
+                updated_at = now()
+            where public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(user_id)
+        .bind(display_name)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// 删除 key 前缀命中的设置（清除音轨/字幕选择记忆用）。返回删除行数。
+    pub async fn delete_user_settings_by_prefix(
+        &self,
+        user_internal_id: i64,
+        key_prefix: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            delete from user_settings
+            where user_id = $1
+              and setting_key like $2 || '%'
+            "#,
+        )
+        .bind(user_internal_id)
+        .bind(key_prefix)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 fn users_query_page_lower_bound_from_rows(
@@ -345,6 +635,25 @@ impl PublicUserRecord {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             has_password: row.try_get("has_password")?,
+        })
+    }
+}
+
+impl DisplayPreferencesRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            sort_by: row.try_get("sort_by")?,
+            sort_order: row.try_get("sort_order")?,
+            custom_prefs: row.try_get("custom_prefs")?,
+        })
+    }
+}
+
+impl UserSettingRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            key: row.try_get("setting_key")?,
+            value: row.try_get("setting_value")?,
         })
     }
 }

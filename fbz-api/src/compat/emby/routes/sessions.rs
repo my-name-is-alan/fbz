@@ -5,12 +5,13 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri},
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     auth::{
         repository::{AuthRepository, SessionCapabilitiesInput, SessionInfoRecord},
         service::{AuthService, AuthenticatedUser},
+        token::issue_access_token,
     },
     compat::emby::auth::{EmbyCredential, parse_auth_context},
     compat::emby::dto::{BaseItemDto, NameIdPairDto, QueryResultDto, SessionInfoDto},
@@ -211,9 +212,23 @@ pub async fn auth_keys(
 ) -> Result<Json<QueryResultDto<Value>>, AppError> {
     authenticate_admin_user(&state, &headers, &uri).await?;
     let input = auth_keys_query_input(&query);
-    let _limit = input.limit;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Ok(Json(empty_auth_keys_result(input.start_index)))
+    let (records, total) = AuthRepository::new(database.clone())
+        .list_api_keys(i64::from(input.start_index), i64::from(input.limit))
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list api keys: {err}")))?;
+
+    Ok(Json(QueryResultDto::new(
+        records
+            .into_iter()
+            .map(|record| api_key_to_value(record, None))
+            .collect(),
+        total,
+        input.start_index,
+    )))
 }
 
 pub async fn create_auth_key(
@@ -221,12 +236,21 @@ pub async fn create_auth_key(
     Query(query): Query<CreateAuthKeyQuery>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+) -> Result<Json<Value>, AppError> {
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
     let input = create_auth_key_input(&query)?;
-    let _app = input.app;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::forbidden("auth key creation is not enabled"))
+    let issued = issue_access_token();
+    let record = AuthRepository::new(database.clone())
+        .create_api_key(user.id, &input.app, &issued.hash, &issued.prefix)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to create api key: {err}")))?;
+
+    // 明文 token 只在创建响应里出现一次；之后列表只回显前缀。
+    Ok(Json(api_key_to_value(record, Some(issued.token))))
 }
 
 pub async fn delete_auth_key(
@@ -236,9 +260,38 @@ pub async fn delete_auth_key(
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
     authenticate_admin_user(&state, &headers, &uri).await?;
-    let _key = auth_key_path_input(&key)?;
+    let key = auth_key_path_input(&key)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Ok(StatusCode::OK)
+    let revoked = AuthRepository::new(database.clone())
+        .revoke_api_key(&key)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to revoke api key: {err}")))?;
+    if revoked == 0 {
+        return Err(AppError::not_found("api key not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// ApiKeyRecord → Emby AuthenticationInfo 形状（宽松 Value：官方字段命名，缺省置 null）。
+fn api_key_to_value(
+    record: crate::auth::repository::ApiKeyRecord,
+    raw_token: Option<String>,
+) -> Value {
+    serde_json::json!({
+        "Id": record.id,
+        "AccessToken": raw_token.unwrap_or_else(|| record.token_prefix.clone()),
+        "AppName": record.app_name,
+        "DeviceId": Value::Null,
+        "DeviceName": Value::Null,
+        "AppVersion": Value::Null,
+        "UserName": record.user_name,
+        "DateCreated": record.created_at,
+        "DateLastActivity": record.last_used_at,
+    })
 }
 
 pub async fn list_sessions(
@@ -248,8 +301,10 @@ pub async fn list_sessions(
     uri: Uri,
 ) -> Result<Json<Vec<SessionInfoDto>>, AppError> {
     let authenticated = authenticate_request_user(&state, &headers, &uri).await?;
-    if let Some(query_user_id) = query.user_id
-        && query_user_id != authenticated.public_id
+    let is_admin = authenticated.can_manage_server();
+    if let Some(query_user_id) = &query.user_id
+        && query_user_id != &authenticated.public_id
+        && !is_admin
     {
         return Err(AppError::forbidden(
             "authenticated user does not match query user",
@@ -261,16 +316,35 @@ pub async fn list_sessions(
         return Err(AppError::internal("database is not configured"));
     };
 
-    let sessions = AuthRepository::new(database.clone())
-        .list_active_sessions_for_user(
-            authenticated.id,
-            MAX_SESSION_LIST_LIMIT,
-            device_id.as_deref(),
-        )
-        .await
-        .map_err(|err| AppError::internal(format!("failed to list sessions: {err}")))?
+    // 管理员可见全部活跃会话（远程控制目标列表），普通用户仅见自己的会话。
+    let repository = AuthRepository::new(database.clone());
+    let records = if is_admin {
+        repository
+            .list_active_sessions(MAX_SESSION_LIST_LIMIT, device_id.as_deref())
+            .await
+    } else {
+        repository
+            .list_active_sessions_for_user(
+                authenticated.id,
+                MAX_SESSION_LIST_LIMIT,
+                device_id.as_deref(),
+            )
+            .await
+    }
+    .map_err(|err| AppError::internal(format!("failed to list sessions: {err}")))?;
+
+    let sessions = records
         .into_iter()
-        .map(session_record_to_dto)
+        .filter(|record| {
+            query
+                .user_id
+                .as_deref()
+                .is_none_or(|user_id| record.user_id == user_id)
+        })
+        .map(|record| {
+            let connected = state.session_hub().is_connected(&record.id);
+            session_record_to_dto(record, connected)
+        })
         .collect();
 
     Ok(Json(sessions))
@@ -295,7 +369,8 @@ pub async fn session_by_id(
         .map_err(|err| AppError::internal(format!("failed to get session: {err}")))?
         .ok_or_else(|| AppError::not_found("session not found"))?;
 
-    Ok(Json(session_record_to_dto(session)))
+    let connected = state.session_hub().is_connected(&session.id);
+    Ok(Json(session_record_to_dto(session, connected)))
 }
 
 pub async fn logout(
@@ -374,9 +449,37 @@ pub async fn remote_play(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
     let request = parse_optional_emby_body::<RemotePlayRequestDto>(&headers, &body)?;
-    let _input = remote_play_input(&session_id, query, request)?;
+    let input = remote_play_input(&session_id, query, request)?;
+    if input.item_ids.is_empty() {
+        return Err(AppError::unprocessable("ItemIds is required"));
+    }
+
+    let target = resolve_remote_target(&state, &user, &input.session_id).await?;
+    let mut data = serde_json::Map::new();
+    data.insert("ItemIds".to_owned(), json!(input.item_ids));
+    data.insert(
+        "PlayCommand".to_owned(),
+        json!(input.play_command.as_deref().unwrap_or("PlayNow")),
+    );
+    data.insert("ControllingUserId".to_owned(), json!(user.public_id));
+    if let Some(ticks) = input.start_position_ticks {
+        data.insert("StartPositionTicks".to_owned(), json!(ticks));
+    }
+    if let Some(media_source_id) = &input.media_source_id {
+        data.insert("MediaSourceId".to_owned(), json!(media_source_id));
+    }
+    if let Some(index) = input.audio_stream_index {
+        data.insert("AudioStreamIndex".to_owned(), json!(index));
+    }
+    if let Some(index) = input.subtitle_stream_index {
+        data.insert("SubtitleStreamIndex".to_owned(), json!(index));
+    }
+    if let Some(index) = input.start_index {
+        data.insert("StartIndex".to_owned(), json!(index));
+    }
+    deliver_session_message(&state, &target.id, "Play", Value::Object(data))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -388,8 +491,18 @@ pub async fn remote_playstate_command(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
-    let _input = remote_playstate_command_input(&session_id, &command, query)?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let input = remote_playstate_command_input(&session_id, &command, query)?;
+    let command = canonical_playstate_command(&input.command)?;
+
+    let target = resolve_remote_target(&state, &user, &input.session_id).await?;
+    let mut data = serde_json::Map::new();
+    data.insert("Command".to_owned(), json!(command));
+    data.insert("ControllingUserId".to_owned(), json!(user.public_id));
+    if let Some(ticks) = input.seek_position_ticks {
+        data.insert("SeekPositionTicks".to_owned(), json!(ticks));
+    }
+    deliver_session_message(&state, &target.id, "Playstate", Value::Object(data))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -401,9 +514,10 @@ pub async fn remote_general_command(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
     let request = parse_optional_emby_body::<RemoteGeneralCommandDto>(&headers, &body)?;
-    let _input = remote_general_command_input(Some(&session_id), None, request)?;
+    let input = remote_general_command_input(Some(&session_id), None, request)?;
+    dispatch_general_command(&state, &user, input).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -416,6 +530,7 @@ pub async fn remote_general_command_without_session(
 ) -> Result<StatusCode, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
     let request = parse_optional_emby_body::<RemoteGeneralCommandDto>(&headers, &body)?;
+    // 无会话目标的兼容别名：受控解析后按官方形态返回成功，不产生指令。
     let _input = remote_general_command_input(None, None, request)?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -428,9 +543,10 @@ pub async fn remote_general_command_by_name(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
     let request = parse_optional_emby_body::<RemoteGeneralCommandDto>(&headers, &body)?;
-    let _input = remote_general_command_input(Some(&session_id), Some(&command), request)?;
+    let input = remote_general_command_input(Some(&session_id), Some(&command), request)?;
+    dispatch_general_command(&state, &user, input).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -455,8 +571,16 @@ pub async fn remote_system_command(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
-    let _input = remote_named_session_input(&session_id, &command)?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let (session_id, command) = remote_named_session_input(&session_id, &command)?;
+    // 官方 System/{Command} 与 GeneralCommand 同构，走同一下发通道。
+    let target = resolve_remote_target(&state, &user, &session_id).await?;
+    let data = json!({
+        "Name": command,
+        "ControllingUserId": user.public_id,
+        "Arguments": {},
+    });
+    deliver_session_message(&state, &target.id, "GeneralCommand", data)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -469,10 +593,31 @@ pub async fn remote_message(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
     let request = parse_optional_emby_body::<RemoteMessageDto>(&headers, &body)?;
-    let _message = remote_message_input(request, query);
-    normalize_session_id(Some(&session_id))?;
+    let message = remote_message_input(request, query);
+    let session_id = normalize_session_id(Some(&session_id))?;
+    if message.text.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(AppError::unprocessable("Text is required"));
+    }
+
+    let target = resolve_remote_target(&state, &user, &session_id).await?;
+    let mut arguments = serde_json::Map::new();
+    if let Some(header) = &message.header {
+        arguments.insert("Header".to_owned(), json!(header));
+    }
+    if let Some(text) = &message.text {
+        arguments.insert("Text".to_owned(), json!(text));
+    }
+    if let Some(timeout_ms) = message.timeout_ms {
+        arguments.insert("TimeoutMs".to_owned(), json!(timeout_ms));
+    }
+    let data = json!({
+        "Name": "DisplayMessage",
+        "ControllingUserId": user.public_id,
+        "Arguments": Value::Object(arguments),
+    });
+    deliver_session_message(&state, &target.id, "GeneralCommand", data)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -517,7 +662,102 @@ pub async fn remote_remove_session_user(
     Ok(StatusCode::OK)
 }
 
-fn session_record_to_dto(record: SessionInfoRecord) -> SessionInfoDto {
+/// 远程控制目标解析：普通用户只能控制自己名下的活跃会话，服务器管理员可以
+/// 控制任意活跃会话；不可见/过期/已撤销会话一律 404，避免探测他人会话存在性。
+async fn resolve_remote_target(
+    state: &AppState,
+    controller: &AuthenticatedUser,
+    session_id: &str,
+) -> Result<SessionInfoRecord, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let repository = AuthRepository::new(database.clone());
+
+    let record = if controller.can_manage_server() {
+        repository
+            .find_active_session_by_public_id(session_id)
+            .await
+    } else {
+        repository
+            .find_active_session_for_user(controller.id, session_id)
+            .await
+    }
+    .map_err(|err| AppError::internal(format!("failed to resolve target session: {err}")))?;
+
+    record.ok_or_else(|| AppError::not_found("session not found"))
+}
+
+/// 把 Emby 兼容消息投递到目标会话的 websocket 通道；目标未连接返回受控冲突，
+/// 让控制端明确知道指令没有送达（而不是伪造成功）。
+fn deliver_session_message(
+    state: &AppState,
+    session_id: &str,
+    message_type: &str,
+    data: Value,
+) -> Result<(), AppError> {
+    let payload = json!({
+        "MessageType": message_type,
+        "Data": data,
+    })
+    .to_string();
+
+    if state.session_hub().send_to_session(session_id, payload) {
+        Ok(())
+    } else {
+        Err(AppError::conflict(
+            "target session has no active websocket connection",
+        ))
+    }
+}
+
+async fn dispatch_general_command(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: RemoteGeneralCommandInput,
+) -> Result<(), AppError> {
+    let Some(session_id) = &input.session_id else {
+        return Err(AppError::unprocessable("session Id is required"));
+    };
+    let Some(command) = &input.command else {
+        return Err(AppError::unprocessable("command Name is required"));
+    };
+
+    let target = resolve_remote_target(state, user, session_id).await?;
+    let arguments = match input.arguments {
+        Some(Value::Object(map)) => Value::Object(map),
+        _ => Value::Object(serde_json::Map::new()),
+    };
+    let data = json!({
+        "Name": command,
+        "ControllingUserId": user.public_id,
+        "Arguments": arguments,
+    });
+    deliver_session_message(state, &target.id, "GeneralCommand", data)
+}
+
+/// 官方 playstate 指令 allowlist（大小写不敏感映射到官方形态）。
+fn canonical_playstate_command(command: &str) -> Result<&'static str, AppError> {
+    const PLAYSTATE_COMMANDS: [&str; 9] = [
+        "Stop",
+        "Pause",
+        "Unpause",
+        "PlayPause",
+        "NextTrack",
+        "PreviousTrack",
+        "Seek",
+        "Rewind",
+        "FastForward",
+    ];
+
+    PLAYSTATE_COMMANDS
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(command))
+        .copied()
+        .ok_or_else(|| AppError::unprocessable("playstate command is not supported"))
+}
+
+fn session_record_to_dto(record: SessionInfoRecord, supports_remote_control: bool) -> SessionInfoDto {
     SessionInfoDto {
         id: record.id,
         user_id: record.user_id,
@@ -527,6 +767,7 @@ fn session_record_to_dto(record: SessionInfoRecord) -> SessionInfoDto {
         device_name: record.device_name,
         application_version: record.application_version,
         is_active: record.is_active,
+        supports_remote_control,
     }
 }
 
@@ -665,10 +906,6 @@ fn auth_keys_query_input(query: &AuthKeysQuery) -> AuthKeysInput {
             .unwrap_or(MAX_AUTH_KEY_LIMIT)
             .min(MAX_AUTH_KEY_LIMIT),
     }
-}
-
-fn empty_auth_keys_result(start_index: u32) -> QueryResultDto<Value> {
-    QueryResultDto::new(Vec::new(), 0, start_index)
 }
 
 fn create_auth_key_input(query: &CreateAuthKeyQuery) -> Result<CreateAuthKeyInput, AppError> {
@@ -1036,16 +1273,19 @@ mod tests {
 
     #[test]
     fn session_record_mapping_preserves_client_context() {
-        let dto = session_record_to_dto(SessionInfoRecord {
-            id: "session-1".to_owned(),
-            user_id: "user-1".to_owned(),
-            user_name: "alice".to_owned(),
-            client: Some("Infuse".to_owned()),
-            device_id: Some("device-1".to_owned()),
-            device_name: Some("Apple TV".to_owned()),
-            application_version: Some("8.0".to_owned()),
-            is_active: true,
-        });
+        let dto = session_record_to_dto(
+            SessionInfoRecord {
+                id: "session-1".to_owned(),
+                user_id: "user-1".to_owned(),
+                user_name: "alice".to_owned(),
+                client: Some("Infuse".to_owned()),
+                device_id: Some("device-1".to_owned()),
+                device_name: Some("Apple TV".to_owned()),
+                application_version: Some("8.0".to_owned()),
+                is_active: true,
+            },
+            true,
+        );
 
         assert_eq!(dto.id, "session-1");
         assert_eq!(dto.user_id, "user-1");
@@ -1055,6 +1295,7 @@ mod tests {
         assert_eq!(dto.device_name.as_deref(), Some("Apple TV"));
         assert_eq!(dto.application_version.as_deref(), Some("8.0"));
         assert!(dto.is_active);
+        assert!(dto.supports_remote_control);
     }
 
     #[test]
@@ -1295,6 +1536,17 @@ mod tests {
         assert_eq!(input.audio_stream_index, Some(1));
         assert_eq!(input.subtitle_stream_index, Some(-1));
         assert_eq!(input.start_index, Some(2));
+    }
+
+    #[test]
+    fn canonical_playstate_command_maps_case_insensitively() {
+        assert_eq!(canonical_playstate_command("pause").unwrap(), "Pause");
+        assert_eq!(canonical_playstate_command("SEEK").unwrap(), "Seek");
+        assert_eq!(
+            canonical_playstate_command("PlayPause").unwrap(),
+            "PlayPause"
+        );
+        assert!(canonical_playstate_command("SelfDestruct").is_err());
     }
 
     #[test]

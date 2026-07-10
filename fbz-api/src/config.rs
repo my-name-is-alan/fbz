@@ -196,6 +196,8 @@ pub struct StorageConfig {
     pub transcode_cache_dir: PathBuf,
     pub artwork_cache_dir: PathBuf,
     pub scan_event_retention_days: u16,
+    /// 相机上传落盘目录（`Devices/CameraUploads`），按设备分子目录。
+    pub camera_upload_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -557,6 +559,7 @@ impl Config {
                 transcode_cache_dir: path_or("TRANSCODE_CACHE_DIR", "./var/transcode", &source),
                 artwork_cache_dir: path_or("ARTWORK_CACHE_DIR", "./var/artwork", &source),
                 scan_event_retention_days: parse_or("SCAN_EVENT_RETENTION_DAYS", 90_u16, &source)?,
+                camera_upload_dir: path_or("CAMERA_UPLOAD_DIR", "./var/camera-uploads", &source),
             },
             secrets: SecretConfig {
                 key: optional("FBZ_SECRET_KEY", &source),

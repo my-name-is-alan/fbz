@@ -289,6 +289,7 @@ fn artist_people(artists: &[SpotifyArtist]) -> Vec<MetadataPerson> {
             role_type: "artist".to_owned(),
             role_name: String::new(),
             sort_order: idx as i32,
+            profile_image_url: None,
         })
         .filter(|p| !p.name.is_empty())
         .collect()

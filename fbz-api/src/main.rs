@@ -210,7 +210,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let addr = config.socket_addr();
-    let app = build_router(AppState::new(config, database, redis));
+    let app = build_router(
+        AppState::new(config, database, redis).with_shutdown_trigger(shutdown_tx.clone()),
+    );
     let listener = TcpListener::bind(addr).await?;
 
     info!(%addr, "fbz-api listening");
@@ -327,9 +329,14 @@ async fn shutdown_signal(shutdown_tx: broadcast::Sender<()>) {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
+    // 管理端触发（Emby System/Restart / System/Shutdown 经 AppState 发送）
+    // 与 OS 信号走同一优雅停机路径。
+    let mut api_requested = shutdown_tx.subscribe();
+
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+        _ = api_requested.recv() => {},
     }
 
     info!("shutdown signal received");

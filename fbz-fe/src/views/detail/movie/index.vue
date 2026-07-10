@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import type { DetailViewModel } from "@/service/modules/detail.ts";
-import { loadMovieDetail } from "@/service/modules/detail.ts";
+import { fetchPlaybackSource, loadMovieDetail } from "@/service/modules/detail.ts";
+import { setFavorite } from "@/service/modules/userData.ts";
+import { useAuthStore } from "@/stores/auth.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
 import { useUiStore } from "@/stores/ui.ts";
 
 const route = useRoute();
 const playback = usePlaybackStore();
 const uiStore = useUiStore();
+const authStore = useAuthStore();
 const routeId = computed(() => String(route.params.id));
 
 const detail = ref<DetailViewModel>();
+const togglingFavorite = shallowRef(false);
 
 watch(
   routeId,
@@ -19,10 +23,13 @@ watch(
   { immediate: true },
 );
 
-function playMovie() {
+/** 播放：versionId = 所选版本（MediaSource id）；startAt = 续播位置（秒）。 */
+async function playMovie(versionId?: string, startAt?: number) {
   const movie = detail.value;
   if (!movie) return;
 
+  const source = await fetchPlaybackSource(movie.id, versionId);
+  const activeVersion = movie.versions.find((v) => v.id === versionId) ?? movie.versions[0];
   playback.open({
     type: "movie",
     id: movie.id,
@@ -30,9 +37,35 @@ function playMovie() {
     subtitle: movie.meta.join(" · "),
     poster: movie.poster,
     backdrop: movie.backdrop,
-    tags: movie.versions[0]?.tags,
-    duration: movie.runtimeSeconds ?? 108 * 60,
+    tags: activeVersion?.tags,
+    duration: movie.runtimeSeconds,
+    startPositionSeconds: startAt,
+    source: source ? { uri: source.uri, mimeType: source.mimeType } : undefined,
   });
+}
+
+/** 续播：从上次位置继续。 */
+function resumeMovie(versionId?: string) {
+  void playMovie(versionId, detail.value?.resumePositionSeconds);
+}
+
+/** 收藏切换：乐观更新，失败回滚并提示。 */
+async function toggleFavorite() {
+  const movie = detail.value;
+  const userId = authStore.userId;
+  if (!movie || !userId || togglingFavorite.value) return;
+
+  const next = !movie.isFavorite;
+  togglingFavorite.value = true;
+  detail.value = { ...movie, isFavorite: next };
+  try {
+    await setFavorite(userId, movie.id, next);
+  } catch {
+    detail.value = { ...movie, isFavorite: !next };
+    uiStore.showToast("更新收藏状态失败。", "error");
+  } finally {
+    togglingFavorite.value = false;
+  }
 }
 
 /** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
@@ -49,7 +82,7 @@ function editMetadata() {
     poster: movie.poster,
     year: yearSeg ? Number(yearSeg) : undefined,
     rating: movie.rating ?? undefined,
-    isFavorite: false,
+    isFavorite: movie.isFavorite,
   });
 }
 </script>
@@ -63,11 +96,17 @@ function editMetadata() {
       :poster="detail.poster"
       :backdrop="detail.backdrop"
       :meta="detail.meta"
-      :tagline="detail.tagline"
+      :genres="detail.genres"
+      :official-rating="detail.officialRating"
       :overview="detail.overview"
       :rating="detail.rating"
       :versions="detail.versions"
-      @play="playMovie"
+      :is-favorite="detail.isFavorite"
+      :resume-position-seconds="detail.resumePositionSeconds"
+      :played="detail.played"
+      @play="(versionId) => playMovie(versionId)"
+      @resume="resumeMovie"
+      @toggle-favorite="toggleFavorite"
     >
       <template #extra>
         <dl class="facts">
@@ -78,14 +117,6 @@ function editMetadata() {
           <div v-if="detail.originalTitle" class="fact">
             <dt>原名</dt>
             <dd>{{ detail.originalTitle }}</dd>
-          </div>
-          <div v-if="detail.collectionId" class="fact">
-            <dt>所属系列</dt>
-            <dd>
-              <RouterLink :to="`/collection/${detail.collectionId}`" class="link">
-                {{ detail.collectionName }}
-              </RouterLink>
-            </dd>
           </div>
         </dl>
         <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>

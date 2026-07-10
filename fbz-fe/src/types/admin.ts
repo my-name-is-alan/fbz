@@ -476,6 +476,19 @@ export interface PluginConfig {
   values: Record<string, unknown>;
 }
 
+/** 已启用插件声明的后台管理菜单项（路径限定在 /admin/plugins/{pluginId} 命名空间内）。 */
+export interface PluginMenuItem {
+  pluginId: string;
+  packageId: string;
+  pluginName: string;
+  itemKey: string;
+  label: string;
+  path: string;
+  parentKey: string | null;
+  requiredPermission: string | null;
+  weight: number;
+}
+
 export interface PluginDispatch {
   id: string;
   pluginId: string | null;
@@ -545,4 +558,134 @@ export interface PluginHostApiCall {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
+}
+
+// ---- 转码设置 ----
+
+/**
+ * 转码全局设置（`GET/PUT /api/admin/transcode/settings`）。
+ * `hardwareAcceleration` ∈ none/nvenc/qsv/vaapi/videotoolbox；
+ * `maxResolution` ∈ 480/720/1080/2160/original。
+ */
+export interface TranscodeSettings {
+  hardwareAcceleration: string;
+  preferredEncoder: string;
+  maxResolution: string;
+  segmentDuration: number;
+  throttle: boolean;
+}
+
+// ---- 系统信息 / 维护 ----
+
+/** `GET /api/admin/system/info` 系统运行信息。`rustVersion` 可能为 null。 */
+export interface SystemInfo {
+  version: string;
+  buildProfile: string;
+  os: string;
+  rustVersion: string | null;
+  databaseConnected: boolean;
+  redisConnected: boolean;
+  libraryCount: number;
+  userCount: number;
+  mediaItemCount: number;
+}
+
+/** `GET /api/admin/system/maintenance/stats` 存储占用统计（字节）。 */
+export interface MaintenanceStats {
+  cacheSizeBytes: number;
+  dbSizeBytes: number;
+  cacheFileCount: number;
+}
+
+/** `POST /api/admin/system/maintenance/clean-cache` 清理结果。 */
+export interface CleanCacheResult {
+  removedFiles: number;
+  freedBytes: number;
+}
+
+// ---- 插件市场 ----
+
+/** 插件市场源（`GET /api/admin/plugins/market/sources`）。 */
+export interface PluginMarketSource {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  lastSyncedAt: string | null;
+}
+
+/** 新增市场源请求体。 */
+export interface CreateMarketSourceRequest {
+  name: string;
+  url: string;
+}
+
+/** 同步市场源返回（新拉取的 catalog 条目数）。 */
+export interface SyncMarketSourceResult {
+  synced: number;
+}
+
+/** catalog 单条目的权限声明。 */
+export interface PluginMarketPermission {
+  key: string;
+  reason: string | null;
+}
+
+/** 市场 catalog 条目（`GET /api/admin/plugins/market/catalog`）。 */
+export interface PluginMarketCatalogItem {
+  sourceId: string;
+  pluginId: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string | null;
+  permissions: PluginMarketPermission[];
+  iconUrl: string | null;
+  downloadUrl: string;
+  checksumSha256: string | null;
+  signature: string | null;
+  /** 本机已安装该插件时的活动包版本（未安装为 null）。 */
+  installedVersion: string | null;
+  isInstalled: boolean;
+  /** 目录条目版本比已安装版本新。 */
+  hasUpdate: boolean;
+}
+
+/** catalog 查询参数。 */
+export interface PluginMarketCatalogQuery {
+  sourceId?: string;
+  q?: string;
+}
+
+/** 从市场安装请求体。 */
+export interface InstallMarketPluginRequest {
+  sourceId: string;
+  pluginId: string;
+  version: string;
+}
+
+/**
+ * 手工安装插件包请求体（`POST /api/admin/plugins/packages`）。
+ * 服务器端从 `packagePath` 指向的包读取 manifest；可选带校验和/签名做完整性与来源校验。
+ */
+export interface InstallPackageRequest {
+  packagePath: string;
+  checksumSha256?: string;
+  signature?: string;
+}
+
+/** 安装（手工/市场）成功后的落库结果（`InstalledPluginPackageDto`）。 */
+export interface InstalledPluginPackage {
+  packageId: string;
+  pluginId: string;
+  packageVersion: string;
+  packageStatus: string;
+  approvalStatus: string;
+}
+
+/** 浏览器直传插件包结果（`POST /api/admin/plugins/packages/upload`）。 */
+export interface UploadedPluginPackage {
+  packagePath: string;
+  sizeBytes: number;
+  checksumSha256: string;
 }

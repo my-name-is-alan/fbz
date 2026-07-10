@@ -665,7 +665,7 @@ fn apply_tmdb_detail(
     found.networks = tmdb_networks(detail.networks);
     found.videos = tmdb_videos(detail.videos);
     found.collection = tmdb_collection(detail.belongs_to_collection);
-    found.people = tmdb_people(detail.credits);
+    found.people = tmdb_people(detail.credits, image_base_url);
 }
 
 /// TMDB belongs_to_collection → MetadataCollection（电影所属系列）。无名返回 None。
@@ -823,6 +823,20 @@ fn tmdb_image_url(base_url: &str, path: Option<&str>) -> Option<String> {
         base_url.trim_end_matches('/'),
         path
     ))
+}
+
+/// TMDB 人物头像 URL：与 `tmdb_image_url` 同样的校验，但使用 profile
+/// 专用尺寸 `w185`（海报/背景走 `original`，头像走 `w185`）。
+fn tmdb_profile_image_url(base_url: &str, path: Option<&str>) -> Option<String> {
+    let path = path?.trim();
+    if path.is_empty()
+        || !path.starts_with('/')
+        || path.contains(char::is_whitespace)
+        || path.contains("..")
+    {
+        return None;
+    }
+    Some(format!("{}/w185{}", base_url.trim_end_matches('/'), path))
 }
 
 fn tmdb_images_url(base_url: &str, search_kind: TmdbSearchKind, id: i64) -> String {
@@ -1076,7 +1090,7 @@ fn tv_content_rating_for_country(
         })
 }
 
-fn tmdb_people(credits: Option<TmdbCredits>) -> Vec<MetadataPerson> {
+fn tmdb_people(credits: Option<TmdbCredits>, image_base_url: &str) -> Vec<MetadataPerson> {
     let Some(credits) = credits else {
         return Vec::new();
     };
@@ -1098,6 +1112,7 @@ fn tmdb_people(credits: Option<TmdbCredits>) -> Vec<MetadataPerson> {
             "actor",
             cast.character.as_deref(),
             sort_order,
+            tmdb_profile_image_url(image_base_url, cast.profile_path.as_deref()),
         );
     }
 
@@ -1117,6 +1132,7 @@ fn tmdb_people(credits: Option<TmdbCredits>) -> Vec<MetadataPerson> {
             role_type,
             crew.job.as_deref(),
             bounded_sort_order(crew_base + index),
+            tmdb_profile_image_url(image_base_url, crew.profile_path.as_deref()),
         );
     }
 
@@ -1130,6 +1146,7 @@ fn push_tmdb_person(
     role_type: &str,
     role_name: Option<&str>,
     sort_order: i32,
+    profile_image_url: Option<String>,
 ) {
     let Some(name) = normalize_bounded_text(name, MAX_METADATA_PERSON_NAME_LEN) else {
         return;
@@ -1152,6 +1169,7 @@ fn push_tmdb_person(
         role_type: role_type.to_owned(),
         role_name,
         sort_order,
+        profile_image_url,
     });
 }
 
@@ -1294,6 +1312,7 @@ struct TmdbCastCredit {
     name: Option<String>,
     character: Option<String>,
     order: Option<i32>,
+    profile_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1301,6 +1320,7 @@ struct TmdbCrewCredit {
     name: Option<String>,
     job: Option<String>,
     department: Option<String>,
+    profile_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

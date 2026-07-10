@@ -4,30 +4,47 @@ import type { MediaVersion } from "@/types/media.ts";
 /**
  * 详情页头部 —— Emby 式 poster + fanart 布局。
  * fanart（剧照）铺满顶部作为背景，poster（海报）叠在左侧，元信息在右侧。
- * 支持多播放版本：下拉切换版本，规格 tag 与字幕随之同步。
+ * 支持：多版本切换（播放时带出所选版本 id）、收藏切换、续播（从上次位置继续）。
  */
 interface Props {
   title: string;
   poster?: string;
   backdrop?: string;
-  /** 标题下方的信息片段，如 ["2024", "166 min", "科幻"] */
+  /** 标题下方的信息片段，如 ["2024", "2h 6m"] */
   meta?: string[];
-  tagline?: string;
+  /** 题材名列表，渲染为 chips 行 */
+  genres?: string[];
+  /** 分级（如 PG-13），显示为边框徽章 */
+  officialRating?: string;
   overview?: string;
   rating?: number | null;
   /** 是否显示播放按钮（人物页不需要） */
   showActions?: boolean;
   /** 可选播放版本；多版本时显示下拉 */
   versions?: MediaVersion[];
+  /** 收藏态（点亮书签图标） */
+  isFavorite?: boolean;
+  /** 续播位置（秒）；有值时主按钮变「继续播放」并附「从头播放」 */
+  resumePositionSeconds?: number;
+  /** 已看完（显示徽标） */
+  played?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   meta: () => [],
+  genres: () => [],
   showActions: true,
   versions: () => [],
+  isFavorite: false,
+  played: false,
 });
 const emit = defineEmits<{
-  play: [];
+  /** 播放（从头）。载荷 = 所选版本 id（无版本信息时 undefined）。 */
+  play: [versionId?: string];
+  /** 续播（从 resumePositionSeconds 继续）。 */
+  resume: [versionId?: string];
+  /** 收藏/取消收藏。 */
+  toggleFavorite: [];
 }>();
 
 const activeVersionId = ref(props.versions[0]?.id ?? "");
@@ -43,6 +60,23 @@ const activeVersion = computed(
 );
 
 const versionOptions = computed(() => props.versions.map((v) => ({ label: v.label, value: v.id })));
+
+const resumeLabel = computed(() => {
+  const seconds = props.resumePositionSeconds;
+  if (!seconds) return "";
+  const totalMinutes = Math.floor(seconds / 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  const s = Math.floor(seconds % 60);
+  const position = h
+    ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+    : `${m}:${String(s).padStart(2, "0")}`;
+  return `从 ${position} 继续`;
+});
+
+function versionIdOrUndefined(): string | undefined {
+  return activeVersion.value?.id;
+}
 </script>
 
 <template>
@@ -59,14 +93,19 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
 
       <div class="info">
         <h1 class="title">{{ props.title }}</h1>
-        <p v-if="props.tagline" class="tagline">{{ props.tagline }}</p>
 
-        <div v-if="props.meta.length || props.rating != null" class="meta">
+        <div v-if="props.meta.length || props.rating != null || props.officialRating" class="meta">
           <span v-if="props.rating != null" class="rating">★ {{ props.rating.toFixed(1) }}</span>
+          <span v-if="props.officialRating" class="cert">{{ props.officialRating }}</span>
           <template v-for="(m, i) in props.meta" :key="i">
             <span class="dot" />
             <span>{{ m }}</span>
           </template>
+          <span v-if="props.played" class="played-badge">已看完</span>
+        </div>
+
+        <div v-if="props.genres.length" class="genres">
+          <span v-for="genre in props.genres" :key="genre" class="genre-chip">{{ genre }}</span>
         </div>
 
         <!-- 版本规格 tag（随所选版本同步） -->
@@ -81,7 +120,33 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
         <p v-if="props.overview" class="overview">{{ props.overview }}</p>
 
         <div v-if="props.showActions" class="actions">
-          <button class="btn btn-play" type="button" @click="emit('play')">
+          <!-- 有续播位置：主按钮 = 续播，附「从头播放」次按钮 -->
+          <button
+            v-if="props.resumePositionSeconds"
+            class="btn btn-play"
+            type="button"
+            @click="emit('resume', versionIdOrUndefined())"
+          >
+            <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            <span>{{ resumeLabel }}</span>
+          </button>
+          <button
+            v-if="props.resumePositionSeconds"
+            class="btn btn-ghost"
+            type="button"
+            @click="emit('play', versionIdOrUndefined())"
+          >
+            <span>从头播放</span>
+          </button>
+
+          <button
+            v-else
+            class="btn btn-play"
+            type="button"
+            @click="emit('play', versionIdOrUndefined())"
+          >
             <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
               <path d="M8 5v14l11-7z" />
             </svg>
@@ -99,13 +164,19 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
           />
           <span v-else-if="activeVersion" class="version-single">{{ activeVersion.label }}</span>
 
-          <button class="btn btn-ghost" type="button">
+          <button
+            class="btn btn-ghost fav-btn"
+            :class="{ active: props.isFavorite }"
+            type="button"
+            :aria-pressed="props.isFavorite"
+            @click="emit('toggleFavorite')"
+          >
             <svg
               class="btn-icon"
               viewBox="0 0 24 24"
               width="18"
               height="18"
-              fill="none"
+              :fill="props.isFavorite ? 'currentColor' : 'none'"
               stroke="currentColor"
               stroke-width="2.2"
               stroke-linecap="round"
@@ -113,7 +184,7 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
             >
               <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
             </svg>
-            <span>收藏</span>
+            <span>{{ props.isFavorite ? "已收藏" : "收藏" }}</span>
           </button>
         </div>
 
@@ -186,18 +257,11 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
 }
 
 .title {
-  margin: 0 0 var(--fbz-space-2);
+  margin: 0 0 var(--fbz-space-3);
   font-size: 40px;
   line-height: 1.1;
   font-weight: 800;
   color: #ffffff;
-}
-
-.tagline {
-  margin: 0 0 var(--fbz-space-3);
-  font-size: var(--fbz-font-size-md);
-  font-style: italic;
-  color: rgba(255, 255, 255, 0.65);
 }
 
 .meta {
@@ -220,6 +284,41 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
     color: var(--fbz-color-brand-500);
     font-weight: 700;
   }
+
+  .cert {
+    padding: 1px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 3px;
+    font-size: var(--fbz-font-size-xs);
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  .played-badge {
+    padding: 1px 8px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 16%, transparent);
+    color: var(--fbz-color-brand-500);
+    font-size: var(--fbz-font-size-xs);
+    font-weight: 700;
+  }
+}
+
+.genres {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fbz-space-2);
+  margin-bottom: var(--fbz-space-3);
+}
+
+.genre-chip {
+  padding: 3px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: var(--fbz-font-size-xs);
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .tags {
@@ -258,11 +357,17 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   font-size: var(--fbz-font-size-md);
   line-height: 1.7;
   color: rgba(255, 255, 255, 0.8);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
 }
 
 .actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--fbz-space-3);
   margin-bottom: var(--fbz-space-5);
 }
@@ -318,6 +423,12 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
   }
 }
 
+.fav-btn.active {
+  color: var(--fbz-color-brand-500);
+  border-color: color-mix(in srgb, var(--fbz-color-brand-500) 45%, transparent);
+  background: color-mix(in srgb, var(--fbz-color-brand-500) 10%, transparent);
+}
+
 .version-single {
   font-size: var(--fbz-font-size-sm);
   color: rgba(255, 255, 255, 0.5);
@@ -368,10 +479,6 @@ const versionOptions = computed(() => props.versions.map((v) => ({ label: v.labe
 
   .title {
     font-size: 26px;
-  }
-
-  .actions {
-    flex-wrap: wrap;
   }
 
   .actions .btn {

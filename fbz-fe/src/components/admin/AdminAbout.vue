@@ -1,16 +1,37 @@
 <script setup lang="ts">
-import { useUiStore } from "@/stores/ui.ts";
+import { getSystemInfo } from "@/service/modules/admin.ts";
+import type { SystemInfo } from "@/types/admin.ts";
 
-const uiStore = useUiStore();
+const info = ref<SystemInfo | null>(null);
+const loading = ref(false);
+const loadError = ref("");
 
-const checking = ref(false);
+const techStack = computed(() => {
+  const i = info.value;
+  if (!i) return [];
+  const rows: { name: string; val: string }[] = [
+    { name: "版本", val: i.version },
+    { name: "构建配置", val: i.buildProfile },
+    { name: "运行平台", val: i.os },
+  ];
+  if (i.rustVersion) rows.push({ name: "Rust", val: i.rustVersion });
+  return rows;
+});
 
-function handleCheckUpdates() {
-  checking.value = true;
-  setTimeout(() => {
-    checking.value = false;
-    uiStore.showToast("您的自托管影视系统当前已是最新版本 (v0.1.0-alpha)！", "success");
-  }, 1200);
+onMounted(() => {
+  void loadInfo();
+});
+
+async function loadInfo() {
+  loading.value = true;
+  loadError.value = "";
+  try {
+    info.value = await getSystemInfo();
+  } catch {
+    loadError.value = "系统信息加载失败，请确认后端已就绪且当前账号具备管理员权限。";
+  } finally {
+    loading.value = false;
+  }
 }
 </script>
 
@@ -19,27 +40,47 @@ function handleCheckUpdates() {
     <div class="about-card">
       <div class="brand">
         <span class="logo">F<b>B</b>Z</span>
-        <span class="version">Server v0.1.0-alpha</span>
+        <span class="version">Server {{ info?.version ?? "…" }}</span>
       </div>
 
-      <div class="tech-stack-section">
-        <h4>系统构建环境</h4>
+      <p v-if="loadError" class="load-error">{{ loadError }}</p>
+
+      <div v-if="info" class="tech-stack-section">
+        <h4>系统运行环境</h4>
+        <div class="tech-grid">
+          <div v-for="row in techStack" :key="row.name" class="tech-item">
+            <span class="tech-name">{{ row.name }}</span>
+            <span class="tech-val">{{ row.val }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="info" class="tech-stack-section">
+        <h4>连接与规模</h4>
         <div class="tech-grid">
           <div class="tech-item">
-            <span class="tech-name">Vue</span>
-            <span class="tech-val">v3.5.13</span>
+            <span class="tech-name">数据库</span>
+            <span class="tech-val" :class="info.databaseConnected ? 'ok' : 'down'">
+              {{ info.databaseConnected ? "已连接" : "未连接" }}
+            </span>
           </div>
           <div class="tech-item">
-            <span class="tech-name">Vite+ ( vp )</span>
-            <span class="tech-val">v2.0.1</span>
+            <span class="tech-name">Redis</span>
+            <span class="tech-val" :class="info.redisConnected ? 'ok' : 'down'">
+              {{ info.redisConnected ? "已连接" : "未连接" }}
+            </span>
           </div>
           <div class="tech-item">
-            <span class="tech-name">Rolldown Bundler</span>
-            <span class="tech-val">v1.0.0-beta</span>
+            <span class="tech-name">媒体库</span>
+            <span class="tech-val">{{ info.libraryCount }}</span>
           </div>
           <div class="tech-item">
-            <span class="tech-name">Shaka Player</span>
-            <span class="tech-val">v4.11.2</span>
+            <span class="tech-name">用户</span>
+            <span class="tech-val">{{ info.userCount }}</span>
+          </div>
+          <div class="tech-item">
+            <span class="tech-name">媒体条目</span>
+            <span class="tech-val">{{ info.mediaItemCount }}</span>
           </div>
         </div>
       </div>
@@ -51,13 +92,6 @@ function handleCheckUpdates() {
         </p>
         <p class="copyright">Copyright &copy; 2026 FBZ System. MIT Licensed.</p>
       </div>
-
-      <footer class="about-footer">
-        <button class="update-btn" type="button" :disabled="checking" @click="handleCheckUpdates">
-          <span class="spinner" v-if="checking" />
-          <span>{{ checking ? "正在检索更新..." : "检查系统更新" }}</span>
-        </button>
-      </footer>
     </div>
   </div>
 </template>
@@ -141,7 +175,21 @@ function handleCheckUpdates() {
   .tech-val {
     color: var(--fbz-color-text-muted);
     font-family: var(--fbz-font-display);
+
+    &.ok {
+      color: var(--fbz-color-brand-500);
+    }
+
+    &.down {
+      color: var(--fbz-color-danger-500);
+    }
   }
+}
+
+.load-error {
+  margin: 0;
+  color: var(--fbz-color-danger-500);
+  font-size: var(--fbz-font-size-sm);
 }
 
 .about-info-text {
@@ -163,55 +211,6 @@ function handleCheckUpdates() {
     font-size: 11px;
     color: var(--fbz-color-text-muted);
     margin-top: 14px;
-  }
-}
-
-.about-footer {
-  display: flex;
-  justify-content: center;
-  border-top: 1px solid var(--fbz-color-line-soft);
-  padding-top: 20px;
-}
-
-.update-btn {
-  height: 36px;
-  padding: 0 var(--fbz-space-5);
-  background: transparent;
-  border: 1px solid var(--fbz-color-line-bright);
-  color: var(--fbz-color-text-soft);
-  font-weight: 700;
-  font-size: var(--fbz-font-size-sm);
-  border-radius: var(--fbz-radius-control);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  transition: all var(--fbz-motion-fast);
-
-  &:hover:not(:disabled) {
-    border-color: var(--fbz-color-brand-500);
-    color: var(--fbz-color-brand-500);
-    background: color-mix(in srgb, var(--fbz-color-brand-500) 3%, transparent);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-}
-
-.spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--fbz-color-brand-500);
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
   }
 }
 </style>

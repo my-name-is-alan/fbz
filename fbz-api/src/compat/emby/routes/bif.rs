@@ -1,17 +1,29 @@
+use std::path::PathBuf;
+
 use axum::{
     Json,
+    body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, Uri},
+    http::{
+        HeaderMap, HeaderValue, StatusCode, Uri,
+        header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE},
+    },
     response::Response,
 };
 use serde::{Deserialize, Serialize};
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 
-use crate::{error::AppError, library::repository::LibraryRepository, state::AppState};
+use crate::{
+    error::AppError, library::repository::LibraryRepository, media::repository::MediaRepository,
+    state::AppState,
+};
 
 use super::access::authenticate_request_user;
 
 const MAX_BIF_ITEM_ID_LEN: usize = 128;
 const MAX_BIF_WIDTH: u32 = 4096;
+const MAX_BIF_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -50,9 +62,75 @@ pub async fn video_index_bif(
     let input = bif_input(&item_id, query)?;
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_user_can_access_item(&state, user.id, &input.item_id).await?;
-    let _ = input.width;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    // Trickplay 索引来自媒体旁的 BIF sidecar（tinyMediaManager / Roku 生态工具生成，
+    // `{stem}-{width}-10.bif` / `{stem}-{width}.bif` / `{stem}.bif`）。命中即流式返回。
+    let Some(source) = MediaRepository::new(database.clone())
+        .find_playback_media_source(user.id, &input.item_id, None)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get media source: {err}")))?
+    else {
+        return Err(AppError::not_found("bif index not found"));
+    };
+    if source.is_strm {
+        return Err(AppError::not_found("bif index not found"));
+    }
+
+    for candidate in bif_sidecar_candidates(&source.path, input.width) {
+        let metadata = match tokio::fs::metadata(&candidate).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => continue,
+        };
+        if metadata.len() > MAX_BIF_FILE_BYTES {
+            continue;
+        }
+        let file = match File::open(&candidate).await {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+
+        let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        response.headers_mut().insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=86400"),
+        );
+        if let Ok(value) = HeaderValue::from_str(&metadata.len().to_string()) {
+            response.headers_mut().insert(CONTENT_LENGTH, value);
+        }
+        return Ok(response);
+    }
 
     Err(AppError::not_found("bif index not found"))
+}
+
+/// BIF sidecar 候选路径（媒体文件同目录）。宽度命中优先，最后回退无宽度命名。
+fn bif_sidecar_candidates(media_path: &str, width: u32) -> Vec<PathBuf> {
+    let media_path = std::path::Path::new(media_path.trim());
+    let Some(stem) = media_path.file_stem().and_then(|value| value.to_str()) else {
+        return Vec::new();
+    };
+    let parent = media_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+
+    [
+        format!("{stem}-{width}-10.bif"),
+        format!("{stem}-{width}.bif"),
+        format!("{stem}-320-10.bif"),
+        format!("{stem}-320.bif"),
+        format!("{stem}.bif"),
+    ]
+    .into_iter()
+    .map(|name| parent.join(name))
+    .collect()
 }
 
 pub async fn thumbnail_set(

@@ -13,6 +13,7 @@ pub trait PersonMetadata {
     fn role_type(&self) -> &str;
     fn role_name(&self) -> &str;
     fn sort_order(&self) -> i32;
+    fn profile_image_url(&self) -> Option<&str>;
 }
 
 impl NamedMetadata for MetadataNamedValue {
@@ -44,6 +45,10 @@ impl PersonMetadata for MetadataPerson {
 
     fn sort_order(&self) -> i32 {
         self.sort_order
+    }
+
+    fn profile_image_url(&self) -> Option<&str> {
+        self.profile_image_url.as_deref()
     }
 }
 
@@ -210,6 +215,37 @@ where
         .bind(person.sort_order())
         .execute(&mut **tx)
         .await?;
+
+        // 人物头像：只存 TMDB CDN 的 remote_url（不下载字节，跟海报同机制）。
+        // 无 unique 约束，先删旧 primary 再插；为 None 时跳过以免抹掉已有图。
+        if let Some(profile_url) = person.profile_image_url() {
+            sqlx::query(
+                r#"
+                delete from artwork
+                where person_id = $1 and artwork_type = 'primary'
+                "#,
+            )
+            .bind(person_id)
+            .execute(&mut **tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                insert into artwork (
+                    person_id,
+                    artwork_type,
+                    source,
+                    remote_url,
+                    is_primary
+                )
+                values ($1, 'primary', 'tmdb', $2, true)
+                "#,
+            )
+            .bind(person_id)
+            .bind(profile_url)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
 
     Ok(())
@@ -383,6 +419,10 @@ mod tests {
 
         fn sort_order(&self) -> i32 {
             self.sort_order
+        }
+
+        fn profile_image_url(&self) -> Option<&str> {
+            None
         }
     }
 

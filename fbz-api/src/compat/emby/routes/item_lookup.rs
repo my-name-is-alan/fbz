@@ -5,15 +5,22 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, Uri},
+    response::Response,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    auth::service::AuthenticatedUser, compat::emby::payload::parse_emby_body, error::AppError,
+    admin::repository::{AdminRepository, QueueMetadataRefreshInput},
+    auth::service::AuthenticatedUser,
+    compat::emby::payload::parse_emby_body,
+    error::AppError,
+    media::repository::MediaRepository,
+    metadata::remote_search::{RemoteSearchCandidate, RemoteSearchRequest, RemoteSearchService},
     state::AppState,
 };
 
 use super::access::authenticate_request_user;
+use super::images::{ensure_public_remote_image_url, remote_image_passthrough_response};
 
 const MAX_LOOKUP_BODY_BYTES: usize = 64 * 1024;
 const MAX_LOOKUP_TEXT_LEN: usize = 256;
@@ -282,15 +289,13 @@ pub async fn remote_search_image(
     Query(query): Query<RemoteSearchImageQuery>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<StatusCode, AppError> {
+) -> Result<Response, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_lookup_admin(&user)?;
     let input = remote_search_image_input(query)?;
-    let _ = (&input.image_url, &input.provider_name);
+    ensure_public_remote_image_url(&input.image_url)?;
 
-    Err(AppError::conflict(
-        "remote search image proxying is not configured",
-    ))
+    remote_image_passthrough_response(&input.image_url).await
 }
 
 pub async fn reset_metadata(
@@ -302,9 +307,41 @@ pub async fn reset_metadata(
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_lookup_admin(&user)?;
     let input = metadata_reset_input(query)?;
-    let _ = input.item_ids;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict("metadata reset is not configured"))
+    let media = MediaRepository::new(database.clone());
+    let admin = AdminRepository::new(database.clone());
+    let mut reset_count = 0usize;
+    for item_id in &input.item_ids {
+        let reset = media
+            .reset_item_metadata(item_id)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to reset metadata: {err}")))?;
+        if !reset {
+            continue;
+        }
+        reset_count += 1;
+        admin
+            .queue_metadata_refresh_for_item(
+                item_id,
+                QueueMetadataRefreshInput {
+                    requested_by_user_id: user.id,
+                    reason: Some("emby metadata reset".to_owned()),
+                },
+            )
+            .await
+            .map_err(|err| {
+                AppError::internal(format!("failed to queue metadata refresh: {err}"))
+            })?;
+    }
+
+    if reset_count == 0 {
+        return Err(AppError::not_found("no matching items"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn apply_remote_search(
@@ -320,14 +357,66 @@ pub async fn apply_remote_search(
     ensure_lookup_body_size(&body)?;
     let result: RemoteSearchResultDto = parse_emby_body(&headers, &body)?;
     let input = remote_search_apply_input(&item_id, query, result)?;
-    let _ = (
-        input.item_id,
-        input.replace_all_images,
-        input.provider_ids,
-        input.search_provider_name,
-    );
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict("remote search apply is not configured"))
+    let external_ids = storage_external_ids(&input.provider_ids);
+    if external_ids.is_empty() {
+        return Err(AppError::unprocessable("ProviderIds is required"));
+    }
+
+    let applied = MediaRepository::new(database.clone())
+        .apply_item_external_ids(&input.item_id, &external_ids)
+        .await
+        .map_err(|err| {
+            if is_unique_violation(&err) {
+                AppError::conflict("provider id is already linked to another item")
+            } else {
+                AppError::internal(format!("failed to apply remote search: {err}"))
+            }
+        })?;
+    if !applied {
+        return Err(AppError::not_found("item not found"));
+    }
+
+    AdminRepository::new(database.clone())
+        .queue_metadata_refresh_for_item(
+            &input.item_id,
+            QueueMetadataRefreshInput {
+                requested_by_user_id: user.id,
+                reason: Some("emby remote search apply".to_owned()),
+            },
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to queue metadata refresh: {err}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Emby ProviderIds 字典键 → media_external_ids.provider 存储键。
+/// 只放行已知 provider，防任意键膨胀 provider 命名空间。
+fn storage_external_ids(provider_ids: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    provider_ids
+        .iter()
+        .filter_map(|(key, value)| {
+            let provider = match key.trim().to_ascii_lowercase().as_str() {
+                "tmdb" | "themoviedb" => "tmdb",
+                "imdb" => "imdb",
+                "tvdb" | "thetvdb" => "tvdb",
+                _ => return None,
+            };
+            let value = value.trim();
+            (!value.is_empty()).then(|| (provider.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| code == "23505")
 }
 
 pub async fn remote_search_book(
@@ -431,26 +520,92 @@ async fn remote_search(
     ensure_lookup_body_size(&body)?;
     let query: RemoteSearchQueryDto = parse_emby_body(&headers, &body)?;
     let input = remote_search_input(kind, query)?;
-    let _ = (
-        input.kind,
-        input.item_id,
-        input.search_provider_name,
-        input.providers,
-        input.include_disabled_providers,
-        input.search_name,
-        input.search_path,
-        input.metadata_language,
-        input.metadata_country_code,
-        input.provider_ids,
-        input.year,
-        input.index_number,
-        input.parent_index_number,
-        input.premiere_date,
-        input.is_automated,
-        input.enable_adult_metadata,
-    );
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Ok(Json(Vec::new()))
+    // Providers 过滤：显式指定 provider 且不含 TMDB 时不做任何联网（当前只实现 TMDB）。
+    if !input.providers.is_empty()
+        && !input.providers.iter().any(|provider| {
+            matches!(
+                provider.trim().to_ascii_lowercase().as_str(),
+                "tmdb" | "themoviedb"
+            )
+        })
+    {
+        return Ok(Json(Vec::new()));
+    }
+
+    let Some(item_type) = remote_search_kind_item_type(input.kind) else {
+        return Ok(Json(Vec::new()));
+    };
+    let tmdb_id = input
+        .provider_ids
+        .iter()
+        .find(|(key, _)| {
+            matches!(
+                key.trim().to_ascii_lowercase().as_str(),
+                "tmdb" | "themoviedb"
+            )
+        })
+        .map(|(_, value)| value.clone());
+
+    let config = state.config();
+    let candidates = RemoteSearchService::new(
+        database.clone(),
+        config.metadata.clone(),
+        config.proxy.clone(),
+        config.secrets.clone(),
+    )
+    .search(&RemoteSearchRequest {
+        item_type: item_type.to_owned(),
+        name: input.search_name.clone(),
+        year: input.year,
+        language: input.metadata_language.clone(),
+        country: input.metadata_country_code.clone(),
+        tmdb_id,
+    })
+    .await
+    .map_err(|err| AppError::internal(format!("remote search failed: {err}")))?;
+
+    Ok(Json(
+        candidates
+            .into_iter()
+            .map(remote_search_candidate_to_dto)
+            .collect(),
+    ))
+}
+
+/// RemoteSearch 路径类型 → FBZ 内部条目类型；当前未接 provider 的类型返回 None（空结果）。
+fn remote_search_kind_item_type(kind: RemoteSearchKind) -> Option<&'static str> {
+    match kind {
+        RemoteSearchKind::Movie => Some("movie"),
+        RemoteSearchKind::Series => Some("series"),
+        RemoteSearchKind::Person => Some("person"),
+        RemoteSearchKind::BoxSet => Some("collection"),
+        RemoteSearchKind::Trailer | RemoteSearchKind::MusicVideo => Some("movie"),
+        RemoteSearchKind::Book
+        | RemoteSearchKind::Game
+        | RemoteSearchKind::MusicAlbum
+        | RemoteSearchKind::MusicArtist => None,
+    }
+}
+
+fn remote_search_candidate_to_dto(candidate: RemoteSearchCandidate) -> RemoteSearchResultDto {
+    let mut provider_ids = BTreeMap::new();
+    provider_ids.insert(candidate.provider_key.clone(), candidate.external_id.clone());
+
+    RemoteSearchResultDto {
+        name: Some(candidate.name),
+        original_title: candidate.original_title,
+        provider_ids: Some(provider_ids),
+        production_year: candidate.production_year,
+        premiere_date: candidate.premiere_date,
+        image_url: candidate.image_url,
+        search_provider_name: Some("TheMovieDb".to_owned()),
+        overview: candidate.overview,
+        ..RemoteSearchResultDto::default()
+    }
 }
 
 fn external_id_info_items() -> Vec<ExternalIdInfoDto> {

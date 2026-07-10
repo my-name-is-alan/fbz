@@ -5,7 +5,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{compat::emby::dto::QueryResultDto, error::AppError, state::AppState};
+use crate::{
+    admin::repository::{ActivityLogEntryRecord, AdminRepository},
+    compat::emby::dto::QueryResultDto,
+    error::AppError,
+    state::AppState,
+};
 
 use super::access::authenticate_request_user;
 
@@ -67,10 +72,48 @@ pub async fn activity_log_entries(
     if !user.can_manage_server() {
         return Err(AppError::forbidden("server management permission required"));
     }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
     let input = activity_log_input(&query)?;
 
-    Ok(Json(empty_activity_log_result(&input)))
+    let page = AdminRepository::new(database.clone())
+        .list_activity_log_entries(
+            input.min_date.as_deref(),
+            i64::from(input.start_index),
+            i64::from(input.limit),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list activity log: {err}")))?;
+
+    Ok(Json(QueryResultDto::new(
+        page.entries
+            .into_iter()
+            .map(activity_log_entry_to_dto)
+            .collect(),
+        page.total_record_count,
+        input.start_index,
+    )))
+}
+
+fn activity_log_entry_to_dto(record: ActivityLogEntryRecord) -> ActivityLogEntryDto {
+    ActivityLogEntryDto {
+        id: record.id,
+        name: record.name,
+        overview: record.overview.clone(),
+        short_overview: record.overview,
+        entry_type: record.entry_type,
+        item_id: record.item_id,
+        date: record.date,
+        user_id: record.user_id,
+        user_primary_image_tag: None,
+        severity: match record.severity.as_str() {
+            "error" => LogSeverityDto::Error,
+            "warn" => LogSeverityDto::Warn,
+            _ => LogSeverityDto::Info,
+        },
+    }
 }
 
 fn activity_log_input(query: &ActivityLogQuery) -> Result<ActivityLogInput, AppError> {
@@ -85,13 +128,6 @@ fn activity_log_input(query: &ActivityLogQuery) -> Result<ActivityLogInput, AppE
             .min(MAX_ACTIVITY_LOG_LIMIT),
         min_date: normalize_min_date(query.min_date.as_deref())?,
     })
-}
-
-fn empty_activity_log_result(input: &ActivityLogInput) -> QueryResultDto<ActivityLogEntryDto> {
-    let _window = input.limit;
-    let _min_date = input.min_date.as_deref();
-
-    QueryResultDto::new(Vec::new(), 0, input.start_index)
 }
 
 fn normalize_min_date(value: Option<&str>) -> Result<Option<String>, AppError> {
@@ -116,7 +152,41 @@ fn normalize_min_date(value: Option<&str>) -> Result<Option<String>, AppError> {
         )));
     }
 
+    if !is_timestamp_shaped(value) {
+        return Err(AppError::unprocessable("MinDate is invalid"));
+    }
+
     Ok(Some(value.to_owned()))
+}
+
+/// MinDate 直接进 SQL `::timestamptz` 转换，这里限定 ISO-8601 形状防转换报错：
+/// `YYYY-MM-DD[( |T)HH:MM[:SS[.fff]][Z|±HH[:MM]]]`。
+fn is_timestamp_shaped(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let digits = |range: std::ops::Range<usize>| {
+        bytes
+            .get(range)
+            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+    };
+    if !(digits(0..4)
+        && bytes.get(4) == Some(&b'-')
+        && digits(5..7)
+        && bytes.get(7) == Some(&b'-')
+        && digits(8..10))
+    {
+        return false;
+    }
+    let rest = &value[10..];
+    if rest.is_empty() {
+        return true;
+    }
+    if !rest.starts_with('T') && !rest.starts_with(' ') {
+        return false;
+    }
+
+    rest[1..]
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || matches!(ch, ':' | '.' | '+' | '-' | 'Z'))
 }
 
 #[cfg(test)]
@@ -187,18 +257,38 @@ mod tests {
     }
 
     #[test]
-    fn empty_activity_log_result_uses_requested_start_index() {
-        let input = ActivityLogInput {
-            start_index: 50,
-            limit: 20,
-            min_date: None,
-        };
+    fn min_date_requires_timestamp_shape() {
+        assert!(is_timestamp_shaped("2024-01-01"));
+        assert!(is_timestamp_shaped("2024-01-01T00:00:00Z"));
+        assert!(is_timestamp_shaped("2024-01-01 12:30:45.123+08:00"));
+        assert!(!is_timestamp_shaped("yesterday"));
+        assert!(!is_timestamp_shaped("2024-01-01x"));
+        assert!(!is_timestamp_shaped("2024-01-01T12:00; drop table users"));
+        assert!(
+            activity_log_input(&ActivityLogQuery {
+                min_date: Some("not-a-date".to_owned()),
+                ..ActivityLogQuery::default()
+            })
+            .is_err()
+        );
+    }
 
-        let result = empty_activity_log_result(&input);
+    #[test]
+    fn activity_log_record_maps_severity_to_dto() {
+        let dto = activity_log_entry_to_dto(ActivityLogEntryRecord {
+            id: 2000000000042,
+            name: "library.scan job failed".to_owned(),
+            overview: Some("boom".to_owned()),
+            entry_type: "ScheduledTaskFailed".to_owned(),
+            item_id: None,
+            date: "2026-01-01T00:00:00Z".to_owned(),
+            user_id: None,
+            severity: "error".to_owned(),
+        });
 
-        assert!(result.items.is_empty());
-        assert_eq!(result.total_record_count, 0);
-        assert_eq!(result.start_index, 50);
+        assert_eq!(dto.id, 2000000000042);
+        assert_eq!(dto.severity, LogSeverityDto::Error);
+        assert_eq!(dto.short_overview.as_deref(), Some("boom"));
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod music;
 pub mod navigation;
 pub mod notifications;
 pub mod plugins;
+pub mod realtime;
 pub mod recognition;
 pub mod scan;
 pub mod scheduler;

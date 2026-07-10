@@ -822,6 +822,8 @@ pub struct SessionInfoDto {
     pub device_name: Option<String>,
     pub application_version: Option<String>,
     pub is_active: bool,
+    /// 该会话当前是否有活跃 websocket 通道（远程控制指令可送达）。
+    pub supports_remote_control: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1409,11 +1411,22 @@ pub struct BaseItemDto {
     pub bitrate: Option<i32>,
     pub production_year: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub overview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub premiere_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_date: Option<String>,
+    /// 题材名列表（详情接口回填；列表接口为空省略）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub official_rating: Option<String>,
     pub image_tags: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backdrop_image_tags: Vec<String>,
@@ -1425,6 +1438,9 @@ pub struct BaseItemDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_sources: Vec<MediaSourceDto>,
     pub chapters: Vec<ChapterInfoDto>,
+    /// 播放列表成员行的 EntryId（删除/移动成员用）；仅播放列表成员响应携带。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playlist_item_id: Option<String>,
 }
 
 /// 条目关联人物（Emby `BaseItemPerson` 形状）。`Role` 为角色名（演员）或职务描述，
@@ -1458,9 +1474,14 @@ impl From<BaseItemSource> for BaseItemDto {
             container: None,
             bitrate: None,
             production_year: source.production_year,
+            index_number: None,
+            parent_index_number: None,
             overview: None,
             premiere_date: None,
             end_date: None,
+            genres: Vec::new(),
+            original_title: None,
+            official_rating: None,
             image_tags: BTreeMap::new(),
             backdrop_image_tags: Vec::new(),
             collection_type: None,
@@ -1468,6 +1489,7 @@ impl From<BaseItemSource> for BaseItemDto {
             people: Vec::new(),
             media_sources: Vec::new(),
             chapters: Vec::new(),
+            playlist_item_id: None,
         }
     }
 }

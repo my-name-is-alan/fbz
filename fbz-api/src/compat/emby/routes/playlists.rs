@@ -9,7 +9,8 @@ use crate::{
     compat::emby::dto::{BaseItemDto, BaseItemSource, QueryResultDto},
     error::AppError,
     library::repository::{
-        LibraryRepository, PlaylistItemsInput, PlaylistListInput, PlaylistRecord, SortDirection,
+        CreatePlaylistInput as RepoCreatePlaylistInput, LibraryRepository, PlaylistItemsInput,
+        PlaylistListInput, PlaylistRecord, PlaylistWriteOutcome, SortDirection,
     },
     state::AppState,
 };
@@ -139,10 +140,10 @@ pub async fn playlists(
     let window = PlaylistWindow::from_parts(query.start_index, query.limit);
     let _requested_fields = query.fields.as_deref().unwrap_or_default();
     let _enable_images = query.enable_images.unwrap_or(false);
+    let _parent_id = normalized_text(query.parent_id);
     let result = LibraryRepository::new(database.clone())
         .list_user_playlists(PlaylistListInput {
             user_id: user.id,
-            parent_id: normalized_text(query.parent_id),
             start_index: window.start_index,
             limit: window.limit,
             search_term: normalized_text(query.search_term),
@@ -169,13 +170,27 @@ pub async fn create_playlist(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<PlaylistCreationResultDto>, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let input = create_playlist_input(query)?;
-    let _name = input.name;
-    let _ids = input.ids;
-    let _media_type = input.media_type;
 
-    Err(playlist_write_disabled_error())
+    let created = LibraryRepository::new(database.clone())
+        .create_playlist(RepoCreatePlaylistInput {
+            user_id: user.id,
+            name: input.name,
+            media_type: storage_media_type(input.media_type.as_deref()),
+            item_ids: input.ids,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to create playlist: {err}")))?;
+
+    Ok(Json(PlaylistCreationResultDto {
+        id: created.id,
+        name: created.name,
+        item_added_count: created.item_added_count as i32,
+    }))
 }
 
 pub async fn playlist_items(
@@ -240,12 +255,25 @@ pub async fn add_playlist_items(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<AddToPlaylistResultDto>, AppError> {
-    authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let input = add_to_playlist_input(&playlist_id, query.ids.as_deref())?;
-    let _playlist_id = input.playlist_id;
-    let _ids = input.ids;
 
-    Err(playlist_write_disabled_error())
+    let outcome = LibraryRepository::new(database.clone())
+        .add_playlist_entries(user.id, &input.playlist_id, &input.ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to add playlist items: {err}")))?;
+
+    match outcome {
+        PlaylistWriteOutcome::Applied(added) => Ok(Json(AddToPlaylistResultDto {
+            id: input.playlist_id,
+            item_added_count: added as i32,
+        })),
+        PlaylistWriteOutcome::NotFound => Err(AppError::not_found("playlist not found")),
+        PlaylistWriteOutcome::Forbidden => Err(playlist_not_owned_error()),
+    }
 }
 
 pub async fn remove_playlist_items(
@@ -255,12 +283,22 @@ pub async fn remove_playlist_items(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let input = remove_playlist_items_input(&playlist_id, query.entry_ids.as_deref())?;
-    let _playlist_id = input.playlist_id;
-    let _entry_ids = input.ids;
 
-    Err(playlist_write_disabled_error())
+    let outcome = LibraryRepository::new(database.clone())
+        .remove_playlist_entries(user.id, &input.playlist_id, &input.ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to remove playlist items: {err}")))?;
+
+    match outcome {
+        PlaylistWriteOutcome::Applied(_) => Ok(StatusCode::NO_CONTENT),
+        PlaylistWriteOutcome::NotFound => Err(AppError::not_found("playlist not found")),
+        PlaylistWriteOutcome::Forbidden => Err(playlist_not_owned_error()),
+    }
 }
 
 pub async fn move_playlist_item(
@@ -269,13 +307,27 @@ pub async fn move_playlist_item(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let input = move_playlist_item_input(&playlist_id, &item_id, &new_index)?;
-    let _playlist_id = input.playlist_id;
-    let _item_id = input.item_id;
-    let _new_index = input.new_index;
 
-    Err(playlist_write_disabled_error())
+    let outcome = LibraryRepository::new(database.clone())
+        .move_playlist_entry(
+            user.id,
+            &input.playlist_id,
+            &input.item_id,
+            input.new_index,
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to move playlist item: {err}")))?;
+
+    match outcome {
+        PlaylistWriteOutcome::Applied(()) => Ok(StatusCode::NO_CONTENT),
+        PlaylistWriteOutcome::NotFound => Err(AppError::not_found("playlist entry not found")),
+        PlaylistWriteOutcome::Forbidden => Err(playlist_not_owned_error()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -467,8 +519,18 @@ fn normalize_optional_media_type(value: Option<&str>) -> Result<Option<String>, 
     Ok(Some(value.to_owned()))
 }
 
-fn playlist_write_disabled_error() -> AppError {
-    AppError::conflict("Emby playlist writes are disabled; use FBZ collection management APIs")
+fn playlist_not_owned_error() -> AppError {
+    AppError::forbidden("playlist belongs to another user")
+}
+
+/// Emby `MediaType` 参数（Audio/Video/...）→ playlists.media_type 存储值。
+/// 只认音/视频两类，其余（如 Photo）与缺省一样存 NULL（混合列表）。
+fn storage_media_type(value: Option<&str>) -> Option<String> {
+    match value.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("audio") => Some("audio".to_owned()),
+        Some(value) if value.eq_ignore_ascii_case("video") => Some("video".to_owned()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

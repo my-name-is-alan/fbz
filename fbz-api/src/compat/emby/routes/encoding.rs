@@ -7,12 +7,18 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{error::AppError, state::AppState};
+use crate::{
+    auth::service::AuthenticatedUser, error::AppError,
+    settings::repository::SettingsRepository, state::AppState,
+};
 
 use super::access::authenticate_request_user;
 
 const MAX_ENCODING_TEXT_LEN: usize = 128;
 const MAX_ENCODING_WRITE_BODY_BYTES: usize = 64 * 1024;
+const FULL_TONE_MAP_SETTING_KEY: &str = "emby.encoding.tonemap.full";
+const PUBLIC_TONE_MAP_SETTING_KEY: &str = "emby.encoding.tonemap.public";
+const SUBTITLE_OPTIONS_SETTING_KEY: &str = "emby.encoding.subtitles";
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -109,7 +115,14 @@ pub async fn full_tone_map_options(
 ) -> Result<Json<EditObjectContainerDto>, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
 
-    Ok(Json(tone_map_edit_container("FullToneMapOptions")))
+    Ok(Json(
+        with_stored_object(
+            &state,
+            FULL_TONE_MAP_SETTING_KEY,
+            tone_map_edit_container("FullToneMapOptions"),
+        )
+        .await?,
+    ))
 }
 
 pub async fn update_full_tone_map_options(
@@ -118,12 +131,12 @@ pub async fn update_full_tone_map_options(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_write_body_within_limit(&body)?;
+    let value = parse_encoding_object(&body)?;
+    store_encoding_setting(&state, FULL_TONE_MAP_SETTING_KEY, value, &user).await?;
 
-    Err(AppError::conflict(
-        "tone mapping options are managed by FBZ transcoding settings",
-    ))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn public_tone_map_options(
@@ -133,7 +146,14 @@ pub async fn public_tone_map_options(
 ) -> Result<Json<EditObjectContainerDto>, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
 
-    Ok(Json(tone_map_edit_container("PublicToneMapOptions")))
+    Ok(Json(
+        with_stored_object(
+            &state,
+            PUBLIC_TONE_MAP_SETTING_KEY,
+            tone_map_edit_container("PublicToneMapOptions"),
+        )
+        .await?,
+    ))
 }
 
 pub async fn update_public_tone_map_options(
@@ -142,12 +162,12 @@ pub async fn update_public_tone_map_options(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_write_body_within_limit(&body)?;
+    let value = parse_encoding_object(&body)?;
+    store_encoding_setting(&state, PUBLIC_TONE_MAP_SETTING_KEY, value, &user).await?;
 
-    Err(AppError::conflict(
-        "tone mapping options are managed by FBZ transcoding settings",
-    ))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn codec_parameters(
@@ -159,7 +179,14 @@ pub async fn codec_parameters(
     authenticate_request_user(&state, &headers, &uri).await?;
     let input = codec_parameter_input(&query)?;
 
-    Ok(Json(codec_parameter_edit_container(&input)))
+    Ok(Json(
+        with_stored_object(
+            &state,
+            &codec_parameter_setting_key(&input),
+            codec_parameter_edit_container(&input),
+        )
+        .await?,
+    ))
 }
 
 pub async fn update_codec_parameters(
@@ -169,13 +196,13 @@ pub async fn update_codec_parameters(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
-    let _input = codec_parameter_input(&query)?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
+    let input = codec_parameter_input(&query)?;
     ensure_write_body_within_limit(&body)?;
+    let value = parse_encoding_object(&body)?;
+    store_encoding_setting(&state, &codec_parameter_setting_key(&input), value, &user).await?;
 
-    Err(AppError::conflict(
-        "codec parameters are managed by FBZ transcoding settings",
-    ))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn subtitle_options(
@@ -185,7 +212,14 @@ pub async fn subtitle_options(
 ) -> Result<Json<EditObjectContainerDto>, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
 
-    Ok(Json(subtitle_options_edit_container()))
+    Ok(Json(
+        with_stored_object(
+            &state,
+            SUBTITLE_OPTIONS_SETTING_KEY,
+            subtitle_options_edit_container(),
+        )
+        .await?,
+    ))
 }
 
 pub async fn update_subtitle_options(
@@ -194,23 +228,88 @@ pub async fn update_subtitle_options(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_write_body_within_limit(&body)?;
+    let value = parse_encoding_object(&body)?;
+    store_encoding_setting(&state, SUBTITLE_OPTIONS_SETTING_KEY, value, &user).await?;
 
-    Err(AppError::conflict(
-        "subtitle options are managed by FBZ subtitle settings",
-    ))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn authenticate_admin_user(
     state: &AppState,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<(), AppError> {
+) -> Result<AuthenticatedUser, AppError> {
     let user = authenticate_request_user(state, headers, uri).await?;
     if !user.can_manage_server() {
         return Err(AppError::forbidden("server management permission required"));
     }
+
+    Ok(user)
+}
+
+/// codec 参数按 (codecId, context) 独立成键。两个字段已限长且拒绝控制字符。
+fn codec_parameter_setting_key(input: &CodecParameterInput) -> String {
+    format!(
+        "emby.encoding.codec.{}.{}",
+        input.codec_id.to_ascii_lowercase(),
+        input.parameter_context.to_ascii_lowercase()
+    )
+}
+
+fn parse_encoding_object(body: &Bytes) -> Result<Value, AppError> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|err| AppError::unprocessable(format!("invalid JSON request body: {err}")))?;
+    if !value.is_object() {
+        return Err(AppError::unprocessable(
+            "encoding options body must be a JSON object",
+        ));
+    }
+
+    Ok(value)
+}
+
+/// GET 容器：存储对象存在时盖过默认 Object（DefaultObject 保留出厂值）。
+async fn with_stored_object(
+    state: &AppState,
+    setting_key: &str,
+    mut container: EditObjectContainerDto,
+) -> Result<EditObjectContainerDto, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    if let Some(stored) = SettingsRepository::new(database.clone())
+        .get(setting_key)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load encoding options: {err}")))?
+    {
+        container.object = stored.value;
+    }
+
+    Ok(container)
+}
+
+async fn store_encoding_setting(
+    state: &AppState,
+    setting_key: &str,
+    value: Value,
+    user: &AuthenticatedUser,
+) -> Result<(), AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    SettingsRepository::new(database.clone())
+        .update_admin_setting(
+            setting_key,
+            value,
+            &user.username,
+            Some("emby encoding options update"),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to store encoding options: {err}")))?;
 
     Ok(())
 }

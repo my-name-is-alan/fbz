@@ -57,6 +57,14 @@ const pageMap: Record<string, { title: string; desc: string }> = {
     title: "插件设置",
     desc: "查看真实插件包、运行状态、配置和执行审计。",
   },
+  "admin-plugin-market": {
+    title: "插件市场",
+    desc: "管理市场源、浏览可安装插件，并从远程目录安装到本机。",
+  },
+  "admin-plugin-config": {
+    title: "插件配置",
+    desc: "编辑已安装插件的运行参数与密钥。",
+  },
   "admin-scheduled-tasks": {
     title: "任务计划",
     desc: "查看后端调度器注册的计划任务、运行历史，并按需手动触发。",
@@ -149,8 +157,8 @@ onMounted(() => {
 
 <template>
   <main class="account-view">
-    <!-- Header Banner -->
-    <div class="panel-header-banner">
+    <!-- Header Banner（插件页自带标题区，跳过通用 banner） -->
+    <div v-if="route.name !== 'admin-plugin-page'" class="panel-header-banner">
       <h1 class="page-heading">{{ page.title }}</h1>
       <p class="description-text">{{ page.desc }}</p>
     </div>
@@ -412,6 +420,15 @@ onMounted(() => {
 
     <!-- 插件设置 -->
     <AdminPlugins v-else-if="route.name === 'admin-plugins'" />
+
+    <!-- 插件市场 -->
+    <AdminPluginMarket v-else-if="route.name === 'admin-plugin-market'" />
+
+    <!-- 独立插件配置页 -->
+    <AdminPluginConfig v-else-if="route.name === 'admin-plugin-config'" />
+
+    <!-- 插件声明的管理菜单页 -->
+    <AdminPluginPage v-else-if="route.name === 'admin-plugin-page'" />
 
     <!-- 任务计划 -->
     <AdminScheduledTasks v-else-if="route.name === 'admin-scheduled-tasks'" />

@@ -6,9 +6,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    auth::service::AuthenticatedUser,
     compat::emby::dto::{BaseItemDto, BaseItemSource, QueryResultDto},
     error::AppError,
-    library::repository::{CollectionDetailRecord, LibraryRepository, PlaylistItemsInput},
+    library::repository::{CollectionDetailRecord, CollectionItemsListInput, LibraryRepository},
     state::AppState,
 };
 
@@ -124,9 +125,9 @@ pub async fn collection_items(
     let _requested_fields = query.fields.as_deref().unwrap_or_default();
 
     let result = LibraryRepository::new(database.clone())
-        .list_user_playlist_items(PlaylistItemsInput {
+        .list_user_collection_items(CollectionItemsListInput {
             user_id: user.id,
-            playlist_id: collection_id,
+            collection_id,
             start_index: window.start_index,
             limit: window.limit,
             include_image_tags: query.enable_images.unwrap_or(false),
@@ -194,11 +195,23 @@ pub async fn create_collection(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<CollectionCreationResultDto>, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    require_collection_manager(&user)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let input = create_collection_input(query)?;
-    let _ = (input.name, input.parent_id, input.ids, input.is_locked);
+    let _ = (input.parent_id, input.is_locked);
 
-    Err(collection_write_disabled_error())
+    let created = LibraryRepository::new(database.clone())
+        .create_collection(&input.name, &input.ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to create collection: {err}")))?;
+
+    Ok(Json(CollectionCreationResultDto {
+        id: created.id,
+        name: created.name,
+    }))
 }
 
 pub async fn add_collection_items(
@@ -208,11 +221,22 @@ pub async fn add_collection_items(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    require_collection_manager(&user)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let input = collection_items_input(&collection_id, query.ids.as_deref())?;
-    let _ = (input.collection_id, input.ids);
 
-    Err(collection_write_disabled_error())
+    let outcome = LibraryRepository::new(database.clone())
+        .add_collection_items(&input.collection_id, &input.ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to add collection items: {err}")))?;
+
+    match outcome {
+        Some(_) => Ok(StatusCode::NO_CONTENT),
+        None => Err(AppError::not_found("collection not found")),
+    }
 }
 
 pub async fn remove_collection_items(
@@ -222,11 +246,33 @@ pub async fn remove_collection_items(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    require_collection_manager(&user)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let input = collection_items_input(&collection_id, query.ids.as_deref())?;
-    let _ = (input.collection_id, input.ids);
 
-    Err(collection_write_disabled_error())
+    let outcome = LibraryRepository::new(database.clone())
+        .remove_collection_items(&input.collection_id, &input.ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to remove collection items: {err}")))?;
+
+    match outcome {
+        Some(_) => Ok(StatusCode::NO_CONTENT),
+        None => Err(AppError::not_found("collection not found")),
+    }
+}
+
+/// 合集是全局资产（影响所有用户的浏览面），写操作限管理员。
+fn require_collection_manager(user: &AuthenticatedUser) -> Result<(), AppError> {
+    if user.can_manage_server() {
+        Ok(())
+    } else {
+        Err(AppError::forbidden(
+            "collection management requires an administrator",
+        ))
+    }
 }
 
 fn create_collection_input(
@@ -314,9 +360,6 @@ fn normalize_required_collection_id(value: &str, field: &'static str) -> Result<
     Ok(value.to_owned())
 }
 
-fn collection_write_disabled_error() -> AppError {
-    AppError::conflict("Emby collection writes are disabled; use FBZ collection management APIs")
-}
 
 #[cfg(test)]
 mod tests {
@@ -461,10 +504,28 @@ mod tests {
     }
 
     #[test]
-    fn collection_write_disabled_error_is_conflict() {
-        let error = collection_write_disabled_error();
+    fn collection_writes_require_administrator_role() {
+        let admin = AuthenticatedUser {
+            id: 1,
+            public_id: "user-1".to_owned(),
+            username: "admin".to_owned(),
+            role_name: "Admin".to_owned(),
+            role_name_normalized: "admin".to_owned(),
+        };
+        let member = AuthenticatedUser {
+            id: 2,
+            public_id: "user-2".to_owned(),
+            username: "member".to_owned(),
+            role_name: "Member".to_owned(),
+            role_name_normalized: "member".to_owned(),
+        };
 
-        assert_eq!(error.status_code(), StatusCode::CONFLICT);
-        assert_eq!(error.code(), "conflict");
+        assert!(require_collection_manager(&admin).is_ok());
+        assert_eq!(
+            require_collection_manager(&member)
+                .unwrap_err()
+                .status_code(),
+            StatusCode::FORBIDDEN
+        );
     }
 }

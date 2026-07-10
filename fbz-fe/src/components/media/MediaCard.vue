@@ -46,7 +46,16 @@ function goDetail() {
   router.push(to.value);
 }
 
-function goPlayback() {
+async function goPlayback() {
+  // 剧集卡片：播放目标是具体分集，进详情页由「继续观看」逻辑接管。
+  if (detailType.value === "tv") {
+    goDetail();
+    return;
+  }
+
+  // 电影卡片：先取真实流地址再开播放器，避免空播放器。
+  const { fetchPlaybackSource } = await import("@/service/modules/detail.ts");
+  const source = await fetchPlaybackSource(String(props.item.id));
   playback.open({
     type: detailType.value,
     id: String(props.item.id),
@@ -54,6 +63,7 @@ function goPlayback() {
     subtitle: subtitle.value,
     poster: props.item.poster,
     tags: resolution.value ? [resolution.value] : undefined,
+    source: source ? { uri: source.uri, mimeType: source.mimeType } : undefined,
   });
 }
 

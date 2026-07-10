@@ -7,10 +7,13 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    auth::repository::{AuthRepository, DeviceInfoRecord},
+    auth::repository::{AuthRepository, DeviceInfoRecord, InsertCameraUploadInput},
     compat::emby::{
         auth::parse_auth_context,
-        dto::{ContentUploadHistoryDto, DeviceInfoDto, DeviceOptionsDto, QueryResultDto},
+        dto::{
+            ContentUploadHistoryDto, DeviceInfoDto, DeviceOptionsDto, LocalFileInfoDto,
+            QueryResultDto,
+        },
         payload::parse_emby_body,
     },
     error::AppError,
@@ -33,7 +36,23 @@ pub struct DeviceInfoQuery {
     pub id: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct CameraUploadQuery {
+    #[serde(alias = "deviceId", alias = "device_id")]
+    pub device_id: Option<String>,
+    #[serde(alias = "album")]
+    pub album: Option<String>,
+    #[serde(alias = "name")]
+    pub name: Option<String>,
+    #[serde(alias = "id")]
+    pub id: Option<String>,
+}
+
 const MAX_DEVICE_CUSTOM_NAME_LEN: usize = 128;
+const MAX_CAMERA_UPLOAD_HISTORY: i64 = 10_000;
+const MAX_CAMERA_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+const MAX_CAMERA_UPLOAD_TEXT_LEN: usize = 256;
 
 pub async fn list_devices(
     State(state): State<AppState>,
@@ -168,25 +187,107 @@ pub async fn delete_device(
 
 pub async fn camera_upload_history(
     State(state): State<AppState>,
+    Query(query): Query<CameraUploadQuery>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<ContentUploadHistoryDto>, AppError> {
-    let _user = authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
     let auth_context = parse_auth_context(&headers, uri.query())?;
+    let device_id = resolve_camera_device_id(&query, auth_context.client.device_id.as_deref())?;
 
-    Ok(Json(empty_camera_upload_history(
-        auth_context.client.device_id.as_deref(),
-    )))
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let repository = AuthRepository::new(database.clone());
+
+    // 设备不存在时返回空历史（客户端首次上传前会先查询历史）。
+    let Some(device) = repository
+        .find_device_info(&device_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get device: {err}")))?
+    else {
+        return Ok(Json(ContentUploadHistoryDto {
+            device_id,
+            files_uploaded: Vec::new(),
+        }));
+    };
+    ensure_camera_device_owner(&user, &device)?;
+
+    let files_uploaded = repository
+        .list_camera_uploads(device.internal_id, MAX_CAMERA_UPLOAD_HISTORY)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list camera uploads: {err}")))?
+        .into_iter()
+        .map(|record| LocalFileInfoDto {
+            name: record.name,
+            id: record.upload_id,
+            album: record.album,
+            mime_type: record.mime_type,
+            date_created: record.created_at,
+        })
+        .collect();
+
+    Ok(Json(ContentUploadHistoryDto {
+        device_id,
+        files_uploaded,
+    }))
 }
 
-pub async fn camera_upload_disabled(
+pub async fn camera_upload(
     State(state): State<AppState>,
+    Query(query): Query<CameraUploadQuery>,
     headers: HeaderMap,
     uri: Uri,
+    body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    let _user = authenticate_request_user(&state, &headers, &uri).await?;
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let auth_context = parse_auth_context(&headers, uri.query())?;
+    let device_id = resolve_camera_device_id(&query, auth_context.client.device_id.as_deref())?;
+    let input = camera_upload_input(&query, &headers, body.len())?;
+    if body.is_empty() {
+        return Err(AppError::unprocessable("upload body is empty"));
+    }
 
-    Err(AppError::forbidden("camera uploads are not enabled"))
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let repository = AuthRepository::new(database.clone());
+    let device = repository
+        .find_device_info(&device_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get device: {err}")))?
+        .ok_or_else(|| AppError::not_found("device not found"))?;
+    ensure_camera_device_owner(&user, &device)?;
+
+    // 落盘：{camera_upload_dir}/{device 安全名}/{album 安全名}/{name 安全名}
+    let mut target_dir = state.config().storage.camera_upload_dir.clone();
+    target_dir.push(sanitize_camera_path_segment(&device.reported_device_id)?);
+    if !input.album.is_empty() {
+        target_dir.push(sanitize_camera_path_segment(&input.album)?);
+    }
+    tokio::fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to create upload directory: {err}")))?;
+    let file_name = sanitize_camera_path_segment(&input.name)?;
+    let target_path = target_dir.join(&file_name);
+    tokio::fs::write(&target_path, &body)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to store upload: {err}")))?;
+
+    repository
+        .upsert_camera_upload(InsertCameraUploadInput {
+            device_internal_id: device.internal_id,
+            album: input.album,
+            name: input.name,
+            upload_id: input.upload_id,
+            mime_type: input.mime_type,
+            file_path: target_path.to_string_lossy().into_owned(),
+            size_bytes: body.len() as i64,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to record upload: {err}")))?;
+
+    Ok(StatusCode::OK)
 }
 
 fn ensure_device_admin(user: &crate::auth::service::AuthenticatedUser) -> Result<(), AppError> {
@@ -261,15 +362,106 @@ fn device_options_from_record(record: &DeviceInfoRecord) -> DeviceOptionsDto {
     }
 }
 
-fn empty_camera_upload_history(device_id: Option<&str>) -> ContentUploadHistoryDto {
-    ContentUploadHistoryDto {
-        device_id: device_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default()
-            .to_owned(),
-        files_uploaded: Vec::new(),
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CameraUploadInput {
+    album: String,
+    name: String,
+    upload_id: String,
+    mime_type: String,
+}
+
+/// 上传目标设备：query `DeviceId` 优先，缺省回退认证上下文携带的设备 id。
+fn resolve_camera_device_id(
+    query: &CameraUploadQuery,
+    context_device_id: Option<&str>,
+) -> Result<String, AppError> {
+    let device_id = query
+        .device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            context_device_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| AppError::unprocessable("DeviceId is required"))?;
+    if device_id.len() > 256 {
+        return Err(AppError::unprocessable("DeviceId is too long"));
     }
+
+    Ok(device_id.to_owned())
+}
+
+/// 相机上传只允许设备属主本人或服务器管理员，防止跨设备写入他人相册。
+fn ensure_camera_device_owner(
+    user: &crate::auth::service::AuthenticatedUser,
+    device: &DeviceInfoRecord,
+) -> Result<(), AppError> {
+    if user.can_manage_server() || device.last_user_id == user.public_id {
+        return Ok(());
+    }
+
+    Err(AppError::forbidden(
+        "authenticated user does not own this device",
+    ))
+}
+
+fn camera_upload_input(
+    query: &CameraUploadQuery,
+    headers: &HeaderMap,
+    body_len: usize,
+) -> Result<CameraUploadInput, AppError> {
+    if body_len > MAX_CAMERA_UPLOAD_BYTES {
+        return Err(AppError::unprocessable("upload body is too large"));
+    }
+    let name = query
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::unprocessable("Name is required"))?;
+    if name.chars().count() > MAX_CAMERA_UPLOAD_TEXT_LEN {
+        return Err(AppError::unprocessable("Name is too long"));
+    }
+    let album = query.album.as_deref().map(str::trim).unwrap_or_default();
+    if album.chars().count() > MAX_CAMERA_UPLOAD_TEXT_LEN {
+        return Err(AppError::unprocessable("Album is too long"));
+    }
+    let upload_id = query.id.as_deref().map(str::trim).unwrap_or_default();
+    if upload_id.chars().count() > MAX_CAMERA_UPLOAD_TEXT_LEN {
+        return Err(AppError::unprocessable("Id is too long"));
+    }
+    let mime_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+
+    Ok(CameraUploadInput {
+        album: album.to_owned(),
+        name: name.to_owned(),
+        upload_id: upload_id.to_owned(),
+        mime_type,
+    })
+}
+
+/// 把客户端提供的名字规约成安全的单层文件/目录名：拒绝路径分隔符、`..`、
+/// 控制字符和 Windows 保留字符，防止逃出上传根目录。
+fn sanitize_camera_path_segment(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value == "." || value == ".." {
+        return Err(AppError::unprocessable("path segment is invalid"));
+    }
+    if value.chars().any(|ch| {
+        ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+    }) {
+        return Err(AppError::unprocessable("path segment contains invalid characters"));
+    }
+
+    Ok(value.to_owned())
 }
 
 #[cfg(test)]
@@ -371,11 +563,59 @@ mod tests {
     }
 
     #[test]
-    fn empty_camera_upload_history_preserves_device_id() {
-        let history = empty_camera_upload_history(Some(" device-1 "));
+    fn camera_device_id_prefers_query_over_context() {
+        let device_id = resolve_camera_device_id(
+            &CameraUploadQuery {
+                device_id: Some(" device-1 ".to_owned()),
+                ..CameraUploadQuery::default()
+            },
+            Some("context-device"),
+        )
+        .unwrap();
+        assert_eq!(device_id, "device-1");
 
-        assert_eq!(history.device_id, "device-1");
-        assert!(history.files_uploaded.is_empty());
+        let fallback =
+            resolve_camera_device_id(&CameraUploadQuery::default(), Some(" context-device "))
+                .unwrap();
+        assert_eq!(fallback, "context-device");
+
+        assert!(resolve_camera_device_id(&CameraUploadQuery::default(), None).is_err());
+    }
+
+    #[test]
+    fn camera_path_segments_reject_traversal_and_separators() {
+        assert!(sanitize_camera_path_segment("..").is_err());
+        assert!(sanitize_camera_path_segment("a/b").is_err());
+        assert!(sanitize_camera_path_segment("a\\b").is_err());
+        assert!(sanitize_camera_path_segment("photo:1.jpg").is_err());
+        assert_eq!(
+            sanitize_camera_path_segment(" photo.jpg ").unwrap(),
+            "photo.jpg"
+        );
+    }
+
+    #[test]
+    fn camera_upload_input_requires_name_and_bounds_size() {
+        let headers = HeaderMap::new();
+        let query = CameraUploadQuery {
+            device_id: Some("device-1".to_owned()),
+            album: Some(" Camera ".to_owned()),
+            name: Some(" photo.jpg ".to_owned()),
+            id: Some(" file-1 ".to_owned()),
+        };
+
+        let input = camera_upload_input(&query, &headers, 1024).unwrap();
+        assert_eq!(input.album, "Camera");
+        assert_eq!(input.name, "photo.jpg");
+        assert_eq!(input.upload_id, "file-1");
+        assert_eq!(input.mime_type, "application/octet-stream");
+
+        let missing_name = CameraUploadQuery {
+            name: None,
+            ..query.clone()
+        };
+        assert!(camera_upload_input(&missing_name, &headers, 1024).is_err());
+        assert!(camera_upload_input(&query, &headers, MAX_CAMERA_UPLOAD_BYTES + 1).is_err());
     }
 
     fn test_user(role_name_normalized: &str) -> AuthenticatedUser {

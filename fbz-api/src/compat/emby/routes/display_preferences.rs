@@ -12,10 +12,13 @@ use crate::{
     compat::emby::payload::parse_emby_body,
     error::AppError,
     state::AppState,
+    users::repository::UsersRepository,
 };
 
 use super::access::authenticate_request_user;
 use super::access::authenticate_route_user;
+
+const TRACK_SELECTION_KEY_PREFIX: &str = "trackselections.";
 
 const DEFAULT_DISPLAY_CLIENT: &str = "Unknown";
 const MAX_DISPLAY_PREF_TEXT_LEN: usize = 128;
@@ -101,13 +104,36 @@ pub async fn display_preferences(
             "authenticated user does not match query user",
         ));
     }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let preferences_key = normalized_required_text(
+        "DisplayPreferencesId",
+        Some(item_id.clone()),
+        MAX_DISPLAY_PREF_TEXT_LEN,
+    )?;
+    let client = normalized_client(query.client);
 
-    Ok(Json(DisplayPreferencesDto::from(
-        DisplayPreferencesSource {
-            id: item_id,
-            client: normalized_client(query.client),
-        },
-    )))
+    let stored = UsersRepository::new(database.clone())
+        .find_display_preferences(user.id, &client, &preferences_key)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load display preferences: {err}")))?;
+
+    let mut dto = DisplayPreferencesDto::from(DisplayPreferencesSource {
+        id: item_id,
+        client,
+    });
+    if let Some(stored) = stored {
+        if let Some(sort_by) = stored.sort_by {
+            dto.sort_by = sort_by;
+        }
+        if let Some(sort_order) = stored.sort_order {
+            dto.sort_order = sort_order;
+        }
+        dto.custom_prefs = json_object_to_string_map(&stored.custom_prefs);
+    }
+
+    Ok(Json(dto))
 }
 
 pub async fn update_display_preferences(
@@ -126,9 +152,31 @@ pub async fn update_display_preferences(
             "authenticated user does not match query user",
         ));
     }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
     let request: DisplayPreferencesUpdateDto = parse_emby_body(&headers, &body)?;
-    let _input = display_preferences_update_input(&display_preferences_id, query, request)?;
+    let input = display_preferences_update_input(&display_preferences_id, query, request)?;
+
+    let custom_prefs = serde_json::Value::Object(
+        input
+            .custom_prefs
+            .into_iter()
+            .map(|(key, value)| (key, serde_json::Value::String(value)))
+            .collect(),
+    );
+    UsersRepository::new(database.clone())
+        .upsert_display_preferences(
+            user.id,
+            &input.client,
+            &input.display_preferences_id,
+            input.sort_by.as_deref(),
+            input.sort_order.as_deref(),
+            &custom_prefs,
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to save display preferences: {err}")))?;
 
     Ok(StatusCode::OK)
 }
@@ -139,9 +187,22 @@ pub async fn user_settings(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<BTreeMap<String, String>>, AppError> {
-    authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Ok(Json(BTreeMap::new()))
+    let settings = UsersRepository::new(database.clone())
+        .list_user_settings(user.id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load user settings: {err}")))?;
+
+    Ok(Json(
+        settings
+            .into_iter()
+            .map(|setting| (setting.key, json_value_to_setting_string(&setting.value)))
+            .collect(),
+    ))
 }
 
 pub async fn update_user_settings(
@@ -151,9 +212,20 @@ pub async fn update_user_settings(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
     let request: Vec<UserSettingUpdateDto> = parse_emby_body(&headers, &body)?;
-    let _input = user_settings_update_input(&user_id, request)?;
+    let input = user_settings_update_input(&user_id, request)?;
+
+    let repository = UsersRepository::new(database.clone());
+    for (key, value) in input.settings {
+        repository
+            .upsert_user_setting(user.id, &key, &serde_json::Value::String(value))
+            .await
+            .map_err(|err| AppError::internal(format!("failed to save user setting: {err}")))?;
+    }
 
     Ok(StatusCode::OK)
 }
@@ -165,13 +237,28 @@ pub async fn update_user_settings_partial(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
     if body.len() > MAX_USER_SETTINGS_PARTIAL_BYTES {
         return Err(AppError::unprocessable(
             "user settings payload is too large",
         ));
     }
     let _user_id = normalized_required_text("UserId", Some(user_id), MAX_DISPLAY_PREF_TEXT_LEN)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let request: BTreeMap<String, serde_json::Value> = parse_emby_body(&headers, &body)?;
+    let repository = UsersRepository::new(database.clone());
+    for (key, value) in request.into_iter().take(MAX_DISPLAY_PREFS) {
+        let Some(key) = normalized_optional_text(Some(key), MAX_DISPLAY_PREF_TEXT_LEN) else {
+            continue;
+        };
+        repository
+            .upsert_user_setting(user.id, &key, &value)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to save user setting: {err}")))?;
+    }
 
     Ok(StatusCode::OK)
 }
@@ -181,11 +268,21 @@ pub async fn typed_setting(
     Path((user_id, key)): Path<(String, String)>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<BTreeMap<String, String>>, AppError> {
-    authenticate_route_user(&state, &user_id, &headers, &uri).await?;
-    let _input = typed_setting_path_input(&user_id, &key)?;
+) -> Result<Json<serde_json::Value>, AppError> {
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let input = typed_setting_path_input(&user_id, &key)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Ok(Json(BTreeMap::new()))
+    let stored = UsersRepository::new(database.clone())
+        .find_user_setting(user.id, &input.key)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load typed setting: {err}")))?;
+
+    Ok(Json(
+        stored.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+    ))
 }
 
 pub async fn update_typed_setting(
@@ -195,9 +292,18 @@ pub async fn update_typed_setting(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_route_user(&state, &user_id, &headers, &uri).await?;
-    let _input = typed_setting_path_input(&user_id, &key)?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let input = typed_setting_path_input(&user_id, &key)?;
     ensure_typed_setting_body_size(&body)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let value: serde_json::Value = parse_emby_body(&headers, &body)?;
+    UsersRepository::new(database.clone())
+        .upsert_user_setting(user.id, &input.key, &value)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to save typed setting: {err}")))?;
 
     Ok(StatusCode::OK)
 }
@@ -208,8 +314,20 @@ pub async fn clear_track_selection(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_route_user(&state, &user_id, &headers, &uri).await?;
-    let _input = track_selection_input(&user_id, &track_type)?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let input = track_selection_input(&user_id, &track_type)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let key_prefix = format!(
+        "{TRACK_SELECTION_KEY_PREFIX}{}",
+        input.track_type.to_ascii_lowercase()
+    );
+    UsersRepository::new(database.clone())
+        .delete_user_settings_by_prefix(user.id, &key_prefix)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to clear track selections: {err}")))?;
 
     Ok(StatusCode::OK)
 }
@@ -357,6 +475,26 @@ fn normalized_optional_text(value: Option<String>, max_len: usize) -> Option<Str
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.chars().take(max_len).collect())
     })
+}
+
+/// CustomPrefs jsonb → 扁平字符串 map（Emby DTO 契约是 map<string,string>）。
+fn json_object_to_string_map(value: &serde_json::Value) -> BTreeMap<String, String> {
+    let Some(object) = value.as_object() else {
+        return BTreeMap::new();
+    };
+
+    object
+        .iter()
+        .map(|(key, value)| (key.clone(), json_value_to_setting_string(value)))
+        .collect()
+}
+
+/// 设置值 jsonb → 字符串：json 字符串取原文，其余序列化为紧凑 JSON 文本。
+fn json_value_to_setting_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]

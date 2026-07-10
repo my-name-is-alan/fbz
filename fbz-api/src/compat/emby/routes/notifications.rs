@@ -7,7 +7,14 @@ use axum::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
-use crate::{compat::emby::payload::parse_emby_body, error::AppError, state::AppState};
+use crate::{
+    compat::emby::payload::parse_emby_body,
+    error::AppError,
+    notifications::system::{
+        SystemNotificationInput, enqueue_system_notification, normalize_notification_level,
+    },
+    state::AppState,
+};
 
 use super::access::authenticate_request_user;
 
@@ -141,11 +148,33 @@ pub async fn admin_notification(
 ) -> Result<StatusCode, AppError> {
     authenticate_admin_user(&state, &headers, &uri).await?;
     let request: AddAdminNotificationDto = parse_optional_emby_body(&headers, &body)?;
-    let _input = admin_notification_input(&query, &request)?;
+    let input = admin_notification_input(&query, &request)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict(
-        "Emby admin notifications are managed by FBZ notification targets",
-    ))
+    // 桥接到 FBZ 通知链：入队后由投递 worker 发往已启用的通知目标（TG/WeCom/webhook）。
+    let mut metadata = Map::new();
+    metadata.insert("source".to_owned(), Value::String("emby-admin".to_owned()));
+    if let Some(url) = input.url {
+        metadata.insert("url".to_owned(), Value::String(url));
+    }
+    if let Some(image_url) = input.image_url {
+        metadata.insert("imageUrl".to_owned(), Value::String(image_url));
+    }
+    enqueue_system_notification(
+        database,
+        SystemNotificationInput {
+            title: input.name,
+            message: input.description,
+            level: normalize_notification_level(input.level.as_deref()).to_owned(),
+            metadata: Value::Object(metadata),
+        },
+    )
+    .await
+    .map_err(|err| AppError::internal(format!("failed to enqueue notification: {err}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn service_defaults(
@@ -166,15 +195,33 @@ pub async fn service_test(
 ) -> Result<StatusCode, AppError> {
     authenticate_admin_user(&state, &headers, &uri).await?;
     let request: UserNotificationInfoDto = parse_optional_emby_body(&headers, &body)?;
-    let _notifier_key = normalize_optional_text(
+    let notifier_key = normalize_optional_text(
         request.notifier_key.as_str(),
         "NotifierKey",
         MAX_NOTIFIER_KEY_LEN,
     )?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict(
-        "Emby notification service tests are managed by FBZ notification targets",
-    ))
+    let mut metadata = Map::new();
+    metadata.insert("source".to_owned(), Value::String("emby-test".to_owned()));
+    if let Some(notifier_key) = notifier_key {
+        metadata.insert("notifierKey".to_owned(), Value::String(notifier_key));
+    }
+    enqueue_system_notification(
+        database,
+        SystemNotificationInput {
+            title: "FBZ test notification".to_owned(),
+            message: "This is a test notification from the FBZ server.".to_owned(),
+            level: "info".to_owned(),
+            metadata: Value::Object(metadata),
+        },
+    )
+    .await
+    .map_err(|err| AppError::internal(format!("failed to enqueue test notification: {err}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn authenticate_admin_user(
@@ -190,8 +237,31 @@ async fn authenticate_admin_user(
     Ok(())
 }
 
+/// FBZ 事件面（outbox 事件键）按 Emby 通知类型目录形状暴露，供客户端设置页展示。
 fn notification_categories() -> Vec<NotificationCategoryInfoDto> {
-    Vec::new()
+    let server_events = [
+        ("Library scan completed", "library.scan.completed"),
+        ("Metadata refresh completed", "metadata.refresh.completed"),
+        ("Metadata refresh failed", "metadata.refresh.failed"),
+        ("Transcode started", "transcode.started"),
+        ("Transcode completed", "transcode.completed"),
+        ("Transcode failed", "transcode.failed"),
+        ("Notification requested", "notification.send.requested"),
+    ];
+
+    vec![NotificationCategoryInfoDto {
+        name: "Server".to_owned(),
+        id: "server".to_owned(),
+        events: server_events
+            .into_iter()
+            .map(|(name, id)| NotificationTypeInfoDto {
+                name: name.to_owned(),
+                id: id.to_owned(),
+                category_name: "Server".to_owned(),
+                category_id: "server".to_owned(),
+            })
+            .collect(),
+    }]
 }
 
 fn default_notification_service() -> UserNotificationInfoDto {

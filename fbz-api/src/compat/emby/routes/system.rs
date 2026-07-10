@@ -15,6 +15,7 @@ use crate::{
         ServerInfoSource, SystemInfoDto, WakeOnLanInfoDto,
     },
     error::AppError,
+    settings::repository::SettingsRepository,
     state::AppState,
 };
 
@@ -23,6 +24,8 @@ use super::access::authenticate_request_user;
 const MAX_SYSTEM_CONFIGURATION_KEY_LEN: usize = 128;
 const MAX_SYSTEM_CONFIGURATION_BODY_BYTES: usize = 128 * 1024;
 const MAX_SYSTEM_LOG_NAME_LEN: usize = 256;
+/// Emby 全量配置文档在 server_settings 里的键；按 key 的命名配置为 `{前缀}.{key}`。
+const EMBY_CONFIGURATION_SETTING_KEY: &str = "emby.configuration";
 
 /// Official Emby `LogFile` descriptor returned by `System/Logs`.
 ///
@@ -90,12 +93,17 @@ pub async fn system_configuration(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<ServerConfigurationDto>, AppError> {
+) -> Result<Json<Value>, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
 
-    Ok(Json(ServerConfigurationDto::from(
+    // 实时默认值打底，管理端存储的覆盖项（顶层 key 级）盖上去。
+    let defaults = serde_json::to_value(ServerConfigurationDto::from(
         server_configuration_source(&state).await,
-    )))
+    ))
+    .map_err(|err| AppError::internal(format!("failed to serialize configuration: {err}")))?;
+    let stored = load_stored_configuration(&state, EMBY_CONFIGURATION_SETTING_KEY).await?;
+
+    Ok(Json(merge_configuration(defaults, stored)))
 }
 
 pub async fn system_configuration_by_key(
@@ -106,6 +114,12 @@ pub async fn system_configuration_by_key(
 ) -> Result<Json<Value>, AppError> {
     authenticate_request_user(&state, &headers, &uri).await?;
     let key = normalized_configuration_key(&config_key)?;
+
+    if let Some(stored) =
+        load_stored_configuration(&state, &named_configuration_setting_key(&key)).await?
+    {
+        return Ok(Json(stored));
+    }
 
     Ok(Json(named_configuration_value(
         &key,
@@ -119,12 +133,13 @@ pub async fn update_system_configuration(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_configuration_body_within_limit(&body)?;
+    let value = parse_configuration_object(&body)?;
 
-    Err(AppError::conflict(
-        "system configuration writes are managed by FBZ admin settings",
-    ))
+    store_configuration(&state, EMBY_CONFIGURATION_SETTING_KEY, value, &user).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn update_system_configuration_by_key(
@@ -134,13 +149,15 @@ pub async fn update_system_configuration_by_key(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
-    let _key = normalized_configuration_key(&config_key)?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
+    let key = normalized_configuration_key(&config_key)?;
     ensure_configuration_body_within_limit(&body)?;
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|err| AppError::unprocessable(format!("invalid JSON request body: {err}")))?;
 
-    Err(AppError::conflict(
-        "named system configuration writes are managed by FBZ admin settings",
-    ))
+    store_configuration(&state, &named_configuration_setting_key(&key), value, &user).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn update_system_configuration_partial(
@@ -149,12 +166,97 @@ pub async fn update_system_configuration_partial(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_configuration_body_within_limit(&body)?;
+    let patch = parse_configuration_object(&body)?;
 
-    Err(AppError::conflict(
-        "partial system configuration writes are managed by FBZ admin settings",
-    ))
+    // 部分更新：读取现存覆盖文档，顶层 key 合并后整体回写。
+    let mut merged = load_stored_configuration(&state, EMBY_CONFIGURATION_SETTING_KEY)
+        .await?
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if let Value::Object(patch) = patch {
+        for (key, value) in patch {
+            merged.insert(key, value);
+        }
+    }
+    store_configuration(
+        &state,
+        EMBY_CONFIGURATION_SETTING_KEY,
+        Value::Object(merged),
+        &user,
+    )
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn named_configuration_setting_key(key: &str) -> String {
+    format!("{EMBY_CONFIGURATION_SETTING_KEY}.{}", key.to_ascii_lowercase())
+}
+
+fn parse_configuration_object(body: &Bytes) -> Result<Value, AppError> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|err| AppError::unprocessable(format!("invalid JSON request body: {err}")))?;
+    if !value.is_object() {
+        return Err(AppError::unprocessable(
+            "configuration body must be a JSON object",
+        ));
+    }
+
+    Ok(value)
+}
+
+/// 顶层 key 级合并：存储覆盖项盖过实时默认值（非对象存储值直接整体替换）。
+fn merge_configuration(defaults: Value, stored: Option<Value>) -> Value {
+    match (defaults, stored) {
+        (Value::Object(mut base), Some(Value::Object(overlay))) => {
+            for (key, value) in overlay {
+                base.insert(key, value);
+            }
+            Value::Object(base)
+        }
+        (defaults, None) => defaults,
+        (_, Some(stored)) => stored,
+    }
+}
+
+async fn load_stored_configuration(
+    state: &AppState,
+    setting_key: &str,
+) -> Result<Option<Value>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    Ok(SettingsRepository::new(database.clone())
+        .get(setting_key)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load configuration: {err}")))?
+        .map(|setting| setting.value))
+}
+
+async fn store_configuration(
+    state: &AppState,
+    setting_key: &str,
+    value: Value,
+    user: &AuthenticatedUser,
+) -> Result<(), AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    SettingsRepository::new(database.clone())
+        .update_admin_setting(
+            setting_key,
+            value,
+            &user.username,
+            Some("emby system configuration update"),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to store configuration: {err}")))?;
+
+    Ok(())
 }
 
 pub async fn wake_on_lan_info(
@@ -229,41 +331,52 @@ pub async fn system_log(
 
 /// `POST System/Restart` — admin-only server restart command.
 ///
-/// The Emby admin dashboard exposes a "Restart" power button that POSTs here.
-/// FBZ's process lifecycle is owned by the container/service manager (a node
-/// restart is a supervised operation with its own graceful shutdown on signal),
-/// so an Emby client must not be able to bounce the process out of band. The
-/// route is admin-protected and returns a controlled conflict instead of a
-/// generic 404, so the dashboard renders a clear "managed externally" message
-/// rather than a missing-endpoint error or a fake success.
+/// 触发与 OS 信号相同的优雅停机路径（axum 优雅停止 + workers 收尾后进程退出），
+/// 进程随后由部署侧监管策略（容器 `restart: always` / systemd `Restart=`）拉起，
+/// 即完成一次"重启"。未接线优雅退出触发器（如测试环境）时返回受控冲突而非假成功。
 pub async fn system_restart(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
 
-    Err(AppError::conflict(
-        "server restart is managed by the FBZ deployment (container/service manager), not the Emby client",
-    ))
+    if !state.trigger_shutdown() {
+        return Err(AppError::conflict(
+            "server restart trigger is not wired on this node",
+        ));
+    }
+    tracing::warn!(
+        admin = %user.username,
+        "graceful process exit requested via Emby System/Restart; supervisor restart policy will bring the node back"
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST System/Shutdown` — admin-only server shutdown command.
 ///
-/// Mirrors [`system_restart`]: the dashboard's "Shutdown" power button POSTs
-/// here. FBZ shuts down gracefully on process signal under its supervisor, so an
-/// Emby client must not be able to halt the process out of band. Admin-protected
-/// controlled conflict, never a fake success.
+/// 与 [`system_restart`] 走同一优雅停机路径；进程退出后是否再次拉起取决于
+/// 部署侧监管策略（`restart: always` 下等价于重启，bare-metal/`Restart=no`
+/// 下即停机）。
 pub async fn system_shutdown(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
+    let user = authenticate_admin_user(&state, &headers, &uri).await?;
 
-    Err(AppError::conflict(
-        "server shutdown is managed by the FBZ deployment (container/service manager), not the Emby client",
-    ))
+    if !state.trigger_shutdown() {
+        return Err(AppError::conflict(
+            "server shutdown trigger is not wired on this node",
+        ));
+    }
+    tracing::warn!(
+        admin = %user.username,
+        "graceful process exit requested via Emby System/Shutdown"
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn authenticate_admin_user(

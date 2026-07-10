@@ -1,61 +1,45 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted } from "vue";
-import type { SeasonInfo } from "@/types/media.ts";
+import type { EpisodeSummary, SeasonSummary } from "@/service/modules/detail.ts";
+import { fetchEpisodes, fetchSeasons } from "@/service/modules/detail.ts";
 
 interface Props {
-  seasons: SeasonInfo[];
-  seriesId?: number | string;
-  defaultSeason?: number;
-  watchedEpisode?: number;
+  /** 剧集 public_id。 */
+  seriesId: string;
   showTitle: string;
+  /** 剧集剧照，仅当分集自身无缩略图时用作兜底背景（可缺省）。 */
   backdrop?: string;
-  rating?: number | null;
 }
 
-interface EpisodeItem {
+/** 抛给父级的播放载荷：命中集 + 同季全集（父级据此建播放列表并取流地址）。 */
+interface EpisodePlayPayload {
+  episode: EpisodeSummary;
+  episodes: EpisodeSummary[];
+}
+
+/** 单集展示卡片视图模型（真实字段，缺失即空）。 */
+interface EpisodeCard {
   id: string;
-  seasonNumber: number;
-  number: number;
+  /** 展示用集号：真实 IndexNumber，缺省用数组顺序兜底。 */
+  displayNumber: number;
   title: string;
-  runtime: number;
+  /** 格式化时长文案，无时长为空串。 */
+  durationText: string;
+  /** 格式化首播日期，无则空串。 */
   airDate: string;
+  /** 真实简介，无则空串。 */
   summary: string;
-  watched: boolean;
+  poster?: string;
+  played: boolean;
+  /** 是否「继续观看」命中集（有进度且未看完）。 */
   current: boolean;
+  /** 进度百分比（0-100），无则 undefined（不显示进度条）。 */
+  progressPercent?: number;
 }
 
 interface EpisodeRange {
   label: string;
-  episodes: EpisodeItem[];
-}
-
-interface SeasonCard {
-  season_number: number;
-  name: string;
-  episode_count: number;
-  airYear?: number;
-  poster?: string;
-  overview: string;
-  rating: string;
-  hasHistory: boolean;
-}
-
-interface EpisodePlayPayload {
-  seasonNumber: number;
-  episodeNumber: number;
-  title: string;
-  runtime: number;
-  poster?: string;
-  backdrop?: string;
-  episodes: Array<{
-    id: string;
-    seasonNumber: number;
-    episodeNumber: number;
-    title: string;
-    runtime: number;
-    poster?: string;
-    backdrop?: string;
-  }>;
+  episodes: EpisodeCard[];
 }
 
 const RANGE_SIZE = 50;
@@ -63,10 +47,12 @@ const PREVIEW_LIMIT = 8;
 
 const props = defineProps<Props>();
 const emit = defineEmits<{
-  playEpisode: [episode: EpisodePlayPayload];
+  playEpisode: [payload: EpisodePlayPayload];
 }>();
 
-const selectedSeasonNumber = ref<number>();
+const seasons = ref<SeasonSummary[]>([]);
+const episodes = ref<EpisodeSummary[]>([]);
+const selectedSeasonId = ref<string>();
 const activeRangeIndex = ref(0);
 const viewState = ref<"seasons" | "episodes">("seasons");
 const isPopupOpen = ref(false);
@@ -91,179 +77,165 @@ watch(viewState, () => {
       const offsetPosition = elementPosition - headerH - 16;
 
       if (typeof window.scrollTo === "function") {
-        window.scrollTo({
-          top: offsetPosition,
-          behavior: "smooth",
-        });
+        window.scrollTo({ top: offsetPosition, behavior: "smooth" });
       }
     }
   });
 });
 
-let lastSeriesId: number | string | undefined = undefined;
-let isInitialized = false;
+/** 在整季集里挑「继续观看」命中集：有进度且未看完，取最靠后的一集。 */
+function pickResumeEpisode(list: EpisodeSummary[]): EpisodeSummary | undefined {
+  const inProgress = list.filter((ep) => ep.progressPercent != null && !ep.played);
+  if (!inProgress.length) return undefined;
+  return inProgress.reduce((latest, ep) => {
+    const key = (e: EpisodeSummary) => (e.seasonNumber ?? 0) * 10_000 + (e.episodeNumber ?? 0);
+    return key(ep) >= key(latest) ? ep : latest;
+  });
+}
 
-// Watch for seriesId and seasons to initialize/reset state ONLY when the TV show changes
+/** 载入剧集：拉季列表，定位「继续观看」的季，否则第一季。 */
 watch(
-  [() => props.seriesId, () => props.seasons],
-  ([newId, seasons]) => {
-    if (!seasons?.length) return;
-    if (!isInitialized || newId !== lastSeriesId) {
-      isInitialized = true;
-      lastSeriesId = newId;
-      const defSeason = props.defaultSeason;
-      if (defSeason != null && seasons.some((s) => s.season_number === defSeason)) {
-        selectedSeasonNumber.value = defSeason;
-        viewState.value = "episodes";
-        if (props.watchedEpisode != null) {
-          activeRangeIndex.value = Math.floor((props.watchedEpisode - 1) / RANGE_SIZE);
-        }
-      } else {
-        selectedSeasonNumber.value = seasons[0].season_number;
-        viewState.value = seasons.length > 1 ? "seasons" : "episodes";
-      }
+  () => props.seriesId,
+  async (seriesId) => {
+    seasons.value = [];
+    episodes.value = [];
+    selectedSeasonId.value = undefined;
+    viewState.value = "seasons";
+    activeRangeIndex.value = 0;
+    if (!seriesId) return;
+
+    const seasonList = await fetchSeasons(seriesId);
+    if (props.seriesId !== seriesId) return; // 期间路由已切换
+    seasons.value = seasonList;
+    if (!seasonList.length) return;
+
+    if (seasonList.length === 1) {
+      await selectSeason(seasonList[0]!, "episodes");
+      return;
+    }
+
+    // 多季：一次性拉全集判断「继续观看」落在哪一季。
+    const all = await fetchEpisodes(seriesId);
+    if (props.seriesId !== seriesId) return;
+    const resume = pickResumeEpisode(all);
+    const historySeason =
+      resume != null
+        ? seasonList.find((s) => s.seasonNumber != null && s.seasonNumber === resume.seasonNumber)
+        : undefined;
+
+    if (historySeason) {
+      await selectSeason(historySeason, "episodes");
+    } else {
+      selectedSeasonId.value = seasonList[0]!.id;
+      viewState.value = "seasons";
     }
   },
   { immediate: true },
 );
 
-// Watch for selectedSeasonNumber changes to reset range index
-watch(selectedSeasonNumber, (newVal) => {
-  if (newVal === props.defaultSeason && props.watchedEpisode != null) {
-    activeRangeIndex.value = Math.floor((props.watchedEpisode - 1) / RANGE_SIZE);
-  } else {
-    activeRangeIndex.value = 0;
-  }
-});
+/** 选季：拉该季分集并进入分集视图，定位「继续观看」所在范围。 */
+async function selectSeason(
+  season: SeasonSummary,
+  targetView: "seasons" | "episodes" = "episodes",
+) {
+  selectedSeasonId.value = season.id;
+  viewState.value = targetView;
+  activeRangeIndex.value = 0;
+  const list = await fetchEpisodes(props.seriesId, season.id);
+  if (selectedSeasonId.value !== season.id) return; // 期间又切了季
+  episodes.value = list;
 
-const seasonCards = computed<SeasonCard[]>(() =>
-  props.seasons.map((season, index) => {
-    const airYear = season.air_date ? new Date(season.air_date).getFullYear() : undefined;
-    const ratingBase = props.rating ?? 8.8;
-    const rating = Math.max(6, Math.min(9.8, ratingBase - (index % 4) * 0.1)).toFixed(1);
-    return {
-      ...season,
-      airYear,
-      poster: season.poster_path ?? undefined,
-      rating,
-      hasHistory: season.season_number === props.defaultSeason && props.watchedEpisode != null,
-    };
-  }),
-);
+  const resume = pickResumeEpisode(list);
+  if (resume) {
+    const idx = list.findIndex((ep) => ep.id === resume.id);
+    if (idx >= 0) activeRangeIndex.value = Math.floor(idx / RANGE_SIZE);
+  }
+}
 
 const activeSeason = computed(
-  () =>
-    props.seasons.find((season) => season.season_number === selectedSeasonNumber.value) ??
-    props.seasons[0],
+  () => seasons.value.find((season) => season.id === selectedSeasonId.value) ?? seasons.value[0],
 );
-
-const activeSeasonCard = computed(() =>
-  seasonCards.value.find((season) => season.season_number === activeSeason.value?.season_number),
-);
-
-const activeSeasonPoster = computed(() => activeSeason.value?.poster_path ?? undefined);
-const activeSeasonBackdrop = computed(() => props.backdrop ?? activeSeasonPoster.value);
 
 const activeSeasonMeta = computed(() => {
   const season = activeSeason.value;
   if (!season) return [];
-  const airYear = season.air_date ? new Date(season.air_date).getFullYear() : undefined;
-  return [airYear ? `${airYear}年` : "", `${season.episode_count} 集`].filter(Boolean);
+  return [
+    season.year ? `${season.year}年` : "",
+    season.episodeCount != null ? `${season.episodeCount} 集` : "",
+  ].filter(Boolean);
 });
 
-const activeEpisodes = computed(() => {
-  if (!activeSeason.value) return [];
-  return buildEpisodes(activeSeason.value);
-});
+/** 「继续观看」命中集（当前季内），用于横幅提示与卡片高亮。 */
+const resumeEpisode = computed(() => pickResumeEpisode(episodes.value));
 
-const showRanges = computed(() => activeEpisodes.value.length > RANGE_SIZE);
+const displayEpisodes = computed<EpisodeCard[]>(() =>
+  episodes.value.map((ep, index) => ({
+    id: ep.id,
+    displayNumber: ep.episodeNumber ?? index + 1,
+    title: ep.name,
+    durationText: formatDuration(ep.runtimeSeconds),
+    airDate: formatAirDate(ep.premiereDate),
+    summary: ep.overview ?? "",
+    poster: ep.poster,
+    played: ep.played,
+    current: resumeEpisode.value?.id === ep.id,
+    progressPercent: ep.progressPercent,
+  })),
+);
+
+const showRanges = computed(() => displayEpisodes.value.length > RANGE_SIZE);
 
 const episodeRanges = computed<EpisodeRange[]>(() => {
   if (!showRanges.value) return [];
-
   const ranges: EpisodeRange[] = [];
-  for (let start = 0; start < activeEpisodes.value.length; start += RANGE_SIZE) {
-    const group = activeEpisodes.value.slice(start, start + RANGE_SIZE);
-    const first = group[0]!.number;
-    const last = group[group.length - 1]!.number;
-    ranges.push({ label: `E${first}-E${last}`, episodes: group });
+  for (let start = 0; start < displayEpisodes.value.length; start += RANGE_SIZE) {
+    const group = displayEpisodes.value.slice(start, start + RANGE_SIZE);
+    ranges.push({
+      label: `E${group[0]!.displayNumber}-E${group[group.length - 1]!.displayNumber}`,
+      episodes: group,
+    });
   }
   return ranges;
 });
 
 const visibleEpisodes = computed(() => {
-  if (!showRanges.value) return activeEpisodes.value;
+  if (!showRanges.value) return displayEpisodes.value;
   return (
     episodeRanges.value[activeRangeIndex.value]?.episodes ??
-    activeEpisodes.value.slice(0, RANGE_SIZE)
+    displayEpisodes.value.slice(0, RANGE_SIZE)
   );
 });
 
-// Up to 8 episodes for page preview (used in multi-season view)
-const pageVisibleEpisodes = computed(() => {
-  return visibleEpisodes.value.slice(0, PREVIEW_LIMIT);
-});
+/** 多季视图内联预览最多 8 集。 */
+const pageVisibleEpisodes = computed(() => visibleEpisodes.value.slice(0, PREVIEW_LIMIT));
 
-function buildEpisodes(season: SeasonInfo): EpisodeItem[] {
-  return Array.from({ length: season.episode_count }, (_, index) => {
-    const number = index + 1;
-    const isHistorySeason = season.season_number === props.defaultSeason;
-    return {
-      id: `${props.seriesId ?? "tv"}-s${season.season_number}-e${number}`,
-      seasonNumber: season.season_number,
-      number,
-      title: `第 ${number} 集`,
-      runtime: 38 + ((number * 7) % 18),
-      airDate: formatEpisodeDate(season.air_date, number),
-      summary: episodeSummary(number),
-      watched: isHistorySeason && props.watchedEpisode != null && number < props.watchedEpisode,
-      current: isHistorySeason && props.watchedEpisode != null && number === props.watchedEpisode,
-    };
-  });
+/** 秒 → "48分钟"，无时长返回空串。 */
+function formatDuration(seconds: number | undefined): string {
+  if (!seconds) return "";
+  return `${Math.max(1, Math.round(seconds / 60))}分钟`;
 }
 
-function formatEpisodeDate(seasonDate: string | null, episodeNumber: number) {
-  if (!seasonDate) return "未知日期";
-  const date = new Date(seasonDate);
-  date.setDate(date.getDate() + episodeNumber - 1);
-  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+/** 首播日期字符串 → "2024年1月1日"，无则空串。 */
+function formatAirDate(date: string | undefined): string {
+  if (!date) return "";
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return `${parsed.getFullYear()}年${parsed.getMonth() + 1}月${parsed.getDate()}日`;
 }
 
-function episodeSummary(episodeNumber: number) {
-  return `第 ${episodeNumber} 集故事线继续深入，伴随着新线索逐渐浮出水面，剧中角色们的矛盾纠葛与剧情张力被推向了新的高峰，精彩不容错过。`;
+function selectSeasonCard(season: SeasonSummary) {
+  void selectSeason(season);
 }
 
-function selectSeason(seasonNumber: number) {
-  selectedSeasonNumber.value = seasonNumber;
-  viewState.value = "episodes";
+function playEpisode(card: EpisodeCard) {
+  const episode = episodes.value.find((ep) => ep.id === card.id);
+  if (!episode) return;
+  emit("playEpisode", { episode, episodes: episodes.value });
 }
 
-function playEpisode(episode: EpisodeItem) {
-  emit("playEpisode", {
-    seasonNumber: episode.seasonNumber,
-    episodeNumber: episode.number,
-    title: episode.title,
-    runtime: episode.runtime,
-    poster: activeSeasonPoster.value,
-    backdrop: activeSeasonBackdrop.value,
-    episodes: activeEpisodes.value.map((entry) => ({
-      id: entry.id,
-      seasonNumber: entry.seasonNumber,
-      episodeNumber: entry.number,
-      title: entry.title,
-      runtime: entry.runtime,
-      poster: activeSeasonPoster.value,
-      backdrop: activeSeasonBackdrop.value,
-    })),
-  });
-}
-
-function playWatchedEpisode() {
-  if (!activeEpisodes.value.length || props.watchedEpisode == null) return;
-  const episode = activeEpisodes.value.find((e) => e.number === props.watchedEpisode);
-  if (episode) {
-    playEpisode(episode);
-  }
+function playResumeEpisode() {
+  const resume = resumeEpisode.value;
+  if (resume) emit("playEpisode", { episode: resume, episodes: episodes.value });
 }
 
 function openEpisodesPopup() {
@@ -286,25 +258,25 @@ function closeEpisodesPopup() {
 </script>
 
 <template>
-  <section v-if="props.seasons.length" ref="sectionRef" class="seasons-section">
+  <section v-if="seasons.length" ref="sectionRef" class="seasons-section">
     <!-- Case 1: Single Season Flat Layout (Only horizontal scrolling, no wrapping) -->
-    <div v-if="props.seasons.length === 1" class="single-season-scroller-container">
+    <div v-if="seasons.length === 1" class="single-season-scroller-container">
       <header class="single-season-header">
-        <h2 class="section-title">{{ props.seasons[0].name }}</h2>
+        <h2 class="section-title">{{ seasons[0].name }}</h2>
       </header>
 
       <BaseScroller class="scroller" col-width="var(--episode-col-width)" gap="var(--fbz-space-4)">
         <button
-          v-for="episode in activeEpisodes"
+          v-for="episode in displayEpisodes"
           :key="episode.id"
           class="episode-card"
-          :class="{ watched: episode.watched, current: episode.current }"
+          :class="{ watched: episode.played, current: episode.current }"
           type="button"
           @click="() => playEpisode(episode)"
         >
           <div class="episode-thumb-wrap">
             <MediaPoster
-              :src="activeSeasonBackdrop"
+              :src="episode.poster ?? props.backdrop"
               :title="`${props.showTitle} ${episode.title}`"
               ratio="wide"
               class="episode-poster"
@@ -312,19 +284,24 @@ function closeEpisodesPopup() {
             <div class="episode-play-overlay">
               <span class="play-icon">▶</span>
             </div>
-            <!-- Progress indicator bar for currently active/watching episode -->
-            <div v-if="episode.current" class="episode-active-progress">
-              <span class="active-bar" />
+            <div v-if="episode.progressPercent != null" class="episode-active-progress">
+              <span class="active-bar" :style="{ width: `${episode.progressPercent}%` }" />
             </div>
           </div>
 
           <div class="episode-info">
             <div class="episode-header-row">
-              <strong class="episode-title">{{ episode.number }}. {{ episode.title }}</strong>
-              <span class="episode-duration">{{ episode.runtime }}分钟</span>
+              <strong class="episode-title"
+                >{{ episode.displayNumber }}. {{ episode.title }}</strong
+              >
+              <span v-if="episode.durationText" class="episode-duration">
+                {{ episode.durationText }}
+              </span>
             </div>
-            <span class="episode-airdate">{{ episode.airDate }}</span>
-            <p class="episode-summary" :title="episode.summary">{{ episode.summary }}</p>
+            <span v-if="episode.airDate" class="episode-airdate">{{ episode.airDate }}</span>
+            <p v-if="episode.summary" class="episode-summary" :title="episode.summary">
+              {{ episode.summary }}
+            </p>
           </div>
         </button>
       </BaseScroller>
@@ -339,21 +316,20 @@ function closeEpisodesPopup() {
         </header>
         <div class="seasons-grid">
           <button
-            v-for="season in seasonCards"
-            :key="season.season_number"
+            v-for="season in seasons"
+            :key="season.id"
             class="season-card-item"
             type="button"
-            @click="selectSeason(season.season_number)"
+            @click="selectSeasonCard(season)"
           >
             <div class="season-poster-wrap-grid">
               <MediaPoster :src="season.poster" :title="season.name" ratio="poster" />
-              <span v-if="season.hasHistory" class="history-badge-grid">继续观看</span>
             </div>
             <div class="season-info-grid">
               <h4>{{ season.name }}</h4>
               <div class="season-meta-grid">
-                <span>{{ season.airYear ? season.airYear + "年" : "" }}</span>
-                <span>{{ season.episode_count }} 集</span>
+                <span>{{ season.year ? season.year + "年" : "" }}</span>
+                <span v-if="season.episodeCount != null">{{ season.episodeCount }} 集</span>
               </div>
             </div>
           </button>
@@ -372,39 +348,28 @@ function closeEpisodesPopup() {
         <!-- Selected Season Summary Banner -->
         <div v-if="activeSeason" class="season-banner">
           <div class="season-poster-wrap">
-            <MediaPoster :src="activeSeasonPoster" :title="activeSeason.name" ratio="poster" />
+            <MediaPoster :src="activeSeason.poster" :title="activeSeason.name" ratio="poster" />
           </div>
           <div class="season-meta">
             <div class="season-title-row">
               <h3>{{ activeSeason.name }}</h3>
-              <span v-if="activeSeasonCard?.rating" class="season-rating">
-                ★ {{ activeSeasonCard.rating }}
-              </span>
             </div>
             <div class="season-stats">
               <span v-for="meta in activeSeasonMeta" :key="meta" class="stat-badge">
                 {{ meta }}
               </span>
-              <span
-                v-if="activeSeasonCard?.hasHistory && props.watchedEpisode"
-                class="continue-badge"
-              >
-                上次看到第 {{ props.watchedEpisode }} 集
-              </span>
+              <span v-if="resumeEpisode" class="continue-badge">继续观看</span>
             </div>
-            <p class="season-overview">
-              {{
-                activeSeason.overview ||
-                "本季继续展开故事主线，人物关系、冲突 and 关键事件逐步推进。"
-              }}
+            <p v-if="activeSeason.overview" class="season-overview">
+              {{ activeSeason.overview }}
             </p>
             <button
-              v-if="activeSeasonCard?.hasHistory && props.watchedEpisode"
+              v-if="resumeEpisode"
               class="continue-play-btn"
               type="button"
-              @click="playWatchedEpisode"
+              @click="playResumeEpisode"
             >
-              ▶ 继续播放第 {{ props.watchedEpisode }} 集
+              ▶ 继续播放
             </button>
           </div>
         </div>
@@ -434,13 +399,13 @@ function closeEpisodesPopup() {
               v-for="episode in pageVisibleEpisodes"
               :key="episode.id"
               class="episode-card"
-              :class="{ watched: episode.watched, current: episode.current }"
+              :class="{ watched: episode.played, current: episode.current }"
               type="button"
               @click="() => playEpisode(episode)"
             >
               <div class="episode-thumb-wrap">
                 <MediaPoster
-                  :src="activeSeasonBackdrop"
+                  :src="episode.poster ?? props.backdrop"
                   :title="`${props.showTitle} ${episode.title}`"
                   ratio="wide"
                   class="episode-poster"
@@ -448,19 +413,24 @@ function closeEpisodesPopup() {
                 <div class="episode-play-overlay">
                   <span class="play-icon">▶</span>
                 </div>
-                <!-- Progress indicator bar for currently active/watching episode -->
-                <div v-if="episode.current" class="episode-active-progress">
-                  <span class="active-bar" />
+                <div v-if="episode.progressPercent != null" class="episode-active-progress">
+                  <span class="active-bar" :style="{ width: `${episode.progressPercent}%` }" />
                 </div>
               </div>
 
               <div class="episode-info">
                 <div class="episode-header-row">
-                  <strong class="episode-title">{{ episode.number }}. {{ episode.title }}</strong>
-                  <span class="episode-duration">{{ episode.runtime }}分钟</span>
+                  <strong class="episode-title">
+                    {{ episode.displayNumber }}. {{ episode.title }}
+                  </strong>
+                  <span v-if="episode.durationText" class="episode-duration">
+                    {{ episode.durationText }}
+                  </span>
                 </div>
-                <span class="episode-airdate">{{ episode.airDate }}</span>
-                <p class="episode-summary" :title="episode.summary">{{ episode.summary }}</p>
+                <span v-if="episode.airDate" class="episode-airdate">{{ episode.airDate }}</span>
+                <p v-if="episode.summary" class="episode-summary" :title="episode.summary">
+                  {{ episode.summary }}
+                </p>
               </div>
             </button>
           </BaseScroller>
@@ -512,7 +482,7 @@ function closeEpisodesPopup() {
                   v-for="episode in visibleEpisodes"
                   :key="'popup-' + episode.id"
                   class="episode-card popup-episode-card"
-                  :class="{ watched: episode.watched, current: episode.current }"
+                  :class="{ watched: episode.played, current: episode.current }"
                   type="button"
                   @click="
                     () => {
@@ -523,7 +493,7 @@ function closeEpisodesPopup() {
                 >
                   <div class="episode-thumb-wrap">
                     <MediaPoster
-                      :src="activeSeasonBackdrop"
+                      :src="episode.poster ?? props.backdrop"
                       :title="`${props.showTitle} ${episode.title}`"
                       ratio="wide"
                       class="episode-poster"
@@ -531,20 +501,26 @@ function closeEpisodesPopup() {
                     <div class="episode-play-overlay">
                       <span class="play-icon">▶</span>
                     </div>
-                    <div v-if="episode.current" class="episode-active-progress">
-                      <span class="active-bar" />
+                    <div v-if="episode.progressPercent != null" class="episode-active-progress">
+                      <span class="active-bar" :style="{ width: `${episode.progressPercent}%` }" />
                     </div>
                   </div>
 
                   <div class="episode-info">
                     <div class="episode-header-row">
-                      <strong class="episode-title"
-                        >{{ episode.number }}. {{ episode.title }}</strong
-                      >
-                      <span class="episode-duration">{{ episode.runtime }}分钟</span>
+                      <strong class="episode-title">
+                        {{ episode.displayNumber }}. {{ episode.title }}
+                      </strong>
+                      <span v-if="episode.durationText" class="episode-duration">
+                        {{ episode.durationText }}
+                      </span>
                     </div>
-                    <span class="episode-airdate">{{ episode.airDate }}</span>
-                    <p class="episode-summary" :title="episode.summary">{{ episode.summary }}</p>
+                    <span v-if="episode.airDate" class="episode-airdate">{{
+                      episode.airDate
+                    }}</span>
+                    <p v-if="episode.summary" class="episode-summary" :title="episode.summary">
+                      {{ episode.summary }}
+                    </p>
                   </div>
                 </button>
               </div>

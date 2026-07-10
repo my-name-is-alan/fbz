@@ -1,53 +1,100 @@
 <script setup lang="ts">
+import { getTranscodeSettings, updateTranscodeSettings } from "@/service/modules/admin.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import type { TranscodeSettings } from "@/types/admin.ts";
 
 const uiStore = useUiStore();
 
-// Form states
-const hwAcceleration = ref("none");
-const maxResolution = ref("auto");
-const audioChannels = ref("6");
-const enableH265 = ref(true);
-const burnSubtitles = ref("picture");
-const saving = ref(false);
+// 表单状态，初值对齐后端 allowlist，加载后被真实设置覆盖。
+const hardwareAcceleration = ref("none");
+const preferredEncoder = ref("h264");
+const maxResolution = ref("original");
+const segmentDuration = ref(6);
+const throttle = ref(true);
 
+const loading = ref(false);
+const saving = ref(false);
+const loadError = ref("");
+
+// hardwareAcceleration ∈ none/nvenc/qsv/vaapi/videotoolbox（后端 allowlist）
 const hwOptions = [
   { label: "禁用硬件加速 (CPU 软件解码)", value: "none" },
-  { label: "Intel QuickSync (QSV)", value: "qsv" },
   { label: "NVIDIA NVENC / NVDEC", value: "nvenc" },
-  { label: "AMD AMF Video Engine", value: "amf" },
+  { label: "Intel QuickSync (QSV)", value: "qsv" },
   { label: "VAAPI (Linux 通用)", value: "vaapi" },
+  { label: "VideoToolbox (macOS)", value: "videotoolbox" },
 ];
 
+const encoderOptions = [
+  { label: "H.264 / AVC (兼容性最佳)", value: "h264" },
+  { label: "H.265 / HEVC (高压缩率)", value: "h265" },
+  { label: "AV1 (下一代高效编码)", value: "av1" },
+];
+
+// maxResolution ∈ 480/720/1080/2160/original（后端 allowlist）
 const resolutionOptions = [
-  { label: "不限分辨率 (自动匹配网络带宽)", value: "auto" },
-  { label: "最大限制为 4K (2160P)", value: "4k" },
-  { label: "最大限制为 1080P (Full HD)", value: "1080p" },
-  { label: "最大限制为 720P (Standard HD)", value: "720p" },
+  { label: "不限分辨率 (原始质量)", value: "original" },
+  { label: "最大限制为 4K (2160P)", value: "2160" },
+  { label: "最大限制为 1080P (Full HD)", value: "1080" },
+  { label: "最大限制为 720P (Standard HD)", value: "720" },
+  { label: "最大限制为 480P (SD)", value: "480" },
 ];
 
-const channelOptions = [
-  { label: "支持 5.1 / 7.1 声道环绕立体声", value: "6" },
-  { label: "强制降混为 双声道立体声 (Stereo)", value: "2" },
+const segmentOptions = [
+  { label: "2 秒 (低延迟，切片更多)", value: 2 },
+  { label: "4 秒", value: 4 },
+  { label: "6 秒 (推荐)", value: 6 },
+  { label: "10 秒 (更少切片请求)", value: 10 },
 ];
 
-const subtitleOptions = [
-  { label: "仅烧录图形字幕 (PGS, VOBSUB)", value: "picture" },
-  { label: "总是烧录所有格式字幕", value: "all" },
-  { label: "从不烧录字幕 (使用客户端软解渲染)", value: "never" },
-];
+onMounted(() => {
+  void loadSettings();
+});
 
-function handleSave() {
+async function loadSettings() {
+  loading.value = true;
+  loadError.value = "";
+  try {
+    const settings = await getTranscodeSettings();
+    applySettings(settings);
+  } catch {
+    loadError.value = "转码设置加载失败，请确认后端已就绪且当前账号具备管理员权限。";
+  } finally {
+    loading.value = false;
+  }
+}
+
+function applySettings(settings: TranscodeSettings) {
+  hardwareAcceleration.value = settings.hardwareAcceleration;
+  preferredEncoder.value = settings.preferredEncoder;
+  maxResolution.value = settings.maxResolution;
+  segmentDuration.value = settings.segmentDuration;
+  throttle.value = settings.throttle;
+}
+
+async function handleSave() {
   saving.value = true;
-  setTimeout(() => {
+  try {
+    const saved = await updateTranscodeSettings({
+      hardwareAcceleration: hardwareAcceleration.value,
+      preferredEncoder: preferredEncoder.value,
+      maxResolution: maxResolution.value,
+      segmentDuration: segmentDuration.value,
+      throttle: throttle.value,
+    });
+    applySettings(saved);
+    uiStore.showToast("媒体串流与硬件转码参数配置已成功保存。", "success");
+  } catch {
+    uiStore.showToast("保存转码配置失败，请检查参数或后端状态。", "error");
+  } finally {
     saving.value = false;
-    uiStore.showToast("媒体串流与硬件转码参数配置已成功应用！", "success");
-  }, 1000);
+  }
 }
 </script>
 
 <template>
   <div class="admin-transcode-view">
+    <p v-if="loadError" class="load-error">{{ loadError }}</p>
     <div class="settings-stack">
       <!-- Section 1: HW Transcoding -->
       <section class="settings-card">
@@ -60,7 +107,7 @@ function handleSave() {
             <label for="transcode-hw">硬件加速类型</label>
             <BaseSelect
               id="transcode-hw"
-              v-model="hwAcceleration"
+              v-model="hardwareAcceleration"
               :options="hwOptions"
               ariaLabel="选择硬件加速解码器"
             />
@@ -70,20 +117,17 @@ function handleSave() {
             >
           </div>
 
-          <div class="toggle-list">
-            <div class="toggle-row">
-              <div class="toggle-info">
-                <span class="title">启用 H.265 / HEVC 硬件编码</span>
-                <span class="desc"
-                  >对兼容的浏览器和客户端自动采用高压缩率的 H.265 编码输出，减少 50%
-                  传输带宽。</span
-                >
-              </div>
-              <label class="glow-switch" aria-label="启用 H.265 编码">
-                <input type="checkbox" v-model="enableH265" />
-                <span class="switch-slide-thumb" />
-              </label>
-            </div>
+          <div class="form-group">
+            <label for="transcode-encoder">首选视频编码器</label>
+            <BaseSelect
+              id="transcode-encoder"
+              v-model="preferredEncoder"
+              :options="encoderOptions"
+              ariaLabel="选择首选视频编码器"
+            />
+            <span class="field-hint"
+              >对兼容的客户端优先采用所选编码输出，H.265 / AV1 可显著减少传输带宽。</span
+            >
           </div>
         </div>
       </section>
@@ -104,45 +148,37 @@ function handleSave() {
               ariaLabel="选择最大画质限制"
             />
           </div>
-        </div>
-      </section>
 
-      <!-- Section 3: Subtitles & Audio -->
-      <section class="settings-card">
-        <div class="card-header">
-          <span class="indicator" />
-          <h3>音频与字幕烧录</h3>
-        </div>
-        <div class="card-body">
           <div class="form-group">
-            <label for="transcode-audio">音频输出声道</label>
+            <label for="transcode-segment">HLS 切片时长</label>
             <BaseSelect
-              id="transcode-audio"
-              v-model="audioChannels"
-              :options="channelOptions"
-              ariaLabel="选择音频声道"
+              id="transcode-segment"
+              v-model="segmentDuration"
+              :options="segmentOptions"
+              ariaLabel="选择 HLS 切片时长"
             />
           </div>
 
-          <div class="form-group">
-            <label for="transcode-subtitles">字幕烧录策略</label>
-            <BaseSelect
-              id="transcode-subtitles"
-              v-model="burnSubtitles"
-              :options="subtitleOptions"
-              ariaLabel="选择字幕烧录策略"
-            />
-            <span class="field-hint"
-              >部分客户端（如 Chrome 浏览器）无法原生渲染 PGS
-              蓝光图形字幕，此时必须通过服务器进行服务端烧录转码输出。</span
-            >
+          <div class="toggle-list">
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <span class="title">启用转码限速 (Throttle)</span>
+                <span class="desc"
+                  >当客户端缓冲充足时暂缓转码，降低服务器峰值负载与磁盘写入压力。</span
+                >
+              </div>
+              <label class="glow-switch" aria-label="启用转码限速">
+                <input type="checkbox" v-model="throttle" />
+                <span class="switch-slide-thumb" />
+              </label>
+            </div>
           </div>
         </div>
       </section>
 
       <!-- Actions Footer -->
       <footer class="actions-footer">
-        <button class="btn-primary" type="button" :disabled="saving" @click="handleSave">
+        <button class="btn-primary" type="button" :disabled="saving || loading" @click="handleSave">
           <span class="spinner" v-if="saving" />
           <span>{{ saving ? "正在保存..." : "保存转码配置" }}</span>
         </button>
@@ -154,6 +190,12 @@ function handleSave() {
 <style scoped lang="scss">
 .admin-transcode-view {
   max-width: 800px;
+}
+
+.load-error {
+  margin: 0 0 var(--fbz-space-4);
+  color: var(--fbz-color-danger-500);
+  font-size: var(--fbz-font-size-sm);
 }
 
 .settings-stack {

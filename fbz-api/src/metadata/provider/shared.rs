@@ -129,6 +129,7 @@ pub struct MetadataPerson {
     pub role_type: String,
     pub role_name: String,
     pub sort_order: i32,
+    pub profile_image_url: Option<String>,
 }
 
 /// 附属视频（主题曲 / 宣传片 / 预告等，对应 media_videos 表）。

@@ -229,6 +229,72 @@ pub enum PluginConfigUpdateError {
     MissingRetainedSecret(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginMarketSourceRecord {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub enabled: bool,
+    pub last_synced_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatePluginMarketSourceInput {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginMarketSourceSyncTarget {
+    pub internal_id: i64,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewPluginMarketEntry {
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub permissions: Value,
+    pub icon_url: Option<String>,
+    pub download_url: String,
+    pub checksum_sha256: Option<String>,
+    pub signature: Option<String>,
+    pub raw: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginMarketEntryRecord {
+    pub source_id: String,
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub permissions: Value,
+    pub icon_url: Option<String>,
+    pub download_url: String,
+    pub checksum_sha256: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginMarketEntryInstallTarget {
+    pub plugin_id: String,
+    pub version: String,
+    pub download_url: String,
+    pub checksum_sha256: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginUninstallRecord {
+    pub plugin_id: String,
+    pub package_paths: Vec<String>,
+}
+
 impl PluginRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
@@ -918,6 +984,443 @@ impl PluginRepository {
         let state = load_state_for_update(&mut tx, plugin_id).await?;
         tx.commit().await.map_err(PluginStateError::Database)?;
         Ok(state)
+    }
+
+    pub async fn list_market_sources(
+        &self,
+    ) -> Result<Vec<PluginMarketSourceRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                public_id::text as id,
+                name,
+                url,
+                enabled,
+                last_synced_at::text as last_synced_at
+            from plugin_market_sources
+            order by created_at desc, id desc
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(PluginMarketSourceRecord::from_row)
+            .collect()
+    }
+
+    pub async fn create_market_source(
+        &self,
+        input: CreatePluginMarketSourceInput,
+    ) -> Result<PluginMarketSourceRecord, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            insert into plugin_market_sources (name, url)
+            values ($1, $2)
+            returning
+                public_id::text as id,
+                name,
+                url,
+                enabled,
+                last_synced_at::text as last_synced_at
+            "#,
+        )
+        .bind(input.name.trim())
+        .bind(input.url.trim())
+        .fetch_one(&self.pool)
+        .await?;
+
+        PluginMarketSourceRecord::from_row(row)
+    }
+
+    /// 启停市场源。停用的源保留缓存目录但从浏览/安装里隐藏（路由层过滤）。
+    pub async fn set_market_source_enabled(
+        &self,
+        source_id: &str,
+        enabled: bool,
+    ) -> Result<Option<PluginMarketSourceRecord>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            update plugin_market_sources
+            set enabled = $2,
+                updated_at = now()
+            where public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            returning
+                public_id::text as id,
+                name,
+                url,
+                enabled,
+                last_synced_at::text as last_synced_at
+            "#,
+        )
+        .bind(source_id)
+        .bind(enabled)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(PluginMarketSourceRecord::from_row).transpose()
+    }
+
+    pub async fn delete_market_source(&self, source_id: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            delete from plugin_market_sources
+            where public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(source_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_market_source_sync_target(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<PluginMarketSourceSyncTarget>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select id, url
+            from plugin_market_sources
+            where public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+            "#,
+        )
+        .bind(source_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(PluginMarketSourceSyncTarget {
+                internal_id: row.try_get("id")?,
+                url: row.try_get("url")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Replace all cached catalog entries for a source and stamp `last_synced_at`.
+    /// Runs in a single transaction so browsers never observe a partial catalog.
+    pub async fn replace_market_entries(
+        &self,
+        source_internal_id: i64,
+        entries: &[NewPluginMarketEntry],
+    ) -> Result<i64, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            delete from plugin_market_entries
+            where source_id = $1
+            "#,
+        )
+        .bind(source_internal_id)
+        .execute(&mut *tx)
+        .await?;
+
+        for entry in entries {
+            sqlx::query(
+                r#"
+                insert into plugin_market_entries (
+                    source_id,
+                    plugin_id,
+                    name,
+                    version,
+                    description,
+                    author,
+                    permissions,
+                    icon_url,
+                    download_url,
+                    checksum_sha256,
+                    signature,
+                    raw
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                "#,
+            )
+            .bind(source_internal_id)
+            .bind(entry.plugin_id.trim())
+            .bind(entry.name.trim())
+            .bind(entry.version.trim())
+            .bind(entry.description.as_deref().map(str::trim))
+            .bind(entry.author.as_deref().map(str::trim))
+            .bind(&entry.permissions)
+            .bind(entry.icon_url.as_deref().map(str::trim))
+            .bind(entry.download_url.trim())
+            .bind(entry.checksum_sha256.as_deref().map(str::trim))
+            .bind(entry.signature.as_deref().map(str::trim))
+            .bind(&entry.raw)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            update plugin_market_sources
+            set last_synced_at = now(),
+                updated_at = now()
+            where id = $1
+            "#,
+        )
+        .bind(source_internal_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(entries.len() as i64)
+    }
+
+    pub async fn list_market_entries(
+        &self,
+        source_id: Option<&str>,
+        query_text: Option<&str>,
+    ) -> Result<Vec<PluginMarketEntryRecord>, sqlx::Error> {
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+            select
+                src.public_id::text as source_id,
+                entry.plugin_id,
+                entry.name,
+                entry.version,
+                entry.description,
+                entry.author,
+                entry.permissions,
+                entry.icon_url,
+                entry.download_url,
+                entry.checksum_sha256,
+                entry.signature
+            from plugin_market_entries entry
+            join plugin_market_sources src on src.id = entry.source_id
+            where src.enabled = true
+            "#,
+        );
+
+        if let Some(source_id) = source_id {
+            query.push(
+                r#"
+                and src.public_id = case
+                    when
+                "#,
+            );
+            query.push_bind(source_id);
+            query.push(
+                r#"::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then
+                "#,
+            );
+            query.push_bind(source_id);
+            query.push(
+                r#"::uuid
+                    else null::uuid
+                end
+                "#,
+            );
+        }
+
+        if let Some(query_text) = query_text {
+            let pattern = format!("%{}%", escape_like_pattern(query_text));
+            query.push(" and (entry.name ilike ");
+            query.push_bind(pattern.clone());
+            query.push(" escape '\\' or entry.description ilike ");
+            query.push_bind(pattern);
+            query.push(" escape '\\')");
+        }
+
+        query.push(" order by entry.name asc, entry.plugin_id asc, entry.version desc");
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(PluginMarketEntryRecord::from_row)
+            .collect()
+    }
+
+    /// 已安装插件的活动包版本映射（市场目录标注"已安装/可升级"用）。
+    pub async fn list_installed_plugin_versions(
+        &self,
+    ) -> Result<Vec<(String, Option<String>)>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                pi.plugin_id,
+                pkg.package_version
+            from plugin_installations pi
+            left join plugin_packages pkg on pkg.id = pi.active_package_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("plugin_id")?,
+                    row.try_get::<Option<String>, _>("package_version")?,
+                ))
+            })
+            .collect()
+    }
+
+    pub async fn get_market_entry_install_target(
+        &self,
+        source_id: &str,
+        plugin_id: &str,
+        version: &str,
+    ) -> Result<Option<PluginMarketEntryInstallTarget>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select
+                entry.plugin_id,
+                entry.version,
+                entry.download_url,
+                entry.checksum_sha256,
+                entry.signature
+            from plugin_market_entries entry
+            join plugin_market_sources src on src.id = entry.source_id
+            where src.public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+              and src.enabled = true
+              and entry.plugin_id = $2
+              and entry.version = $3
+            "#,
+        )
+        .bind(source_id)
+        .bind(plugin_id.trim())
+        .bind(version.trim())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(PluginMarketEntryInstallTarget {
+                plugin_id: row.try_get("plugin_id")?,
+                version: row.try_get("version")?,
+                download_url: row.try_get("download_url")?,
+                checksum_sha256: row.try_get("checksum_sha256")?,
+                signature: row.try_get("signature")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Uninstall a plugin: disable it, remove its installation + all packages
+    /// (cascading permissions/hooks/menu/schedule definitions and ephemeral
+    /// state), and drop any plugin-owned scheduled tasks. Dispatch/run audit
+    /// history is preserved (its FKs were relaxed in migration 0089). Returns
+    /// the on-disk package paths so callers can clean up the filesystem after
+    /// the transaction commits. `Ok(None)` means the plugin does not exist.
+    pub async fn uninstall_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Option<PluginUninstallRecord>, sqlx::Error> {
+        let plugin_id = plugin_id.trim();
+        let mut tx = self.pool.begin().await?;
+
+        let installed = sqlx::query_scalar::<_, i64>(
+            r#"
+            select id
+            from plugin_installations
+            where plugin_id = $1
+            for update
+            "#,
+        )
+        .bind(plugin_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if installed.is_none() {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        // Disable first so no worker picks the plugin up mid-teardown.
+        sqlx::query(
+            r#"
+            update plugin_installations
+            set enabled = false,
+                active_package_id = null,
+                disabled_at = now(),
+                updated_at = now()
+            where plugin_id = $1
+            "#,
+        )
+        .bind(plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // Drop plugin-owned scheduled tasks (cascades scheduled_task_runs).
+        sqlx::query(
+            r#"
+            delete from scheduled_tasks
+            where owner_type = 'plugin'
+              and owner_id = $1
+            "#,
+        )
+        .bind(plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // Collect on-disk package paths before deleting the rows.
+        let path_rows = sqlx::query(
+            r#"
+            select package_path
+            from plugin_packages
+            where plugin_id = $1
+            "#,
+        )
+        .bind(plugin_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut package_paths = Vec::with_capacity(path_rows.len());
+        for row in path_rows {
+            package_paths.push(row.try_get::<String, _>("package_path")?);
+        }
+
+        // Now that active_package_id is cleared, packages can be deleted (the
+        // installations.active_package_id FK is ON DELETE RESTRICT). This
+        // cascades plugin_permissions/hooks/menu_items/schedule_definitions.
+        sqlx::query(
+            r#"
+            delete from plugin_packages
+            where plugin_id = $1
+            "#,
+        )
+        .bind(plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // Delete the installation last; cascades ephemeral state
+        // (plugin_kv, plugin_config_secrets, plugin_host_tokens).
+        sqlx::query(
+            r#"
+            delete from plugin_installations
+            where plugin_id = $1
+            "#,
+        )
+        .bind(plugin_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(Some(PluginUninstallRecord {
+            plugin_id: plugin_id.to_owned(),
+            package_paths,
+        }))
     }
 }
 
@@ -1739,6 +2242,49 @@ impl PluginScheduleDefinitionRecord {
             timeout_seconds: row.try_get("timeout_seconds")?,
         })
     }
+}
+
+impl PluginMarketSourceRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            url: row.try_get("url")?,
+            enabled: row.try_get("enabled")?,
+            last_synced_at: row.try_get("last_synced_at")?,
+        })
+    }
+}
+
+impl PluginMarketEntryRecord {
+    fn from_row(row: PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            source_id: row.try_get("source_id")?,
+            plugin_id: row.try_get("plugin_id")?,
+            name: row.try_get("name")?,
+            version: row.try_get("version")?,
+            description: row.try_get("description")?,
+            author: row.try_get("author")?,
+            permissions: row.try_get("permissions")?,
+            icon_url: row.try_get("icon_url")?,
+            download_url: row.try_get("download_url")?,
+            checksum_sha256: row.try_get("checksum_sha256")?,
+            signature: row.try_get("signature")?,
+        })
+    }
+}
+
+/// Escape LIKE/ILIKE metacharacters so user search text matches literally.
+/// Pair with `escape '\\'` in the query.
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 impl Display for PluginStateError {

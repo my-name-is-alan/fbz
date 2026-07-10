@@ -1,12 +1,44 @@
 <script setup lang="ts">
 import { useThemeStore } from "@/stores/theme.ts";
 import { useAuthStore } from "@/stores/auth.ts";
+import { listPluginMenuItems } from "@/service/modules/admin.ts";
+import type { PluginMenuItem } from "@/types/admin.ts";
 
 const route = useRoute();
 const themeStore = useThemeStore();
 const authStore = useAuthStore();
 
 const mobileMenuOpen = ref(false);
+
+// 已启用插件声明的后台菜单项（admin.menu 权限），渲染为独立导航分组。
+const pluginMenuItems = ref<PluginMenuItem[]>([]);
+
+onMounted(async () => {
+  try {
+    pluginMenuItems.value = await listPluginMenuItems();
+  } catch {
+    // 菜单加载失败不阻塞后台使用（如无管理员权限或后端不可用）。
+    pluginMenuItems.value = [];
+  }
+});
+
+/** 插件菜单顶层项（parentKey 为空），按插件名和 weight 稳定排序。 */
+const pluginNavItems = computed(() =>
+  pluginMenuItems.value
+    .filter((item) => item.parentKey === null)
+    .sort(
+      (a, b) =>
+        a.pluginName.localeCompare(b.pluginName) ||
+        a.weight - b.weight ||
+        a.itemKey.localeCompare(b.itemKey),
+    ),
+);
+
+function pluginChildItems(parent: PluginMenuItem): PluginMenuItem[] {
+  return pluginMenuItems.value
+    .filter((item) => item.pluginId === parent.pluginId && item.parentKey === parent.itemKey)
+    .sort((a, b) => a.weight - b.weight || a.itemKey.localeCompare(b.itemKey));
+}
 
 interface NavLink {
   label: string;
@@ -80,6 +112,12 @@ const navItems: NavItem[] = [
       { label: "用户管理", to: "/admin/users", name: "admin-users", icon: ICONS.users },
       { label: "插件设置", to: "/admin/plugins", name: "admin-plugins", icon: ICONS.plugin },
       {
+        label: "插件市场",
+        to: "/admin/plugin-market",
+        name: "admin-plugin-market",
+        icon: ICONS.plugin,
+      },
+      {
         label: "任务计划",
         to: "/admin/scheduled-tasks",
         name: "admin-scheduled-tasks",
@@ -107,6 +145,9 @@ const currentTitle = computed(() => {
       return item.label;
     }
   }
+  if (route.name === "admin-plugin-config") return "插件配置";
+  const pluginItem = pluginMenuItems.value.find((item) => item.path === route.path);
+  if (pluginItem) return `${pluginItem.pluginName} · ${pluginItem.label}`;
   return "系统控制台";
 });
 
@@ -192,6 +233,42 @@ useEventListener(window, "keydown", (e) => {
             </RouterLink>
           </div>
         </template>
+
+        <!-- 已启用插件声明的管理菜单 -->
+        <div v-if="pluginNavItems.length > 0" class="nav-group" role="group" aria-label="插件菜单">
+          <div class="group-label">插件菜单</div>
+          <template v-for="item in pluginNavItems" :key="item.itemKey">
+            <RouterLink
+              :to="item.path"
+              class="menu-link sub-link"
+              :class="{ active: route.path === item.path }"
+            >
+              <svg
+                class="menu-svg"
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path :d="ICONS.plugin" />
+              </svg>
+              <span class="menu-label">{{ item.label }}</span>
+            </RouterLink>
+            <RouterLink
+              v-for="child in pluginChildItems(item)"
+              :key="child.itemKey"
+              :to="child.path"
+              class="menu-link sub-link plugin-child-link"
+              :class="{ active: route.path === child.path }"
+            >
+              <span class="menu-label">{{ child.label }}</span>
+            </RouterLink>
+          </template>
+        </div>
 
         <div class="menu-separator" />
 
@@ -336,6 +413,49 @@ useEventListener(window, "keydown", (e) => {
               </RouterLink>
             </div>
           </template>
+
+          <!-- 已启用插件声明的管理菜单 -->
+          <div
+            v-if="pluginNavItems.length > 0"
+            class="nav-group"
+            role="group"
+            aria-label="插件菜单"
+          >
+            <div class="group-label">插件菜单</div>
+            <template v-for="item in pluginNavItems" :key="item.itemKey">
+              <RouterLink
+                :to="item.path"
+                class="menu-link sub-link"
+                :class="{ active: route.path === item.path }"
+                @click="closeMobileMenu"
+              >
+                <svg
+                  class="menu-svg"
+                  viewBox="0 0 24 24"
+                  width="15"
+                  height="15"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path :d="ICONS.plugin" />
+                </svg>
+                <span class="menu-label">{{ item.label }}</span>
+              </RouterLink>
+              <RouterLink
+                v-for="child in pluginChildItems(item)"
+                :key="child.itemKey"
+                :to="child.path"
+                class="menu-link sub-link plugin-child-link"
+                :class="{ active: route.path === child.path }"
+                @click="closeMobileMenu"
+              >
+                <span class="menu-label">{{ child.label }}</span>
+              </RouterLink>
+            </template>
+          </div>
 
           <div class="menu-separator" />
 
@@ -606,6 +726,10 @@ useEventListener(window, "keydown", (e) => {
 
 .sub-link {
   padding-left: 16px;
+}
+
+.plugin-child-link {
+  padding-left: 40px;
 }
 
 .menu-separator {

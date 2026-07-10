@@ -25,8 +25,9 @@ use crate::{
             PluginExecutionRunRecord, PluginHostApiCallFilter, PluginHostApiCallRecord,
             QueueLibraryMetadataRefreshInput, QueueLibraryScanInput, QueueMetadataRefreshInput,
             ScanJobRecord, ScheduledTaskAdminRecord, ScheduledTaskFilter, ScheduledTaskRunFilter,
-            ScheduledTaskRunRecord, SetLibraryPathEnabledInput, UpdateLibrarySettingsInput,
-            UpdateUserLibraryPermissionInput, UpdateUserPolicyInput, UpsertNotificationTargetInput,
+            ScheduledTaskRunRecord, SetLibraryPathEnabledInput, SystemCountsRecord,
+            TranscodeSettingsRecord, UpdateLibrarySettingsInput, UpdateUserLibraryPermissionInput,
+            UpdateUserPolicyInput, UpsertNotificationTargetInput,
         },
     },
     auth::password::PasswordService,
@@ -247,6 +248,19 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/admin/recognition/test",
             post(crate::recognition::routes::test_recognition),
+        )
+        .route(
+            "/api/admin/transcode/settings",
+            get(get_transcode_settings).put(update_transcode_settings),
+        )
+        .route("/api/admin/system/info", get(get_system_info))
+        .route(
+            "/api/admin/system/maintenance/stats",
+            get(get_maintenance_stats),
+        )
+        .route(
+            "/api/admin/system/maintenance/clean-cache",
+            post(clean_cache),
         )
 }
 
@@ -1109,8 +1123,10 @@ pub async fn create_library(
     let library_type = normalize_library_type(&payload.library_type);
     validate_library_type(&library_type)?;
     validate_non_empty("name", &payload.name)?;
+    let mut validated_paths = Vec::with_capacity(payload.paths.len());
     for path in &payload.paths {
         validate_non_empty("path", path)?;
+        validated_paths.push(validate_media_library_path(state.config(), path)?);
     }
 
     let Some(database) = state.database() else {
@@ -1127,7 +1143,7 @@ pub async fn create_library(
             preferred_image_fallback_languages: payload
                 .preferred_image_fallback_languages
                 .unwrap_or_default(),
-            paths: payload.paths,
+            paths: validated_paths,
             owner_user_id: admin.id,
         })
         .await
@@ -1339,6 +1355,7 @@ pub async fn add_path(
 ) -> Result<(StatusCode, Json<LibraryPathDto>), AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     validate_non_empty("path", &payload.path)?;
+    let validated_path = validate_media_library_path(state.config(), &payload.path)?;
 
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
@@ -1346,7 +1363,7 @@ pub async fn add_path(
     let Some(path) = AdminRepository::new(database.clone())
         .add_library_path(AddLibraryPathInput {
             library_id,
-            path: payload.path,
+            path: validated_path,
         })
         .await
         .map_err(|err| AppError::internal(format!("failed to add library path: {err}")))?
@@ -1805,6 +1822,49 @@ fn metadata_settings_error(err: MetadataSettingsError) -> AppError {
             AppError::internal(format!("database error: {inner}"))
         }
     }
+}
+
+/// 落库前对媒体库路径做安全校验（安全边界，`add_path`/`create_library` 共用）：
+///   1. 路径必须存在且是目录；
+///   2. canonicalize 后必须落在 `config.media.roots` 的某个（同样 canonicalize 过的）
+///      根目录之内 —— 先各自解析真实路径再前缀匹配，可挡住 `..` 越界与符号链接逃逸；
+///   3. `MEDIA_ROOTS` 为空时拒绝所有路径（安全优先，宁可拒绝也不放行未受控路径）。
+/// 返回 canonicalize 后的真实路径字符串，交给仓储层落库（去重/normalize 仍由仓储负责）。
+fn validate_media_library_path(config: &Config, raw_path: &str) -> Result<String, AppError> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::unprocessable("路径不能为空"));
+    }
+
+    let candidate = std::path::Path::new(trimmed);
+    let metadata = std::fs::metadata(candidate)
+        .map_err(|_| AppError::unprocessable(format!("路径不存在：{trimmed}")))?;
+    if !metadata.is_dir() {
+        return Err(AppError::unprocessable(format!("不是目录：{trimmed}")));
+    }
+
+    let canonical = std::fs::canonicalize(candidate)
+        .map_err(|err| AppError::unprocessable(format!("路径无法解析：{trimmed}（{err}）")))?;
+
+    if config.media.roots.is_empty() {
+        return Err(AppError::unprocessable(
+            "未配置任何允许的媒体根目录（MEDIA_ROOTS），出于安全考虑拒绝添加路径",
+        ));
+    }
+
+    let allowed = config.media.roots.iter().any(|root| {
+        // 根目录同样 canonicalize 后再比较；无法解析（如不存在）的根跳过，避免误放行。
+        std::fs::canonicalize(root)
+            .map(|canonical_root| canonical.starts_with(&canonical_root))
+            .unwrap_or(false)
+    });
+    if !allowed {
+        return Err(AppError::unprocessable(
+            "路径必须位于允许的媒体根目录（MEDIA_ROOTS）内",
+        ));
+    }
+
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -4330,6 +4390,302 @@ fn plugin_dispatch_replay_error_to_app_error(error: PluginDispatchReplayError) -
             AppError::internal(format!("failed to replay plugin dispatch: {err}"))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 转码设置（GET/PUT /api/admin/transcode/settings）
+// ---------------------------------------------------------------------------
+
+const TRANSCODE_HARDWARE_ACCELERATIONS: [&str; 5] =
+    ["none", "nvenc", "qsv", "vaapi", "videotoolbox"];
+const TRANSCODE_MAX_RESOLUTIONS: [&str; 5] = ["480", "720", "1080", "2160", "original"];
+const MAX_TRANSCODE_PREFERRED_ENCODER_LEN: usize = 64;
+const MIN_TRANSCODE_SEGMENT_DURATION: i32 = 1;
+const MAX_TRANSCODE_SEGMENT_DURATION: i32 = 60;
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscodeSettingsDto {
+    pub hardware_acceleration: String,
+    pub preferred_encoder: String,
+    pub max_resolution: String,
+    pub segment_duration: i32,
+    pub throttle: bool,
+}
+
+impl From<TranscodeSettingsRecord> for TranscodeSettingsDto {
+    fn from(record: TranscodeSettingsRecord) -> Self {
+        Self {
+            hardware_acceleration: record.hardware_acceleration,
+            preferred_encoder: record.preferred_encoder,
+            max_resolution: record.max_resolution,
+            segment_duration: record.segment_duration,
+            throttle: record.throttle,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTranscodeSettingsRequestDto {
+    pub hardware_acceleration: String,
+    pub preferred_encoder: String,
+    pub max_resolution: String,
+    pub segment_duration: i32,
+    pub throttle: bool,
+}
+
+pub async fn get_transcode_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<TranscodeSettingsDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let record = AdminRepository::new(database.clone())
+        .get_transcode_settings()
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load transcode settings: {err}")))?
+        .unwrap_or_default();
+
+    Ok(Json(TranscodeSettingsDto::from(record)))
+}
+
+pub async fn update_transcode_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<UpdateTranscodeSettingsRequestDto>,
+) -> Result<Json<TranscodeSettingsDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+
+    let hardware_acceleration = payload.hardware_acceleration.trim().to_ascii_lowercase();
+    if !TRANSCODE_HARDWARE_ACCELERATIONS.contains(&hardware_acceleration.as_str()) {
+        return Err(AppError::unprocessable(format!(
+            "hardwareAcceleration 必须是 {} 之一",
+            TRANSCODE_HARDWARE_ACCELERATIONS.join("/")
+        )));
+    }
+
+    let max_resolution = payload.max_resolution.trim().to_ascii_lowercase();
+    if !TRANSCODE_MAX_RESOLUTIONS.contains(&max_resolution.as_str()) {
+        return Err(AppError::unprocessable(format!(
+            "maxResolution 必须是 {} 之一",
+            TRANSCODE_MAX_RESOLUTIONS.join("/")
+        )));
+    }
+
+    let preferred_encoder = validate_bounded_text(
+        "preferredEncoder",
+        &payload.preferred_encoder,
+        MAX_TRANSCODE_PREFERRED_ENCODER_LEN,
+    )?
+    .to_owned();
+
+    if payload.segment_duration < MIN_TRANSCODE_SEGMENT_DURATION
+        || payload.segment_duration > MAX_TRANSCODE_SEGMENT_DURATION
+    {
+        return Err(AppError::unprocessable(format!(
+            "segmentDuration 必须在 {MIN_TRANSCODE_SEGMENT_DURATION}-{MAX_TRANSCODE_SEGMENT_DURATION} 秒之间"
+        )));
+    }
+
+    let database = require_database(&state)?;
+    let saved = AdminRepository::new(database.clone())
+        .upsert_transcode_settings(TranscodeSettingsRecord {
+            hardware_acceleration,
+            preferred_encoder,
+            max_resolution,
+            segment_duration: payload.segment_duration,
+            throttle: payload.throttle,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to save transcode settings: {err}")))?;
+
+    Ok(Json(TranscodeSettingsDto::from(saved)))
+}
+
+// ---------------------------------------------------------------------------
+// 系统信息 + 维护（GET /system/info, GET+POST /system/maintenance/*）
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemInfoDto {
+    pub version: String,
+    pub build_profile: String,
+    pub os: String,
+    pub rust_version: Option<String>,
+    pub database_connected: bool,
+    pub redis_connected: bool,
+    pub library_count: i64,
+    pub user_count: i64,
+    pub media_item_count: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceStatsDto {
+    pub cache_size_bytes: u64,
+    pub db_size_bytes: i64,
+    pub cache_file_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCacheResultDto {
+    pub removed_files: u64,
+    pub freed_bytes: u64,
+}
+
+pub async fn get_system_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<SystemInfoDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+    let repo = AdminRepository::new(database.clone());
+
+    // databaseConnected：单发 SELECT 1，失败视为未连通（不整体 500）。
+    let database_connected = sqlx::query_scalar::<_, i64>("select 1::bigint")
+        .fetch_one(database)
+        .await
+        .map(|value| value == 1)
+        .unwrap_or(false);
+
+    // 计数在库连通时才查；库不通就回退 0，保证系统信息页仍可渲染。
+    let counts = if database_connected {
+        repo.system_counts().await.unwrap_or(SystemCountsRecord {
+            library_count: 0,
+            user_count: 0,
+            media_item_count: 0,
+        })
+    } else {
+        SystemCountsRecord {
+            library_count: 0,
+            user_count: 0,
+            media_item_count: 0,
+        }
+    };
+
+    let build_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+
+    Ok(Json(SystemInfoDto {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        build_profile: build_profile.to_owned(),
+        os: std::env::consts::OS.to_owned(),
+        // 编译期无稳定的 rustc 版本宏（未启用 build script），暂不上报。
+        rust_version: None,
+        database_connected,
+        redis_connected: state.redis_ready(),
+        library_count: counts.library_count,
+        user_count: counts.user_count,
+        media_item_count: counts.media_item_count,
+    }))
+}
+
+pub async fn get_maintenance_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<MaintenanceStatsDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let database = require_database(&state)?;
+
+    let db_size_bytes = AdminRepository::new(database.clone())
+        .database_size_bytes()
+        .await
+        .map_err(|err| AppError::internal(format!("failed to read database size: {err}")))?;
+
+    // 缓存目录 = 转码缓存目录（TRANSCODE_CACHE_DIR）。HLS 分片是可再生的临时产物，
+    // 用它做「清理缓存」的目标最安全（不碰 artwork_cache_dir 里的用户头像等不可再生数据）。
+    let cache_dir = state.config().storage.transcode_cache_dir.clone();
+    let (cache_size_bytes, cache_file_count) =
+        tokio::task::spawn_blocking(move || dir_size_and_count(&cache_dir))
+            .await
+            .map_err(|err| AppError::internal(format!("failed to inspect cache dir: {err}")))?;
+
+    Ok(Json(MaintenanceStatsDto {
+        cache_size_bytes,
+        db_size_bytes,
+        cache_file_count,
+    }))
+}
+
+pub async fn clean_cache(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<CleanCacheResultDto>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+
+    // 破坏性操作但限定在转码缓存目录内（可再生分片），安全。
+    let cache_dir = state.config().storage.transcode_cache_dir.clone();
+    let (removed_files, freed_bytes) =
+        tokio::task::spawn_blocking(move || clean_dir_contents(&cache_dir))
+            .await
+            .map_err(|err| AppError::internal(format!("failed to clean cache dir: {err}")))?
+            .map_err(|err| AppError::internal(format!("failed to clean cache dir: {err}")))?;
+
+    Ok(Json(CleanCacheResultDto {
+        removed_files,
+        freed_bytes,
+    }))
+}
+
+/// 递归统计目录字节数与文件数。目录不存在时返回 (0, 0)。best-effort：
+/// 单个条目读失败则跳过，不让统计整体失败。
+fn dir_size_and_count(dir: &std::path::Path) -> (u64, u64) {
+    let mut total_bytes = 0_u64;
+    let mut file_count = 0_u64;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            let (bytes, count) = dir_size_and_count(&entry.path());
+            total_bytes += bytes;
+            file_count += count;
+        } else if let Ok(metadata) = entry.metadata() {
+            total_bytes += metadata.len();
+            file_count += 1;
+        }
+    }
+    (total_bytes, file_count)
+}
+
+/// 清空目录内容（保留目录本身）。返回 (删除文件数, 释放字节数)。目录不存在视为无事可做。
+fn clean_dir_contents(dir: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    if !dir.exists() {
+        return Ok((0, 0));
+    }
+    let mut removed_files = 0_u64;
+    let mut freed_bytes = 0_u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let (bytes, count) = dir_size_and_count(&path);
+            std::fs::remove_dir_all(&path)?;
+            freed_bytes += bytes;
+            removed_files += count;
+        } else {
+            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            std::fs::remove_file(&path)?;
+            freed_bytes += len;
+            removed_files += 1;
+        }
+    }
+    Ok((removed_files, freed_bytes))
 }
 
 #[cfg(test)]

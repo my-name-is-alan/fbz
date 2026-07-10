@@ -694,6 +694,11 @@ impl PersonMetadata for PluginPersonInput {
     fn sort_order(&self) -> i32 {
         self.sort_order
     }
+
+    // 插件 metadata.write 目前不携带人物头像，profile 图仅来自内置 provider（TMDB）。
+    fn profile_image_url(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

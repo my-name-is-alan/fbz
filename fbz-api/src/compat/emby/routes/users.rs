@@ -10,7 +10,11 @@ use std::collections::BTreeSet;
 use tracing::warn;
 
 use crate::{
+    admin::repository::{
+        AdminRepository, CreateAdminUserInput, DeleteAdminUserOutcome, UpdateUserPolicyInput,
+    },
     auth::{
+        password::PasswordService,
         repository::AuthRepository,
         service::{AuthService, AuthServiceError, LoginByUserIdInput, LoginInput, LoginOutput},
     },
@@ -31,6 +35,9 @@ use crate::{
 };
 
 use super::access::authenticate_request_user;
+
+/// 用户级 Emby Configuration 文档在 user_settings 里的键。
+const USER_CONFIGURATION_SETTING_KEY: &str = "emby.user.configuration";
 
 const USER_LOGIN_EVENT: &str = "user.login";
 const DEFAULT_USERS_QUERY_LIMIT: i64 = 100;
@@ -75,6 +82,8 @@ pub struct CreateUserByNameDto {
 pub struct UpdateUserPasswordDto {
     #[serde(alias = "id")]
     pub id: Option<String>,
+    #[serde(alias = "currentPw", alias = "current_pw")]
+    pub current_pw: Option<String>,
     #[serde(alias = "newPw", alias = "new_pw")]
     pub new_pw: Option<String>,
     #[serde(alias = "resetPassword", alias = "reset_password")]
@@ -207,13 +216,46 @@ pub async fn create_user(
     headers: HeaderMap,
     uri: Uri,
     body: Bytes,
-) -> Result<(), AppError> {
+) -> Result<Json<UserDto>, AppError> {
     authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
     let request: CreateUserByNameDto = parse_emby_body(&headers, &body)?;
-    let _input = create_user_input(request)?;
+    let input = create_user_input(request)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(user_mutation_disabled_error())
+    // Emby 语义：新用户先无密码（空密码可登录），管理员随后经 Password 接口设置。
+    let created = AdminRepository::new(database.clone())
+        .create_admin_user(CreateAdminUserInput {
+            username: input.name.clone(),
+            username_normalized: input.name.to_lowercase(),
+            password_hash: PasswordService.hash_password(""),
+            display_name: None,
+            role_name: "User".to_owned(),
+            role_name_normalized: "user".to_owned(),
+            allow_download: false,
+            allow_transcode: true,
+            allow_new_device_login: true,
+        })
+        .await
+        .map_err(|err| {
+            if is_unique_violation(&err) {
+                AppError::conflict("a user with this name already exists")
+            } else {
+                AppError::internal(format!("failed to create user: {err}"))
+            }
+        })?;
+
+    let Some(record) = UsersRepository::new(database.clone())
+        .find_user_by_public_id(&created.id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load created user: {err}")))?
+    else {
+        return Err(AppError::internal("created user could not be loaded"));
+    };
+
+    Ok(Json(user_detail_record_to_dto(record)))
 }
 
 pub async fn user_prefixes(
@@ -265,12 +307,48 @@ pub async fn update_user(
     uri: Uri,
     body: Bytes,
 ) -> Result<(), AppError> {
-    authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
+    let requester = authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
-    let _user_id = normalized_required_user_text("Id", Some(user_id))?;
-    let _payload = parse_user_management_generic_body(&headers, &body)?;
+    let user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let payload = parse_user_management_generic_body(&headers, &body)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(user_mutation_disabled_error())
+    // Emby `POST /Users/{Id}` 提交整份 UserDto。FBZ 侧安全映射：
+    //   Name → display_name（不动登录 username）；Configuration → 用户设置持久化；
+    //   Policy 内嵌时仅管理员可改（走 update_user_policy 同一套映射）。
+    let users_repository = UsersRepository::new(database.clone());
+    if let Some(name) = payload
+        .get("Name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if users_repository
+            .set_display_name(&user_id, Some(name))
+            .await
+            .map_err(|err| AppError::internal(format!("failed to update user name: {err}")))?
+            == 0
+        {
+            return Err(AppError::not_found("user not found"));
+        }
+    }
+
+    if let Some(configuration) = payload.get("Configuration").filter(|value| value.is_object()) {
+        store_user_configuration(&users_repository, &user_id, configuration.clone()).await?;
+    }
+
+    if let Some(policy) = payload.get("Policy").filter(|value| value.is_object()) {
+        if !requester.can_manage_server() {
+            return Err(AppError::forbidden(
+                "policy updates require server management permission",
+            ));
+        }
+        apply_emby_policy(&state, &user_id, policy).await?;
+    }
+
+    Ok(())
 }
 
 pub async fn update_user_configuration(
@@ -282,10 +360,20 @@ pub async fn update_user_configuration(
 ) -> Result<(), AppError> {
     authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
-    let _user_id = normalized_required_user_text("Id", Some(user_id))?;
-    let _payload = parse_user_management_generic_body(&headers, &body)?;
+    let user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let payload = parse_user_management_generic_body(&headers, &body)?;
+    if !payload.is_object() {
+        return Err(AppError::unprocessable(
+            "configuration body must be a JSON object",
+        ));
+    }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(user_mutation_disabled_error())
+    store_user_configuration(&UsersRepository::new(database.clone()), &user_id, payload).await?;
+
+    Ok(())
 }
 
 pub async fn update_user_configuration_partial(
@@ -297,10 +385,45 @@ pub async fn update_user_configuration_partial(
 ) -> Result<(), AppError> {
     authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
-    let _user_id = normalized_required_user_text("Id", Some(user_id))?;
-    let _payload = parse_user_management_generic_body(&headers, &body)?;
+    let user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let payload = parse_user_management_generic_body(&headers, &body)?;
+    let Some(patch) = payload.as_object() else {
+        return Err(AppError::unprocessable(
+            "configuration body must be a JSON object",
+        ));
+    };
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(user_mutation_disabled_error())
+    // 部分更新：读现存文档，顶层 key 合并后回写。
+    let users_repository = UsersRepository::new(database.clone());
+    let Some(internal_id) = users_repository
+        .find_internal_id_by_public_id(&user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to resolve user: {err}")))?
+    else {
+        return Err(AppError::not_found("user not found"));
+    };
+    let mut merged = users_repository
+        .find_user_setting(internal_id, USER_CONFIGURATION_SETTING_KEY)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load user configuration: {err}")))?
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    for (key, value) in patch {
+        merged.insert(key.clone(), value.clone());
+    }
+    users_repository
+        .upsert_user_setting(
+            internal_id,
+            USER_CONFIGURATION_SETTING_KEY,
+            &Value::Object(merged),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to store user configuration: {err}")))?;
+
+    Ok(())
 }
 
 pub async fn update_user_policy(
@@ -312,10 +435,15 @@ pub async fn update_user_policy(
 ) -> Result<(), AppError> {
     authenticate_admin_user(&state, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
-    let _user_id = normalized_required_user_text("Id", Some(user_id))?;
-    let _payload = parse_user_management_generic_body(&headers, &body)?;
+    let user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let payload = parse_user_management_generic_body(&headers, &body)?;
+    if !payload.is_object() {
+        return Err(AppError::unprocessable("policy body must be a JSON object"));
+    }
 
-    Err(user_mutation_disabled_error())
+    apply_emby_policy(&state, &user_id, &payload).await?;
+
+    Ok(())
 }
 
 pub async fn update_user_password(
@@ -325,12 +453,48 @@ pub async fn update_user_password(
     uri: Uri,
     body: Bytes,
 ) -> Result<(), AppError> {
-    authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
+    let requester = authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
     ensure_user_write_body_size(&body)?;
     let request: UpdateUserPasswordDto = parse_emby_body(&headers, &body)?;
-    let _input = password_update_input(&user_id, request)?;
+    let current_pw = request.current_pw.clone();
+    let input = password_update_input(&user_id, request)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let users_repository = UsersRepository::new(database.clone());
 
-    Err(user_mutation_disabled_error())
+    // 非管理员自助改密必须验证旧密码；管理员重置跳过。
+    if !requester.can_manage_server() {
+        let stored_hash = users_repository
+            .find_password_hash_by_public_id(&input.user_id)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to load user: {err}")))?
+            .ok_or_else(|| AppError::not_found("user not found"))?;
+        let current = current_pw.unwrap_or_default();
+        let valid = match stored_hash.as_deref() {
+            Some(hash) => PasswordService.verify(hash, &current),
+            None => current.is_empty(),
+        };
+        if !valid {
+            return Err(AppError::forbidden("current password is incorrect"));
+        }
+    }
+
+    let new_hash = if input.reset_password {
+        PasswordService.hash_password("")
+    } else {
+        PasswordService.hash_password(input.new_password.as_deref().unwrap_or_default())
+    };
+    if users_repository
+        .set_user_password_hash(&input.user_id, Some(&new_hash))
+        .await
+        .map_err(|err| AppError::internal(format!("failed to update password: {err}")))?
+        == 0
+    {
+        return Err(AppError::not_found("user not found"));
+    }
+
+    Ok(())
 }
 
 pub async fn update_easy_password(
@@ -345,7 +509,10 @@ pub async fn update_easy_password(
     let request: UpdateUserPasswordDto = parse_emby_body(&headers, &body)?;
     let _input = easy_password_update_input(&user_id, request)?;
 
-    Err(user_mutation_disabled_error())
+    // 刻意边界：FBZ 无"局域网免密 PIN"认证概念，Easy Password 不落库。
+    Err(AppError::conflict(
+        "easy password (in-network PIN) is not supported by FBZ",
+    ))
 }
 
 pub async fn delete_user(
@@ -354,10 +521,97 @@ pub async fn delete_user(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<(), AppError> {
-    authenticate_admin_user(&state, &headers, &uri).await?;
-    let _user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let requester = authenticate_admin_user(&state, &headers, &uri).await?;
+    let user_id = normalized_required_user_text("Id", Some(user_id))?;
+    if requester.public_id == user_id {
+        return Err(AppError::conflict(
+            "current admin user cannot delete itself",
+        ));
+    }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(user_mutation_disabled_error())
+    match AdminRepository::new(database.clone())
+        .delete_admin_user(&user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to delete user: {err}")))?
+    {
+        DeleteAdminUserOutcome::Deleted => Ok(()),
+        DeleteAdminUserOutcome::NotFound => Err(AppError::not_found("user not found")),
+        DeleteAdminUserOutcome::LastAdministrator => {
+            Err(AppError::conflict("cannot delete the last administrator"))
+        }
+    }
+}
+
+/// Emby Policy 字段 → FBZ 用户策略。未携带的字段保持现值（先读现状再覆写）。
+async fn apply_emby_policy(
+    state: &AppState,
+    user_id: &str,
+    policy: &Value,
+) -> Result<(), AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let users_repository = UsersRepository::new(database.clone());
+    let Some(current) = users_repository
+        .find_user_by_public_id(user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load user: {err}")))?
+    else {
+        return Err(AppError::not_found("user not found"));
+    };
+    let current_display_name = users_repository
+        .find_display_name_by_public_id(user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load user: {err}")))?
+        .flatten();
+
+    let bool_field = |key: &str, fallback: bool| -> bool {
+        policy.get(key).and_then(Value::as_bool).unwrap_or(fallback)
+    };
+    let updated = AdminRepository::new(database.clone())
+        .update_user_policy(
+            user_id,
+            UpdateUserPolicyInput {
+                display_name: current_display_name,
+                is_disabled: bool_field("IsDisabled", current.is_disabled),
+                allow_download: bool_field("EnableContentDownloading", current.allow_download),
+                allow_transcode: bool_field("EnablePlaybackTranscoding", current.allow_transcode),
+                allow_new_device_login: current.allow_new_device_login,
+            },
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to update user policy: {err}")))?;
+    if updated.is_none() {
+        return Err(AppError::not_found("user not found"));
+    }
+
+    Ok(())
+}
+
+/// Configuration 文档整体落到 user_settings（`emby.user.configuration`）。
+async fn store_user_configuration(
+    users_repository: &UsersRepository,
+    user_id: &str,
+    configuration: Value,
+) -> Result<(), AppError> {
+    let Some(internal_id) = users_repository
+        .find_internal_id_by_public_id(user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to resolve user: {err}")))?
+    else {
+        return Err(AppError::not_found("user not found"));
+    };
+
+    users_repository
+        .upsert_user_setting(internal_id, USER_CONFIGURATION_SETTING_KEY, &configuration)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to store user configuration: {err}")))?;
+
+    Ok(())
 }
 
 pub async fn authenticate_by_name(
@@ -519,6 +773,8 @@ fn authentication_result_to_dto(output: LoginOutput) -> AuthenticationResultDto 
             device_name: output.device_name,
             application_version: output.version,
             is_active: true,
+            // 登录响应时 websocket 尚未建立。
+            supports_remote_control: false,
         },
         access_token: output.access_token,
         server_id: "fbz-api".to_owned(),
@@ -529,13 +785,13 @@ async fn authenticate_admin_user(
     state: &AppState,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<(), AppError> {
+) -> Result<crate::auth::service::AuthenticatedUser, AppError> {
     let user = authenticate_request_user(state, headers, uri).await?;
     if !user.can_manage_server() {
         return Err(AppError::forbidden("server management permission required"));
     }
 
-    Ok(())
+    Ok(user)
 }
 
 async fn authenticate_user_write_target(
@@ -543,7 +799,7 @@ async fn authenticate_user_write_target(
     requested_user_id: &str,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<(), AppError> {
+) -> Result<crate::auth::service::AuthenticatedUser, AppError> {
     let authenticated = authenticate_request_user(state, headers, uri).await?;
     let requested_user_id =
         normalized_required_user_text("Id", Some(requested_user_id.to_owned()))?;
@@ -553,7 +809,7 @@ async fn authenticate_user_write_target(
         ));
     }
 
-    Ok(())
+    Ok(authenticated)
 }
 
 fn create_user_input(request: CreateUserByNameDto) -> Result<CreateUserInput, AppError> {
@@ -616,15 +872,19 @@ fn ensure_user_write_body_size(body: &Bytes) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Postgres unique-violation (`23505`) — map duplicate usernames to 409.
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| code == "23505")
+}
+
 fn parse_user_management_generic_body(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> Result<Value, AppError> {
     parse_emby_body(headers, body)
-}
-
-fn user_mutation_disabled_error() -> AppError {
-    AppError::conflict("Emby user management writes are disabled; use FBZ user management APIs")
 }
 
 fn forgot_password_request_input(
@@ -1131,11 +1391,21 @@ mod tests {
     }
 
     #[test]
-    fn user_mutation_disabled_error_is_conflict() {
-        assert_eq!(
-            user_mutation_disabled_error().status_code(),
-            StatusCode::CONFLICT
-        );
+    fn password_update_dto_accepts_current_pw_aliases() {
+        let dto = serde_json::from_value::<UpdateUserPasswordDto>(json!({
+            "CurrentPw": "old-secret",
+            "NewPw": "new-secret"
+        }))
+        .expect("official password body should deserialize");
+        assert_eq!(dto.current_pw.as_deref(), Some("old-secret"));
+
+        let dto = serde_json::from_value::<UpdateUserPasswordDto>(json!({
+            "currentPw": "old-secret",
+            "newPw": "new-secret"
+        }))
+        .expect("lower-camel password body should deserialize");
+        assert_eq!(dto.current_pw.as_deref(), Some("old-secret"));
+        assert_eq!(dto.new_pw.as_deref(), Some("new-secret"));
     }
 
     fn user_detail_record(id: &str, name: &str) -> UserDetailRecord {

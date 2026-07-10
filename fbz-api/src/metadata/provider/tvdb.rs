@@ -318,6 +318,7 @@ fn tvdb_people(characters: Vec<TvdbCharacter>) -> Vec<MetadataPerson> {
             role_type: "actor".to_owned(),
             role_name,
             sort_order: bounded_sort_order(index),
+            profile_image_url: None,
         });
     }
     people

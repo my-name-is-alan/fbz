@@ -1,34 +1,27 @@
 <script setup lang="ts">
-import type { DetailViewModel } from "@/service/modules/detail.ts";
-import { loadTvDetail } from "@/service/modules/detail.ts";
+import type { DetailViewModel, EpisodeSummary } from "@/service/modules/detail.ts";
+import { fetchEpisodes, fetchPlaybackSource, loadTvDetail } from "@/service/modules/detail.ts";
+import { setFavorite } from "@/service/modules/userData.ts";
+import { useAuthStore } from "@/stores/auth.ts";
 import type { PlaybackEpisode } from "@/stores/playback.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
 import { useUiStore } from "@/stores/ui.ts";
 
-interface EpisodePlayEvent {
-  seasonNumber: number;
-  episodeNumber: number;
-  title: string;
-  runtime: number;
-  poster?: string;
-  backdrop?: string;
-  episodes: Array<{
-    id: string;
-    seasonNumber: number;
-    episodeNumber: number;
-    title: string;
-    runtime: number;
-    poster?: string;
-    backdrop?: string;
-  }>;
+/** SeasonEpisodes 抛出的播放载荷：命中集 + 同季全集。 */
+interface EpisodePlayPayload {
+  episode: EpisodeSummary;
+  episodes: EpisodeSummary[];
 }
 
 const route = useRoute();
 const playback = usePlaybackStore();
 const uiStore = useUiStore();
+const authStore = useAuthStore();
 const routeId = computed(() => String(route.params.id));
 
 const detail = ref<DetailViewModel>();
+const togglingFavorite = shallowRef(false);
+const resolvingPlay = shallowRef(false);
 
 watch(
   routeId,
@@ -38,36 +31,50 @@ watch(
   { immediate: true },
 );
 
-// 演示「继续观看」定位：仅 TMDB 占位态（有季列表）下生效，后端态季集为空时不展示。
-// 偶数数字 id 模拟有历史、奇数模拟无历史，以便能展示/测试季列表和直达集列表两种状态。
-const numericId = computed(() => Number(detail.value?.id));
-const defaultSeason = computed(() => {
-  const seasons = detail.value?.seasons ?? [];
-  if (!seasons.length || Number.isNaN(numericId.value) || numericId.value % 2 !== 0)
-    return undefined;
-  return seasons[numericId.value % seasons.length]?.season_number;
-});
-const watchedEpisode = computed(() => {
-  if (defaultSeason.value == null) return undefined;
-  const s = detail.value?.seasons.find((x) => x.season_number === defaultSeason.value);
-  if (!s) return undefined;
-  return (numericId.value % s.episode_count) + 1;
-});
-
-function playTv() {
+/**
+ * 剧集主播放键：解析「继续观看」目标集（有进度且未看完的最靠后一集 →
+ * 第一个未看完集 → 第一集）后直接播放，避免打开没有流的空播放器。
+ */
+async function playTv() {
   const tv = detail.value;
-  if (!tv) return;
+  if (!tv || resolvingPlay.value) return;
 
-  playback.open({
-    type: "tv",
-    id: tv.id,
-    title: tv.title,
-    subtitle: tv.meta.join(" · "),
-    poster: tv.poster,
-    backdrop: tv.backdrop,
-    tags: tv.versions[0]?.tags,
-    duration: 45 * 60,
-  });
+  resolvingPlay.value = true;
+  try {
+    const episodes = await fetchEpisodes(tv.id);
+    if (!episodes.length) {
+      uiStore.showToast("该剧集还没有可播放的分集。", "warning");
+      return;
+    }
+    const inProgress = [...episodes]
+      .reverse()
+      .find((episode) => !episode.played && (episode.progressPercent ?? 0) > 0);
+    const firstUnplayed = episodes.find((episode) => !episode.played);
+    const target = inProgress ?? firstUnplayed ?? episodes[0]!;
+    const sameSeason = episodes.filter((episode) => episode.seasonNumber === target.seasonNumber);
+    await playEpisode({ episode: target, episodes: sameSeason.length ? sameSeason : episodes });
+  } finally {
+    resolvingPlay.value = false;
+  }
+}
+
+/** 收藏切换：乐观更新，失败回滚并提示。 */
+async function toggleFavorite() {
+  const tv = detail.value;
+  const userId = authStore.userId;
+  if (!tv || !userId || togglingFavorite.value) return;
+
+  const next = !tv.isFavorite;
+  togglingFavorite.value = true;
+  detail.value = { ...tv, isFavorite: next };
+  try {
+    await setFavorite(userId, tv.id, next);
+  } catch {
+    detail.value = { ...tv, isFavorite: !next };
+    uiStore.showToast("更新收藏状态失败。", "error");
+  } finally {
+    togglingFavorite.value = false;
+  }
 }
 
 /** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
@@ -84,49 +91,57 @@ function editMetadata() {
     poster: tv.poster,
     year: yearSeg ? Number(yearSeg) : undefined,
     rating: tv.rating ?? undefined,
-    isFavorite: false,
+    isFavorite: tv.isFavorite,
   });
 }
 
-function toPlaybackPlaylist(
-  tvTitle: string,
-  episodes: EpisodePlayEvent["episodes"],
-): PlaybackEpisode[] {
-  return episodes.map((episode) => ({
-    id: `${tvTitle}-${episode.id}`,
-    seasonNumber: episode.seasonNumber,
-    episodeNumber: episode.episodeNumber,
-    title: `${tvTitle} S${episode.seasonNumber} E${episode.episodeNumber}`,
-    subtitle: `${episode.title} · ${episode.runtime}min`,
-    duration: episode.runtime * 60,
+/** 同季分集 → 播放列表（id 用真实集 public_id，供 store 切集时重取流地址）。 */
+function toPlaybackPlaylist(episodes: EpisodeSummary[]): PlaybackEpisode[] {
+  return episodes.map((episode, index) => ({
+    id: episode.id,
+    seasonNumber: episode.seasonNumber ?? 0,
+    episodeNumber: episode.episodeNumber ?? index + 1,
+    title: episodeLabel(episode, index),
+    subtitle: episode.name,
+    duration: episode.runtimeSeconds ?? 0,
     poster: episode.poster,
-    backdrop: episode.backdrop,
   }));
 }
 
-function playEpisode(episode: EpisodePlayEvent) {
+/** 分集标题：优先真实季/集号，缺省用顺序兜底。 */
+function episodeLabel(episode: EpisodeSummary, index: number): string {
+  const seasonNo = episode.seasonNumber;
+  const episodeNo = episode.episodeNumber ?? index + 1;
+  const prefix = seasonNo != null ? `S${seasonNo} ` : "";
+  return `${detail.value?.title ?? ""} ${prefix}E${episodeNo}`.trim();
+}
+
+/** 播放某一集：取真实流地址后连同同季播放列表一并打开播放器（带续播位置）。 */
+async function playEpisode({ episode, episodes }: EpisodePlayPayload) {
   const tv = detail.value;
   if (!tv) return;
 
-  const playlist = toPlaybackPlaylist(tv.title, episode.episodes);
-  const episodeId = `${tv.title}-${
-    episode.episodes.find(
-      (entry) =>
-        entry.seasonNumber === episode.seasonNumber &&
-        entry.episodeNumber === episode.episodeNumber,
-    )?.id ?? `${tv.id}-s${episode.seasonNumber}-e${episode.episodeNumber}`
-  }`;
+  const playlist = toPlaybackPlaylist(episodes);
+  const index = episodes.findIndex((entry) => entry.id === episode.id);
+  const source = await fetchPlaybackSource(episode.id);
+  // 分集续播：有进度且未看完时从上次位置继续。
+  const startPositionSeconds =
+    !episode.played && episode.progressPercent && episode.runtimeSeconds
+      ? Math.floor((episode.progressPercent / 100) * episode.runtimeSeconds)
+      : undefined;
 
   playback.open({
     type: "episode",
-    id: episodeId,
-    title: `${tv.title} S${episode.seasonNumber} E${episode.episodeNumber}`,
-    subtitle: `${episode.title} · ${episode.runtime}min`,
+    id: episode.id,
+    title: episodeLabel(episode, index < 0 ? 0 : index),
+    subtitle: episode.name,
     poster: episode.poster ?? tv.poster,
-    backdrop: episode.backdrop ?? tv.backdrop,
+    backdrop: tv.backdrop,
     tags: tv.versions[0]?.tags,
-    duration: episode.runtime * 60,
+    duration: episode.runtimeSeconds,
+    startPositionSeconds,
     playlist,
+    source: source ? { uri: source.uri, mimeType: source.mimeType } : undefined,
   });
 }
 </script>
@@ -140,11 +155,13 @@ function playEpisode(episode: EpisodePlayEvent) {
       :poster="detail.poster"
       :backdrop="detail.backdrop"
       :meta="detail.meta"
-      :tagline="detail.tagline"
+      :genres="detail.genres"
+      :official-rating="detail.officialRating"
       :overview="detail.overview"
       :rating="detail.rating"
-      :versions="detail.versions"
+      :is-favorite="detail.isFavorite"
       @play="playTv"
+      @toggle-favorite="toggleFavorite"
     >
       <template #extra>
         <dl class="facts">
@@ -162,14 +179,9 @@ function playEpisode(episode: EpisodePlayEvent) {
     </DetailHero>
 
     <SeasonEpisodes
-      v-if="detail.seasons.length"
-      :seasons="detail.seasons"
       :series-id="detail.id"
-      :default-season="defaultSeason"
-      :watched-episode="watchedEpisode"
       :show-title="detail.title"
       :backdrop="detail.backdrop"
-      :rating="detail.rating"
       @play-episode="playEpisode"
     />
 

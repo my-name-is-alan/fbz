@@ -224,13 +224,29 @@ pub async fn video_attachment_stream(
     uri: Uri,
 ) -> Result<Response, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
-    let _media_file_id = parse_media_source_id(&media_source_id)?;
-    let _attachment_index = parse_subtitle_stream_index(&index)?;
-    ensure_user_can_access_item(&state, user.id, &item_id).await?;
+    let media_file_id = parse_media_source_id(&media_source_id)?;
+    let attachment_index = parse_subtitle_stream_index(&index)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict(
-        "embedded subtitle attachments are not available",
-    ))
+    let attachment = MediaRepository::new(database.clone())
+        .find_attachment_stream(user.id, &item_id, media_file_id, attachment_index)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get attachment stream: {err}")))?
+        .ok_or_else(|| AppError::not_found("attachment stream not found"))?;
+
+    let cache_path = subtitle_cache_path(
+        &state,
+        attachment.media_file_id,
+        attachment.stream_index,
+        "attachment",
+    )?;
+    if !cache_file_exists(&cache_path).await {
+        extract_attachment_to_cache(&state, &attachment, &cache_path).await?;
+    }
+
+    attachment_file_response(&cache_path).await
 }
 
 pub async fn hls_subtitle_playlist(
@@ -310,14 +326,27 @@ async fn subtitle_stream_response(
         .map_err(|err| AppError::internal(format!("failed to get subtitle stream: {err}")))?
         .ok_or_else(|| AppError::not_found("subtitle stream not found"))?;
 
-    let Some(path) = external_subtitle_path(&subtitle)? else {
-        return Err(AppError::not_found(
-            "subtitle stream is not an external subtitle file",
-        ));
-    };
-    ensure_subtitle_format_is_streamable(&subtitle, &path, format)?;
+    if let Some(source_path) = external_subtitle_path(&subtitle)? {
+        // 外挂字幕：同格式直接流式返回；格式不同（典型 srt→vtt）经 ffmpeg 转换缓存。
+        if external_subtitle_matches_format(&subtitle, &source_path, format) {
+            return local_subtitle_response(&source_path, format).await;
+        }
+        let cache_path =
+            subtitle_cache_path(&state, subtitle.media_file_id, subtitle.stream_index, format)?;
+        if !cache_file_exists(&cache_path).await {
+            convert_subtitle_to_cache(&state, &source_path, format, &cache_path).await?;
+        }
+        return local_subtitle_response(&cache_path, format).await;
+    }
 
-    local_subtitle_response(&path, format).await
+    // 内嵌字幕：ffmpeg 按流序号抽取转换到请求格式（图形字幕如 PGS 无法转文本 → 422）。
+    let cache_path =
+        subtitle_cache_path(&state, subtitle.media_file_id, subtitle.stream_index, format)?;
+    if !cache_file_exists(&cache_path).await {
+        extract_embedded_subtitle_to_cache(&state, &subtitle, format, &cache_path).await?;
+    }
+
+    local_subtitle_response(&cache_path, format).await
 }
 
 async fn ensure_user_can_access_item(
@@ -569,11 +598,12 @@ fn resolve_external_subtitle_path(
     Ok(candidate)
 }
 
-fn ensure_subtitle_format_is_streamable(
+/// 外挂字幕源格式与请求格式一致时可直出（无需转换）。
+fn external_subtitle_matches_format(
     subtitle: &SubtitleStreamRecord,
     path: &Path,
     requested_format: &str,
-) -> Result<(), AppError> {
+) -> bool {
     let source_format = path
         .extension()
         .and_then(|value| value.to_str())
@@ -582,14 +612,242 @@ fn ensure_subtitle_format_is_streamable(
         .trim()
         .trim_start_matches('.')
         .to_ascii_lowercase();
-    let source_format = normalize_subtitle_format(&source_format)?;
-    if source_format != requested_format {
+
+    matches!(normalize_subtitle_format(&source_format), Ok(format) if format == requested_format)
+}
+
+/// 抽取/转换产物缓存路径：`{transcode_cache_dir}/subtitles/{fileId}-{streamIndex}.{ext}`。
+/// 落在转码缓存目录下，可被管理端"清理缓存"回收并按需重建。
+fn subtitle_cache_path(
+    state: &AppState,
+    media_file_id: i64,
+    stream_index: i32,
+    extension: &str,
+) -> Result<PathBuf, AppError> {
+    if !extension
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(AppError::unprocessable("subtitle format is invalid"));
+    }
+
+    Ok(state
+        .config()
+        .storage
+        .transcode_cache_dir
+        .join("subtitles")
+        .join(format!("{media_file_id}-{stream_index}.{extension}")))
+}
+
+async fn cache_file_exists(path: &Path) -> bool {
+    tokio::fs::metadata(path)
+        .await
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+/// 目标格式 → (ffmpeg 字幕编码器, muxer)。`sub`（MicroDVD/VobSub）不支持作为转换目标。
+fn subtitle_codec_and_muxer(format: &str) -> Result<(&'static str, &'static str), AppError> {
+    match format {
+        "srt" => Ok(("srt", "srt")),
+        "vtt" => Ok(("webvtt", "webvtt")),
+        "ass" | "ssa" => Ok(("ass", "ass")),
+        _ => Err(AppError::unprocessable(
+            "subtitle format conversion target is not supported",
+        )),
+    }
+}
+
+fn resolved_ffmpeg_path(state: &AppState) -> Result<PathBuf, AppError> {
+    crate::media::tools::resolve_media_tools(&state.config().media_tools)
+        .map(|tools| tools.ffmpeg.path)
+        .map_err(|err| AppError::internal(format!("ffmpeg is not available: {err}")))
+}
+
+/// 运行 ffmpeg（60 秒超时），失败/超时返回 422/500。stdout/stderr 丢弃。
+async fn run_ffmpeg_for_subtitles(
+    ffmpeg: &Path,
+    args: &[std::ffi::OsString],
+    failure_message: &'static str,
+    allow_nonzero_exit: bool,
+) -> Result<(), AppError> {
+    let mut command = tokio::process::Command::new(ffmpeg);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW：避免 Windows 服务/桌面环境下弹出控制台窗口。
+        command.creation_flags(0x0800_0000);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| AppError::internal(format!("failed to start ffmpeg: {err}")))?;
+    let status = match tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        child.wait(),
+    )
+    .await
+    {
+        Ok(result) => {
+            result.map_err(|err| AppError::internal(format!("ffmpeg wait failed: {err}")))?
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(AppError::internal("ffmpeg timed out"));
+        }
+    };
+    if !status.success() && !allow_nonzero_exit {
+        return Err(AppError::unprocessable(failure_message));
+    }
+
+    Ok(())
+}
+
+async fn ensure_cache_parent(path: &Path) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+            AppError::internal(format!("failed to create subtitle cache directory: {err}"))
+        })?;
+    }
+
+    Ok(())
+}
+
+/// 外挂字幕格式转换（如 srt→vtt）到缓存文件。
+async fn convert_subtitle_to_cache(
+    state: &AppState,
+    source: &Path,
+    format: &str,
+    cache_path: &Path,
+) -> Result<(), AppError> {
+    let (codec, muxer) = subtitle_codec_and_muxer(format)?;
+    let ffmpeg = resolved_ffmpeg_path(state)?;
+    ensure_cache_parent(cache_path).await?;
+
+    let args: Vec<std::ffi::OsString> = vec![
+        "-y".into(),
+        "-i".into(),
+        source.as_os_str().to_owned(),
+        "-map".into(),
+        "0:s:0".into(),
+        "-c:s".into(),
+        codec.into(),
+        "-f".into(),
+        muxer.into(),
+        cache_path.as_os_str().to_owned(),
+    ];
+    run_ffmpeg_for_subtitles(
+        &ffmpeg,
+        &args,
+        "subtitle format conversion failed",
+        false,
+    )
+    .await?;
+
+    if !cache_file_exists(cache_path).await {
+        return Err(AppError::unprocessable("subtitle format conversion failed"));
+    }
+
+    Ok(())
+}
+
+/// 内嵌字幕抽取转换到缓存文件（按容器内流序号 map）。
+async fn extract_embedded_subtitle_to_cache(
+    state: &AppState,
+    subtitle: &SubtitleStreamRecord,
+    format: &str,
+    cache_path: &Path,
+) -> Result<(), AppError> {
+    let (codec, muxer) = subtitle_codec_and_muxer(format)?;
+    let ffmpeg = resolved_ffmpeg_path(state)?;
+    ensure_cache_parent(cache_path).await?;
+
+    let args: Vec<std::ffi::OsString> = vec![
+        "-y".into(),
+        "-i".into(),
+        Path::new(&subtitle.media_path).as_os_str().to_owned(),
+        "-map".into(),
+        format!("0:{}", subtitle.stream_index).into(),
+        "-c:s".into(),
+        codec.into(),
+        "-f".into(),
+        muxer.into(),
+        cache_path.as_os_str().to_owned(),
+    ];
+    run_ffmpeg_for_subtitles(
+        &ffmpeg,
+        &args,
+        "embedded subtitle extraction failed (graphic subtitles cannot be converted to text)",
+        false,
+    )
+    .await?;
+
+    if !cache_file_exists(cache_path).await {
         return Err(AppError::unprocessable(
-            "subtitle format conversion is not supported",
+            "embedded subtitle extraction failed (graphic subtitles cannot be converted to text)",
         ));
     }
 
     Ok(())
+}
+
+/// 内嵌附件（字体等）抽取到缓存文件。`-dump_attachment` 在无输出文件时以非零
+/// 退出码结束但附件已落盘，因此容忍非零退出、以产物存在与否判定成败。
+async fn extract_attachment_to_cache(
+    state: &AppState,
+    attachment: &SubtitleStreamRecord,
+    cache_path: &Path,
+) -> Result<(), AppError> {
+    let ffmpeg = resolved_ffmpeg_path(state)?;
+    ensure_cache_parent(cache_path).await?;
+
+    let args: Vec<std::ffi::OsString> = vec![
+        "-y".into(),
+        format!("-dump_attachment:{}", attachment.stream_index).into(),
+        cache_path.as_os_str().to_owned(),
+        "-i".into(),
+        Path::new(&attachment.media_path).as_os_str().to_owned(),
+    ];
+    run_ffmpeg_for_subtitles(&ffmpeg, &args, "attachment extraction failed", true).await?;
+
+    if !cache_file_exists(cache_path).await {
+        return Err(AppError::not_found("attachment could not be extracted"));
+    }
+
+    Ok(())
+}
+
+async fn attachment_file_response(path: &Path) -> Result<Response, AppError> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|err| subtitle_path_io_error(err, "attachment file not found"))?;
+    if !metadata.is_file() {
+        return Err(AppError::not_found("attachment file not found"));
+    }
+
+    let file = File::open(path)
+        .await
+        .map_err(|err| subtitle_path_io_error(err, "attachment file not found"))?;
+    let stream = ReaderStream::new(file);
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&metadata.len().to_string()) {
+        response.headers_mut().insert(CONTENT_LENGTH, value);
+    }
+
+    Ok(response)
 }
 
 async fn local_subtitle_response(path: &Path, format: &str) -> Result<Response, AppError> {
@@ -895,8 +1153,9 @@ mod tests {
             resolved,
             std_fs::canonicalize(media_dir.join("subs").join("zh.srt")).unwrap()
         );
-        assert!(ensure_subtitle_format_is_streamable(&subtitle, &resolved, "srt").is_ok());
-        assert!(ensure_subtitle_format_is_streamable(&subtitle, &resolved, "vtt").is_err());
+        assert!(external_subtitle_matches_format(&subtitle, &resolved, "srt"));
+        // 格式不一致 → 走 ffmpeg 转换缓存路径（不再直接拒绝）。
+        assert!(!external_subtitle_matches_format(&subtitle, &resolved, "vtt"));
 
         let escaping = SubtitleStreamRecord {
             extra: json!({"path": "../outside/evil.srt"}),

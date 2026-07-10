@@ -204,7 +204,7 @@ export interface CollectionDetail {
 
 /** 演员代表作 */
 export interface PersonCredit {
-  id: number;
+  id: string;
   type: "movie" | "tv";
   libraryId: string;
   title: string;
