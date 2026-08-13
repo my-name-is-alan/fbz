@@ -569,7 +569,7 @@ const creditSummary = computed(() => {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: var(--fbz-space-5) var(--fbz-space-4);
 }
 
@@ -676,7 +676,7 @@ const creditSummary = computed(() => {
   }
 
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
     gap: var(--fbz-space-4) var(--fbz-space-3);
   }
 }

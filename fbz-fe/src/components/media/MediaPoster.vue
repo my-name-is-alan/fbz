@@ -182,7 +182,6 @@ function onError() {
   }
 
   .fallback-title {
-    font-family: var(--fbz-font-display);
     font-size: var(--fbz-font-size-xs);
     font-weight: 700;
     color: var(--fbz-color-text-soft);

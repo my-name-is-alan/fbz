@@ -146,16 +146,14 @@ function viewDetails() {
         </button>
       </div>
     </div>
-
-    <div class="scroll-hint">向下滚动 ↓</div>
   </section>
 </template>
 
 <style scoped lang="scss">
 .hero {
   position: relative;
-  height: 86vh;
-  min-height: 560px;
+  height: 76vh;
+  min-height: 520px;
   display: flex;
   align-items: center;
   padding: 0 var(--fbz-space-8);
@@ -203,8 +201,18 @@ function viewDetails() {
   inset: 0;
   z-index: 1;
   background:
-    linear-gradient(90deg, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.45) 45%, rgba(0, 0, 0, 0.1) 72%),
-    linear-gradient(0deg, var(--fbz-color-bg) 0%, rgba(0, 0, 0, 0.4) 22%, rgba(0, 0, 0, 0) 50%);
+    linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.88) 0%,
+      rgba(0, 0, 0, 0.42) 48%,
+      rgba(0, 0, 0, 0.08) 75%
+    ),
+    linear-gradient(
+      0deg,
+      var(--fbz-color-bg) 0%,
+      color-mix(in srgb, var(--fbz-color-bg) 62%, transparent) 18%,
+      rgba(0, 0, 0, 0) 46%
+    );
 }
 
 .content {
@@ -225,10 +233,12 @@ function viewDetails() {
 
 .title {
   margin: 0 0 var(--fbz-space-3);
-  font-size: 48px;
+  font-size: clamp(38px, 4.4vw, 56px);
   line-height: 1.06;
   font-weight: 800;
+  letter-spacing: -0.5px;
   color: #ffffff;
+  text-shadow: 0 2px 24px rgba(0, 0, 0, 0.45);
 }
 
 .meta {
@@ -266,13 +276,13 @@ function viewDetails() {
 
 .overview {
   margin: 0 0 var(--fbz-space-6);
-  max-width: 480px;
+  max-width: 500px;
   font-size: var(--fbz-font-size-md);
-  line-height: 1.65;
-  color: rgba(255, 255, 255, 0.8);
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.82);
   display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -283,8 +293,8 @@ function viewDetails() {
 }
 
 .btn {
-  height: 44px;
-  padding: 0 22px;
+  height: 46px;
+  padding: 0 26px;
   border: 1px solid transparent;
   border-radius: var(--fbz-radius-control);
   font-size: var(--fbz-font-size-md);
@@ -395,28 +405,6 @@ function viewDetails() {
     var(--fbz-color-panel-strong);
 }
 
-.scroll-hint {
-  position: absolute;
-  left: 50%;
-  bottom: 18px;
-  transform: translateX(-50%);
-  z-index: 2;
-  font-size: var(--fbz-font-size-xs);
-  letter-spacing: 1px;
-  color: var(--fbz-color-text-muted);
-  animation: bob 1.8s ease-in-out infinite;
-}
-
-@keyframes bob {
-  0%,
-  100% {
-    transform: translate(-50%, 0);
-  }
-  50% {
-    transform: translate(-50%, 7px);
-  }
-}
-
 @media (max-width: 1024px) {
   .title {
     font-size: 38px;
@@ -480,10 +468,6 @@ function viewDetails() {
   .hive-cell {
     width: 48px;
     height: 64px;
-  }
-
-  .scroll-hint {
-    display: none;
   }
 }
 </style>
