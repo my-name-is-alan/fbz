@@ -184,7 +184,7 @@ pub enum PluginExecutionError {
 }
 
 #[derive(Debug)]
-enum PluginRuntimeError {
+pub(crate) enum PluginRuntimeError {
     InvalidUri(String),
     UnsupportedScheme(String),
     MissingHost,
@@ -622,11 +622,11 @@ struct PluginRuntimeExecutionContext<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PluginHttpSignatureHeaders {
-    version: String,
-    timestamp: String,
-    body_sha256: String,
-    signature: String,
+pub(crate) struct PluginHttpSignatureHeaders {
+    pub(crate) version: String,
+    pub(crate) timestamp: String,
+    pub(crate) body_sha256: String,
+    pub(crate) signature: String,
 }
 
 impl PluginExecutionClient {
@@ -767,7 +767,7 @@ impl PluginExecutionClient {
     }
 }
 
-fn validate_http_entrypoint(entrypoint: &str) -> Result<Uri, PluginRuntimeError> {
+pub(crate) fn validate_http_entrypoint(entrypoint: &str) -> Result<Uri, PluginRuntimeError> {
     let uri = entrypoint
         .trim()
         .parse::<Uri>()
@@ -781,7 +781,10 @@ fn validate_http_entrypoint(entrypoint: &str) -> Result<Uri, PluginRuntimeError>
     Ok(uri)
 }
 
-fn ensure_http_host_allowed(uri: &Uri, allowed_hosts: &[String]) -> Result<(), PluginRuntimeError> {
+pub(crate) fn ensure_http_host_allowed(
+    uri: &Uri,
+    allowed_hosts: &[String],
+) -> Result<(), PluginRuntimeError> {
     let host = uri.host().ok_or(PluginRuntimeError::MissingHost)?;
     if http_host_allowed(host, allowed_hosts) {
         return Ok(());
@@ -816,7 +819,7 @@ fn normalize_http_host(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn plugin_http_signature_headers(
+pub(crate) fn plugin_http_signature_headers(
     secret: &str,
     plugin_id: &str,
     idempotency_key: &str,
@@ -879,14 +882,14 @@ fn hex_lower(bytes: &[u8]) -> String {
     output
 }
 
-fn unix_timestamp_seconds() -> u64 {
+pub(crate) fn unix_timestamp_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
 
-fn reqwest_runtime_error(error: reqwest::Error) -> PluginRuntimeError {
+pub(crate) fn reqwest_runtime_error(error: reqwest::Error) -> PluginRuntimeError {
     if error.is_timeout() {
         return PluginRuntimeError::Timeout;
     }
@@ -894,7 +897,7 @@ fn reqwest_runtime_error(error: reqwest::Error) -> PluginRuntimeError {
     PluginRuntimeError::Request(error.to_string())
 }
 
-async fn read_limited_response_body(
+pub(crate) async fn read_limited_response_body(
     mut response: reqwest::Response,
     limit: usize,
 ) -> Result<Bytes, PluginRuntimeError> {

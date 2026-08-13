@@ -280,9 +280,9 @@ pub async fn typed_setting(
         .await
         .map_err(|err| AppError::internal(format!("failed to load typed setting: {err}")))?;
 
-    Ok(Json(
-        stored.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-    ))
+    Ok(Json(stored.unwrap_or_else(|| {
+        serde_json::Value::Object(serde_json::Map::new())
+    })))
 }
 
 pub async fn update_typed_setting(

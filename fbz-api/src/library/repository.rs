@@ -6732,7 +6732,9 @@ mod tests {
         let insert_query = INSERT_PLAYLIST_ENTRIES_SQL;
         assert!(insert_query.contains("with ordinality"));
         assert!(insert_query.contains("item_id::uuid as public_id"));
-        assert!(insert_query.contains("join library_permissions lp on lp.library_id = mi.library_id"));
+        assert!(
+            insert_query.contains("join library_permissions lp on lp.library_id = mi.library_id")
+        );
         assert!(insert_query.contains("lp.can_view = true"));
         assert!(insert_query.contains("l.is_hidden = false"));
         assert!(insert_query.contains("mi.is_deleted = false"));

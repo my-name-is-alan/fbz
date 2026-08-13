@@ -986,9 +986,7 @@ impl PluginRepository {
         Ok(state)
     }
 
-    pub async fn list_market_sources(
-        &self,
-    ) -> Result<Vec<PluginMarketSourceRecord>, sqlx::Error> {
+    pub async fn list_market_sources(&self) -> Result<Vec<PluginMarketSourceRecord>, sqlx::Error> {
         let rows = sqlx::query(
             r#"
             select

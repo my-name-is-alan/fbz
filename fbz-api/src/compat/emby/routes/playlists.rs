@@ -314,12 +314,7 @@ pub async fn move_playlist_item(
     let input = move_playlist_item_input(&playlist_id, &item_id, &new_index)?;
 
     let outcome = LibraryRepository::new(database.clone())
-        .move_playlist_entry(
-            user.id,
-            &input.playlist_id,
-            &input.item_id,
-            input.new_index,
-        )
+        .move_playlist_entry(user.id, &input.playlist_id, &input.item_id, input.new_index)
         .await
         .map_err(|err| AppError::internal(format!("failed to move playlist item: {err}")))?;
 

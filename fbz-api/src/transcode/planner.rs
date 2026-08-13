@@ -161,10 +161,7 @@ pub fn build_ffmpeg_plan_with_tuning(
         args.extend(["-map".to_owned(), "0:v:0?".to_owned()]);
         if let Some(max_height) = tuning.max_height {
             // 只降不升：输出高度钳到 min(上限, 源高)，宽度按比例（-2 保证偶数）。
-            args.extend([
-                "-vf".to_owned(),
-                format!("scale=-2:min({max_height}\\,ih)"),
-            ]);
+            args.extend(["-vf".to_owned(), format!("scale=-2:min({max_height}\\,ih)")]);
         }
         args.extend(["-c:v".to_owned(), encoder]);
     }

@@ -331,8 +331,12 @@ async fn subtitle_stream_response(
         if external_subtitle_matches_format(&subtitle, &source_path, format) {
             return local_subtitle_response(&source_path, format).await;
         }
-        let cache_path =
-            subtitle_cache_path(&state, subtitle.media_file_id, subtitle.stream_index, format)?;
+        let cache_path = subtitle_cache_path(
+            &state,
+            subtitle.media_file_id,
+            subtitle.stream_index,
+            format,
+        )?;
         if !cache_file_exists(&cache_path).await {
             convert_subtitle_to_cache(&state, &source_path, format, &cache_path).await?;
         }
@@ -340,8 +344,12 @@ async fn subtitle_stream_response(
     }
 
     // 内嵌字幕：ffmpeg 按流序号抽取转换到请求格式（图形字幕如 PGS 无法转文本 → 422）。
-    let cache_path =
-        subtitle_cache_path(&state, subtitle.media_file_id, subtitle.stream_index, format)?;
+    let cache_path = subtitle_cache_path(
+        &state,
+        subtitle.media_file_id,
+        subtitle.stream_index,
+        format,
+    )?;
     if !cache_file_exists(&cache_path).await {
         extract_embedded_subtitle_to_cache(&state, &subtitle, format, &cache_path).await?;
     }
@@ -624,10 +632,7 @@ fn subtitle_cache_path(
     stream_index: i32,
     extension: &str,
 ) -> Result<PathBuf, AppError> {
-    if !extension
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric())
-    {
+    if !extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return Err(AppError::unprocessable("subtitle format is invalid"));
     }
 
@@ -686,11 +691,7 @@ async fn run_ffmpeg_for_subtitles(
     let mut child = command
         .spawn()
         .map_err(|err| AppError::internal(format!("failed to start ffmpeg: {err}")))?;
-    let status = match tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        child.wait(),
-    )
-    .await
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(60), child.wait()).await
     {
         Ok(result) => {
             result.map_err(|err| AppError::internal(format!("ffmpeg wait failed: {err}")))?
@@ -740,13 +741,7 @@ async fn convert_subtitle_to_cache(
         muxer.into(),
         cache_path.as_os_str().to_owned(),
     ];
-    run_ffmpeg_for_subtitles(
-        &ffmpeg,
-        &args,
-        "subtitle format conversion failed",
-        false,
-    )
-    .await?;
+    run_ffmpeg_for_subtitles(&ffmpeg, &args, "subtitle format conversion failed", false).await?;
 
     if !cache_file_exists(cache_path).await {
         return Err(AppError::unprocessable("subtitle format conversion failed"));
@@ -1153,9 +1148,13 @@ mod tests {
             resolved,
             std_fs::canonicalize(media_dir.join("subs").join("zh.srt")).unwrap()
         );
-        assert!(external_subtitle_matches_format(&subtitle, &resolved, "srt"));
+        assert!(external_subtitle_matches_format(
+            &subtitle, &resolved, "srt"
+        ));
         // 格式不一致 → 走 ffmpeg 转换缓存路径（不再直接拒绝）。
-        assert!(!external_subtitle_matches_format(&subtitle, &resolved, "vtt"));
+        assert!(!external_subtitle_matches_format(
+            &subtitle, &resolved, "vtt"
+        ));
 
         let escaping = SubtitleStreamRecord {
             extra: json!({"path": "../outside/evil.srt"}),

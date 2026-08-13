@@ -38,7 +38,9 @@ pub fn router() -> Router<AppState> {
 /// 校验 UUID 形态的 public_id，挡住路径穿越（文件名直接取自它）。
 fn validate_user_public_id(user_id: &str) -> Result<(), AppError> {
     let is_uuid = user_id.len() == 36
-        && user_id.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+        && user_id
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '-')
         && user_id.split('-').map(str::len).eq([8, 4, 4, 4, 12]);
     if is_uuid {
         Ok(())
@@ -208,12 +210,18 @@ mod tests {
 
     #[test]
     fn sniff_content_type_recognizes_common_images() {
-        assert_eq!(sniff_content_type(&Bytes::from_static(b"\xFF\xD8\xFFxx")), Some("image/jpeg"));
+        assert_eq!(
+            sniff_content_type(&Bytes::from_static(b"\xFF\xD8\xFFxx")),
+            Some("image/jpeg")
+        );
         assert_eq!(
             sniff_content_type(&Bytes::from_static(b"\x89PNG\r\n\x1a\nxx")),
             Some("image/png")
         );
-        assert_eq!(sniff_content_type(&Bytes::from_static(b"GIF89a...")), Some("image/gif"));
+        assert_eq!(
+            sniff_content_type(&Bytes::from_static(b"GIF89a...")),
+            Some("image/gif")
+        );
         assert_eq!(sniff_content_type(&Bytes::from_static(b"plain text")), None);
     }
 }

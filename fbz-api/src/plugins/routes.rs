@@ -32,8 +32,8 @@ use crate::{
             PluginManifestError, ValidatedPluginManifest,
         },
         repository::{
-            ActivePluginMenuItemRecord, InstallPluginPackageInput, InstalledPluginPackageRecord,
-            CreatePluginMarketSourceInput, NewPluginMarketEntry, PluginConfigRecord,
+            ActivePluginMenuItemRecord, CreatePluginMarketSourceInput, InstallPluginPackageInput,
+            InstalledPluginPackageRecord, NewPluginMarketEntry, PluginConfigRecord,
             PluginConfigSecretInput, PluginConfigSecretUpdate, PluginConfigUpdateError,
             PluginHookRecord, PluginListFilter, PluginMarketEntryRecord, PluginMarketSourceRecord,
             PluginMenuItemRecord, PluginPackageDetailRecord, PluginPackageListFilter,
@@ -516,8 +516,10 @@ pub async fn install_package(
     let validated_manifest = match payload.manifest {
         Some(manifest) => manifest,
         // 前端手工安装通常只给 packagePath；此时从包内读取 manifest。
-        None => read_plugin_manifest_from_package(&state.config().plugins, &payload.package_path)
-            .await?,
+        None => {
+            read_plugin_manifest_from_package(&state.config().plugins, &payload.package_path)
+                .await?
+        }
     }
     .validate()
     .map_err(plugin_manifest_error_to_app_error)?;
@@ -1249,11 +1251,10 @@ async fn fetch_remote_catalog(url: &str) -> Result<RemoteCatalogDocument, AppErr
         .timeout(std::time::Duration::from_secs(MARKET_HTTP_TIMEOUT_SECONDS))
         .build()
         .map_err(|err| AppError::internal(format!("failed to build HTTP client: {err}")))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| AppError::unprocessable(format!("market source request failed: {err}")))?;
+    let response =
+        client.get(url).send().await.map_err(|err| {
+            AppError::unprocessable(format!("market source request failed: {err}"))
+        })?;
     if !response.status().is_success() {
         return Err(AppError::unprocessable(format!(
             "market source returned status {}",
@@ -1344,11 +1345,9 @@ async fn download_market_package(
         .timeout(std::time::Duration::from_secs(MARKET_HTTP_TIMEOUT_SECONDS))
         .build()
         .map_err(|err| AppError::internal(format!("failed to build HTTP client: {err}")))?;
-    let response = client
-        .get(download_url)
-        .send()
-        .await
-        .map_err(|err| AppError::unprocessable(format!("package download request failed: {err}")))?;
+    let response = client.get(download_url).send().await.map_err(|err| {
+        AppError::unprocessable(format!("package download request failed: {err}"))
+    })?;
     if !response.status().is_success() {
         return Err(AppError::unprocessable(format!(
             "package download returned status {}",
@@ -1571,10 +1570,9 @@ impl From<PluginMarketSourceRecord> for PluginMarketSourceDto {
 
 impl From<PluginMarketEntryRecord> for PluginMarketCatalogEntryDto {
     fn from(record: PluginMarketEntryRecord) -> Self {
-        let permissions = serde_json::from_value::<Vec<PluginMarketPermissionDto>>(
-            record.permissions,
-        )
-        .unwrap_or_default();
+        let permissions =
+            serde_json::from_value::<Vec<PluginMarketPermissionDto>>(record.permissions)
+                .unwrap_or_default();
         Self {
             source_id: record.source_id,
             plugin_id: record.plugin_id,
@@ -2569,6 +2567,10 @@ mod tests {
             host_api_max_calls_per_run: 10_000,
             secret_key: None,
             http_allowed_hosts: vec!["127.0.0.1".to_owned(), "localhost".to_owned()],
+            sync_timeout_ms: 10_000,
+            sync_max_concurrency_per_plugin: 4,
+            sync_circuit_failure_threshold: 5,
+            sync_circuit_cooldown_seconds: 60,
         };
 
         let checksum = verify_plugin_package_file(&config, "notify/plugin.zip", None)
@@ -3047,6 +3049,10 @@ mod tests {
             host_api_max_calls_per_run: 10_000,
             secret_key: None,
             http_allowed_hosts: vec!["127.0.0.1".to_owned(), "localhost".to_owned()],
+            sync_timeout_ms: 10_000,
+            sync_max_concurrency_per_plugin: 4,
+            sync_circuit_failure_threshold: 5,
+            sync_circuit_cooldown_seconds: 60,
         }
     }
 
