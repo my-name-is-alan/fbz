@@ -179,8 +179,11 @@ async function resetPlayer() {
   try {
     const shakaApi = await loadShaka();
     shakaApi.polyfill.installAll();
-    const player = new shakaApi.Player(video);
+    // Shaka 5 移除了构造函数挂载 mediaElement 的路径（只剩兼容警告、实际不再
+    // attach），必须显式 attach，否则 load 后视频元素毫无反应。
+    const player = new shakaApi.Player();
     shakaPlayer.value = player;
+    await player.attach(video);
     player.configure({
       streaming: {
         bufferingGoal: 18,
@@ -191,8 +194,14 @@ async function resetPlayer() {
       isBuffering.value = Boolean((event as CustomEvent<boolean>).detail);
     });
     // 续播：直接从上次位置开始加载（比 load 后 seek 少一次缓冲往返）。
+    // mimeType 必须显式传入：流地址（/Videos/{id}/stream）没有文件扩展名，
+    // Shaka 无法自行猜测清单类型（UNABLE_TO_GUESS_MANIFEST_TYPE）。
     const startAt = props.item.startPositionSeconds;
-    await player.load(props.item.source!.uri!, startAt && startAt > 0 ? startAt : undefined);
+    await player.load(
+      props.item.source!.uri!,
+      startAt && startAt > 0 ? startAt : undefined,
+      props.item.source?.mimeType ?? undefined,
+    );
     videoDuration.value = video.duration || props.item.duration || 0;
     refreshRealTracks();
     loadState.value = "媒体已就绪";
@@ -212,20 +221,29 @@ async function resetPlayer() {
   }
 }
 
-/** 从 shaka 读取真实音轨（按语言聚合）与字幕轨。 */
+/** 从 shaka 读取真实音轨（Shaka 5 的 getAudioTracks）与字幕轨。 */
 function refreshRealTracks() {
   const player = shakaPlayer.value;
   if (!player) return;
 
-  const languages = player.getAudioLanguages();
-  const activeVariant = player.getVariantTracks().find((track) => track.active);
-  realAudioTracks.value = languages.map((language) => ({
-    id: language,
-    label: languageLabel(language),
-    language,
-    active: activeVariant?.language === language,
-  }));
-  if (activeVariant?.language) selectedAudioTrack.value = activeVariant.language;
+  // Shaka 5 移除了 getAudioLanguages()：改用 getAudioTracks()，按语言去重聚合。
+  const audioTracks = player.getAudioTracks();
+  const seenLanguages = new Set<string>();
+  realAudioTracks.value = audioTracks
+    .filter((track) => {
+      const language = track.language || "";
+      if (seenLanguages.has(language)) return false;
+      seenLanguages.add(language);
+      return true;
+    })
+    .map((track) => ({
+      id: track.language || track.label || "default",
+      label: track.label || languageLabel(track.language) || "默认音轨",
+      language: track.language || undefined,
+      active: track.active,
+    }));
+  const activeAudio = audioTracks.find((track) => track.active);
+  if (activeAudio?.language) selectedAudioTrack.value = activeAudio.language;
 
   const textTracks = player.getTextTracks();
   realSubtitleTracks.value = textTracks.map((track, index) => ({
@@ -235,8 +253,7 @@ function refreshRealTracks() {
     active: track.active,
   }));
   const activeText = textTracks.find((track) => track.active);
-  selectedSubtitleTrack.value =
-    activeText && player.isTextTrackVisible() ? String(activeText.id) : "off";
+  selectedSubtitleTrack.value = activeText ? String(activeText.id) : "off";
 }
 
 /** 语言码 → 展示名（浏览器 Intl 有则用，缺省回显原码）。 */
@@ -250,26 +267,26 @@ function languageLabel(language: string): string {
   }
 }
 
-/** 切换音轨（按语言）。 */
+/** 切换音轨（Shaka 5：selectAudioTrack 接收 AudioTrack 对象）。 */
 function selectAudioTrack(track: PlaybackTrack) {
   selectedAudioTrack.value = track.id;
-  if (track.language) shakaPlayer.value?.selectAudioLanguage(track.language);
+  const player = shakaPlayer.value;
+  if (!player || !track.language) return;
+  const target = player.getAudioTracks().find((candidate) => candidate.language === track.language);
+  if (target) player.selectAudioTrack(target);
 }
 
-/** 切换字幕轨（off = 关闭显示）。 */
+/** 切换字幕轨（Shaka 5：selectTextTrack(null) 即关闭显示）。 */
 function selectSubtitleTrack(track: PlaybackTrack) {
   selectedSubtitleTrack.value = track.id;
   const player = shakaPlayer.value;
   if (!player) return;
   if (track.id === "off") {
-    void player.setTextTrackVisibility(false);
+    player.selectTextTrack(null);
     return;
   }
   const target = player.getTextTracks().find((candidate) => String(candidate.id) === track.id);
-  if (target) {
-    player.selectTextTrack(target);
-    void player.setTextTrackVisibility(true);
-  }
+  if (target) player.selectTextTrack(target);
 }
 
 function startProgressTimer() {
