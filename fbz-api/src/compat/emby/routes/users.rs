@@ -335,7 +335,10 @@ pub async fn update_user(
         }
     }
 
-    if let Some(configuration) = payload.get("Configuration").filter(|value| value.is_object()) {
+    if let Some(configuration) = payload
+        .get("Configuration")
+        .filter(|value| value.is_object())
+    {
         store_user_configuration(&users_repository, &user_id, configuration.clone()).await?;
     }
 
@@ -1350,6 +1353,7 @@ mod tests {
                 "user-1",
                 UpdateUserPasswordDto {
                     id: Some("other-user".to_owned()),
+                    current_pw: None,
                     new_pw: Some("secret".to_owned()),
                     reset_password: Some(false),
                 },
@@ -1361,6 +1365,7 @@ mod tests {
                 "user-1",
                 UpdateUserPasswordDto {
                     id: Some("user-1".to_owned()),
+                    current_pw: None,
                     new_pw: None,
                     reset_password: Some(false),
                 },
@@ -1372,6 +1377,7 @@ mod tests {
                 "user-1",
                 UpdateUserPasswordDto {
                     id: Some("user-1".to_owned()),
+                    current_pw: None,
                     new_pw: None,
                     reset_password: Some(true),
                 },

@@ -4056,7 +4056,9 @@ impl AdminRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        row.as_ref().map(TranscodeSettingsRecord::from_row).transpose()
+        row.as_ref()
+            .map(TranscodeSettingsRecord::from_row)
+            .transpose()
     }
 
     /// upsert 转码全局设置（固定单行 id=1），返回落库后的值。
@@ -4780,10 +4782,13 @@ mod tests {
         let query_start = repository
             .find("pub async fn list_scheduled_task_runs_page")
             .expect("scheduled task run page query should exist");
-        let query_end = repository[query_start..]
-            .find("}\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\nstruct StoredLibraryPath")
-            .map(|offset| query_start + offset)
-            .expect("scheduled task run page query should be near repository impl end");
+        // 只截取到下一个 repository 方法为止：窗口过宽会把后续无关方法
+        // （如带合法有界 offset 的 ActivityLog 聚合）误纳入 keyset 守卫。
+        let after_start = query_start + "pub async fn list_scheduled_task_runs_page".len();
+        let query_end = repository[after_start..]
+            .find("pub async fn ")
+            .map(|offset| after_start + offset)
+            .expect("scheduled task run page query should be followed by another method");
         let run_query = &repository[query_start..query_end];
 
         assert!(run_query.contains("QueryBuilder::<Postgres>"));

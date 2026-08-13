@@ -1753,11 +1753,13 @@ mod tests {
                             name: Some("Actor One".to_owned()),
                             character: Some("Hero".to_owned()),
                             order: Some(0),
+                            profile_path: None,
                         },
                         TmdbCastCredit {
                             name: Some(" Actor One ".to_owned()),
                             character: Some("Hero".to_owned()),
                             order: Some(1),
+                            profile_path: None,
                         },
                     ],
                     crew: vec![
@@ -1765,16 +1767,19 @@ mod tests {
                             name: Some("Director One".to_owned()),
                             job: Some("Director".to_owned()),
                             department: Some("Directing".to_owned()),
+                            profile_path: None,
                         },
                         TmdbCrewCredit {
                             name: Some("Writer One".to_owned()),
                             job: Some("Screenplay".to_owned()),
                             department: Some("Writing".to_owned()),
+                            profile_path: None,
                         },
                         TmdbCrewCredit {
                             name: Some("Ignored One".to_owned()),
                             job: Some("Costume Design".to_owned()),
                             department: Some("Costume & Make-Up".to_owned()),
+                            profile_path: None,
                         },
                     ],
                 }),
