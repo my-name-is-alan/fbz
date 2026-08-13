@@ -3,8 +3,6 @@ import { createRouter, createWebHistory } from "vue-router";
 
 import { setupRouterGuard } from "@/router/guard.ts";
 
-const adminPage = () => import("@/views/account/index.vue");
-
 export const routes = [
   {
     path: "/",
@@ -72,38 +70,106 @@ export const routes = [
     component: () => import("@/layouts/admin.vue"),
     children: [
       // 控制面板
-      { path: "", name: "admin-dashboard", component: adminPage },
+      {
+        path: "",
+        name: "admin-dashboard",
+        component: () => import("@/views/admin/index.vue"),
+      },
       // 个人偏好
-      { path: "profile", name: "admin-profile", component: adminPage },
-      { path: "theme", name: "admin-theme", component: adminPage },
-      { path: "lib-sort", name: "admin-lib-sort", component: adminPage },
+      {
+        path: "profile",
+        name: "admin-profile",
+        component: () => import("@/views/admin/profile/index.vue"),
+      },
+      {
+        path: "theme",
+        name: "admin-theme",
+        component: () => import("@/views/admin/theme/index.vue"),
+      },
+      {
+        path: "lib-sort",
+        name: "admin-lib-sort",
+        component: () => import("@/views/admin/lib-sort/index.vue"),
+      },
       // 媒体设置
-      { path: "metadata", name: "admin-metadata", component: adminPage },
-      { path: "libraries", name: "admin-libraries", component: adminPage },
-      { path: "photos", name: "admin-photos", component: adminPage },
-      { path: "transcode", name: "admin-transcode", component: adminPage },
+      {
+        path: "metadata",
+        name: "admin-metadata",
+        component: () => import("@/views/admin/metadata/index.vue"),
+      },
+      {
+        path: "libraries",
+        name: "admin-libraries",
+        component: () => import("@/views/admin/libraries/index.vue"),
+      },
+      {
+        path: "photos",
+        name: "admin-photos",
+        component: () => import("@/views/admin/photos/index.vue"),
+      },
+      {
+        path: "transcode",
+        name: "admin-transcode",
+        component: () => import("@/views/admin/transcode/index.vue"),
+      },
       // 系统设置
-      { path: "users", name: "admin-users", component: adminPage },
-      { path: "users/create", name: "admin-users-create", component: adminPage },
-      { path: "users/:id", name: "admin-users-edit", component: adminPage },
-      { path: "plugins", name: "admin-plugins", component: adminPage },
-      { path: "plugin-market", name: "admin-plugin-market", component: adminPage },
+      {
+        path: "users",
+        name: "admin-users",
+        component: () => import("@/views/admin/users/index.vue"),
+      },
+      {
+        path: "users/create",
+        name: "admin-users-create",
+        component: () => import("@/views/admin/users/create/index.vue"),
+      },
+      {
+        path: "users/:id",
+        name: "admin-users-edit",
+        component: () => import("@/views/admin/users/edit/index.vue"),
+      },
+      {
+        path: "plugins",
+        name: "admin-plugins",
+        component: () => import("@/views/admin/plugins/index.vue"),
+      },
+      {
+        path: "plugin-market",
+        name: "admin-plugin-market",
+        component: () => import("@/views/admin/plugin-market/index.vue"),
+      },
       // 独立配置页须写在 plugins/:pluginId/:menuPath 之前，避免被吞
       {
         path: "plugins/:pluginId/config",
         name: "admin-plugin-config",
-        component: adminPage,
+        component: () => import("@/views/admin/plugins/config/index.vue"),
       },
       // 插件声明的管理菜单页（manifest menu，路径命名空间 /admin/plugins/{pluginId}/...）
       {
         path: "plugins/:pluginId/:menuPath(.*)*",
         name: "admin-plugin-page",
-        component: adminPage,
+        component: () => import("@/views/admin/plugins/page/index.vue"),
       },
-      { path: "scheduled-tasks", name: "admin-scheduled-tasks", component: adminPage },
-      { path: "metadata-mgr", name: "admin-metadata-mgr", component: adminPage },
-      { path: "logs", name: "admin-logs", component: adminPage },
-      { path: "about", name: "admin-about", component: adminPage },
+      {
+        path: "scheduled-tasks",
+        name: "admin-scheduled-tasks",
+        component: () => import("@/views/admin/scheduled-tasks/index.vue"),
+      },
+      {
+        path: "metadata-mgr",
+        name: "admin-metadata-mgr",
+        component: () => import("@/views/admin/metadata-mgr/index.vue"),
+      },
+      {
+        path: "logs",
+        name: "admin-logs",
+        component: () => import("@/views/admin/logs/index.vue"),
+      },
+      {
+        path: "about",
+        name: "admin-about",
+        component: () => import("@/views/admin/about/index.vue"),
+      },
     ],
   },
   {
