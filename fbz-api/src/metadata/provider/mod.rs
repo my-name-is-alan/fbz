@@ -18,6 +18,7 @@
 pub mod fanart;
 pub mod imdb;
 pub mod plugin;
+pub mod plugin_sync;
 pub mod proxy;
 pub mod retry;
 pub mod shared;
@@ -33,6 +34,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::json;
+use tracing::warn;
 
 use crate::config::{MetadataConfig, ProxyConfig};
 
@@ -101,6 +103,10 @@ pub struct MetadataProviderRegistry {
     order: Vec<String>,
     /// Provider implementations keyed by id.
     providers: HashMap<String, Arc<dyn MetadataProvider>>,
+    /// 插件 provider（`plugin:{id}`）：在内置链之后运行——内置全部未命中时
+    /// 兜底 base match，已命中时按 §9 只补空字段。每个刮削 job 由 service
+    /// 按当前订阅动态附加（插件启停即时生效，不参与 registry 缓存键）。
+    plugin_providers: Vec<Arc<dyn MetadataProvider>>,
     /// Shared runtime context (HTTP client + resolved config).
     ctx: ProviderContext,
     /// 联网重试策略（瞬时故障有界重试 + 指数退避）。
@@ -142,9 +148,16 @@ impl MetadataProviderRegistry {
         Ok(Self {
             order: normalized_providers(&metadata.providers),
             providers,
+            plugin_providers: Vec::new(),
             ctx,
             retry_policy: retry::RetryPolicy::default(),
         })
+    }
+
+    /// 附加插件 provider（消费式 builder；service 在每个 job 前按订阅发现调用）。
+    pub fn with_plugin_providers(mut self, providers: Vec<Arc<dyn MetadataProvider>>) -> Self {
+        self.plugin_providers = providers;
+        self
     }
 
     /// 注入 API key 令牌池（从 resolved.keys 构造，每 provider 多 key 时启用轮转）。
@@ -210,12 +223,19 @@ impl MetadataProviderRegistry {
                         Ok(ProviderMatchOutcome::Skipped(message)) => attempts.push(
                             MetadataProviderAttempt::skipped(provider_id.clone(), message),
                         ),
+                        // 兜底链语义：单个 provider 持久性失败（坏 key、上游宕机）
+                        // 不中止刮削任务——记 failed attempt 后继续尝试链上的下一个
+                        // provider / 插件兜底。瞬时故障已由 retry_async 有界重试covered。
                         Err(err) => {
+                            warn!(
+                                provider = %provider_id,
+                                error = %err,
+                                "metadata provider failed; continuing with next provider"
+                            );
                             attempts.push(MetadataProviderAttempt::failed(
                                 provider_id.clone(),
                                 err.to_string(),
                             ));
-                            return Err(err);
                         }
                     }
                 }
@@ -237,14 +257,63 @@ impl MetadataProviderRegistry {
                         Ok(ProviderEnrichOutcome::Skipped(message)) => attempts.push(
                             MetadataProviderAttempt::skipped(provider_id.clone(), message),
                         ),
+                        // 富化失败不中止：基础 match 已经成立，丢的是锦上添花。
                         Err(err) => {
+                            warn!(
+                                provider = %provider_id,
+                                error = %err,
+                                "metadata enrichment failed; keeping base match"
+                            );
                             attempts.push(MetadataProviderAttempt::failed(
                                 provider_id.clone(),
                                 err.to_string(),
                             ));
-                            return Err(err);
                         }
                     }
+                }
+            }
+        }
+
+        // 插件 provider：内置链之后运行。未命中 → 依次尝试兜底 base match；
+        // 已命中 → 只做补空 enrich。插件错误一律记录 attempt 后继续，
+        // 不中断刮削任务（与内置 provider 的 fail-fast 语义不同，有意为之）。
+        for provider in &self.plugin_providers {
+            let provider_id = provider.id().to_owned();
+            if let Some(current) = matched.as_mut() {
+                match provider.enrich(&self.ctx, input, current).await {
+                    Ok(ProviderEnrichOutcome::Matched { external_id }) => {
+                        attempts.push(MetadataProviderAttempt::matched(provider_id, external_id))
+                    }
+                    Ok(ProviderEnrichOutcome::NotMatched(message)) => {
+                        attempts.push(MetadataProviderAttempt::not_matched(provider_id, message))
+                    }
+                    Ok(ProviderEnrichOutcome::Skipped(message)) => {
+                        attempts.push(MetadataProviderAttempt::skipped(provider_id, message))
+                    }
+                    Err(err) => attempts.push(MetadataProviderAttempt::failed(
+                        provider_id,
+                        err.to_string(),
+                    )),
+                }
+            } else {
+                match provider.match_item(&self.ctx, input).await {
+                    Ok(ProviderMatchOutcome::Matched(found)) => {
+                        attempts.push(MetadataProviderAttempt::matched(
+                            provider_id,
+                            found.external_id.clone(),
+                        ));
+                        matched = Some(*found);
+                    }
+                    Ok(ProviderMatchOutcome::NotMatched(message)) => {
+                        attempts.push(MetadataProviderAttempt::not_matched(provider_id, message))
+                    }
+                    Ok(ProviderMatchOutcome::Skipped(message)) => {
+                        attempts.push(MetadataProviderAttempt::skipped(provider_id, message))
+                    }
+                    Err(err) => attempts.push(MetadataProviderAttempt::failed(
+                        provider_id,
+                        err.to_string(),
+                    )),
                 }
             }
         }

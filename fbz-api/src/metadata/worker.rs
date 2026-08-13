@@ -8,10 +8,11 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    config::{MetadataConfig, MetadataWorkerConfig, ProxyConfig, SecretConfig},
+    config::{MetadataConfig, MetadataWorkerConfig, PluginConfig, ProxyConfig, SecretConfig},
     db::DbPool,
     metadata::service::MetadataService,
     notifications::secrets::SecretCipher,
+    plugins::invoke::PluginSyncInvoker,
 };
 
 pub fn spawn_metadata_worker(
@@ -19,6 +20,7 @@ pub fn spawn_metadata_worker(
     metadata: MetadataConfig,
     proxy: ProxyConfig,
     secrets: SecretConfig,
+    plugins: PluginConfig,
     artwork_cache_dir: PathBuf,
     config: MetadataWorkerConfig,
     mut shutdown: broadcast::Receiver<()>,
@@ -33,8 +35,9 @@ pub fn spawn_metadata_worker(
                 None
             }
         };
+        let invoker = PluginSyncInvoker::new(pool.clone(), plugins);
         let service = match MetadataService::new(pool, metadata, proxy, cipher, artwork_cache_dir) {
-            Ok(service) => service,
+            Ok(service) => service.with_plugin_invoker(invoker),
             Err(err) => {
                 warn!(error = %err, "metadata worker not started");
                 return;

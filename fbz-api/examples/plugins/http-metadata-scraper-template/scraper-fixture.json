@@ -1,0 +1,72 @@
+{
+  "big buck bunny": {
+    "title": "Big Buck Bunny",
+    "originalTitle": "Big Buck Bunny",
+    "overview": "一只体型庞大却温柔善良的兔子 Big Buck，在一个阳光明媚的早晨遭到三只啮齿动物的恶作剧捉弄。忍无可忍的它放下温和，用精心设计的机关逐一回敬了这三个小恶霸。Blender 基金会出品的开源短片，以 Creative Commons 授权自由分发。",
+    "productionYear": 2008,
+    "premiereDate": "2008-05-30",
+    "communityRating": 7.3,
+    "externalIds": [{ "provider": "imdb", "externalId": "tt1254207" }],
+    "genres": ["动画", "喜剧", "短片"],
+    "studios": ["Blender Foundation"],
+    "people": [
+      { "name": "Sacha Goedegebure", "roleType": "Director" },
+      { "name": "Ton Roosendaal", "roleType": "Producer" }
+    ]
+  },
+  "elephants dream": {
+    "title": "Elephants Dream",
+    "originalTitle": "Elephants Dream",
+    "overview": "在一台庞大而超现实的机器内部，年长的 Proog 带领年轻的 Emo 穿行于危机四伏的机械世界。Proog 深爱这台机器，Emo 却逐渐对它产生怀疑。世界上第一部开源电影，全部使用 Blender 制作。",
+    "productionYear": 2006,
+    "premiereDate": "2006-03-24",
+    "communityRating": 6.5,
+    "externalIds": [{ "provider": "imdb", "externalId": "tt0807840" }],
+    "genres": ["动画", "科幻", "短片"],
+    "studios": ["Blender Foundation"],
+    "people": [
+      { "name": "Bassam Kurdali", "roleType": "Director" },
+      { "name": "Ton Roosendaal", "roleType": "Producer" }
+    ]
+  },
+  "sintel": {
+    "title": "Sintel",
+    "originalTitle": "Sintel",
+    "overview": "孤身流浪的少女 Sintel 救助了一只受伤的小龙，并与它结下深厚情谊。小龙被成年巨龙掳走后，Sintel 踏上横跨雪山与荒漠的漫长旅途，只为找回她唯一的朋友——而旅途的终点藏着一个残酷的真相。Blender 基金会第三部开源电影。",
+    "productionYear": 2010,
+    "premiereDate": "2010-09-27",
+    "communityRating": 7.4,
+    "externalIds": [{ "provider": "imdb", "externalId": "tt1727587" }],
+    "genres": ["动画", "奇幻", "冒险"],
+    "studios": ["Blender Foundation"],
+    "people": [
+      { "name": "Colin Levy", "roleType": "Director" },
+      { "name": "Esther Wouda", "roleType": "Writer" },
+      { "name": "Halina Reijn", "roleType": "Actor", "roleName": "Sintel (voice)" },
+      { "name": "Thom Hoffman", "roleType": "Actor", "roleName": "Shaman (voice)" }
+    ]
+  },
+  "tears of steel": {
+    "title": "Tears of Steel",
+    "originalTitle": "Tears of Steel",
+    "overview": "四十年前阿姆斯特丹的一座桥上，Thom 为了追逐宇航员梦想离开了机器人科学家 Celia，这个决定最终让世界陷入机器人末日。一群科学家与战士试图在同一座桥上重演当年的场景，通过时空投影修复历史。Blender 基金会首部真人实拍与 CG 结合的开源电影。",
+    "productionYear": 2012,
+    "premiereDate": "2012-09-26",
+    "communityRating": 6.4,
+    "externalIds": [{ "provider": "imdb", "externalId": "tt2285752" }],
+    "genres": ["科幻", "短片"],
+    "studios": ["Blender Foundation"],
+    "people": [
+      { "name": "Ian Hubert", "roleType": "Director" },
+      { "name": "Derek de Lint", "roleType": "Actor", "roleName": "Thom (40s)" },
+      { "name": "Rogier Schippers", "roleType": "Actor", "roleName": "Thom (20s)" }
+    ]
+  },
+  "buck bunny tv": {
+    "title": "Buck Bunny TV",
+    "overview": "Big Buck Bunny 的剧集化演示：把开源短片切分为多集，用于验证 FBZ 的剧集识别、季集归组与插件刮削链路。",
+    "productionYear": 2008,
+    "genres": ["动画", "喜剧"],
+    "studios": ["Blender Foundation"]
+  }
+}

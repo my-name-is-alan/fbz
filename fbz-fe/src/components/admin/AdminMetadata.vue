@@ -3,6 +3,7 @@ import { useUiStore } from "@/stores/ui.ts";
 import {
   getMetadataSettings,
   setMetadataProviderKey,
+  testMetadataProvider,
   updateMetadataProviderSettings,
   updateMetadataSettings,
 } from "@/service/modules/admin.ts";
@@ -12,36 +13,53 @@ const uiStore = useUiStore();
 // Form states
 const selectedLanguage = ref("zh-CN");
 const tmdbToken = ref("");
+const tmdbHasKey = ref(false);
 const showToken = ref(false);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
 
+/**
+ * 刮削器列表与后端 provider registry 一一对应（tmdb/tvdb/fanart/imdb/spotify）。
+ * TMDB 是内置兜底刮削源；第三方刮削器以插件形式接入（订阅
+ * `metadata.provider.query`），在插件设置页管理，不在此列表。
+ */
 const scrapers = ref([
   {
     id: "tmdb",
     name: "The Movie Database (TMDB)",
-    desc: "电影与剧集元数据、海报墙的核心搜刮来源。",
+    desc: "内置兜底搜刮源：电影与剧集元数据、海报墙的核心来源。",
+    enabled: true,
+  },
+  {
+    id: "tvdb",
+    name: "TheTVDB",
+    desc: "剧集元数据补充来源，含分集与播出信息。",
+    enabled: true,
+  },
+  {
+    id: "fanart",
+    name: "Fanart.tv",
+    desc: "高质量海报、Logo 与背景图增强。",
     enabled: true,
   },
   {
     id: "imdb",
     name: "Internet Movie Database (IMDb)",
-    desc: "补充影片评分、专业演职员表和分级数据。",
-    enabled: true,
+    desc: "外部 ID 规范化与评分补充（富化，不参与基础匹配）。",
+    enabled: false,
   },
   {
-    id: "nfo",
-    name: "本地 NFO/本地海报优先",
-    desc: "优先读取本地视频同目录下的 NFO 元数据及剧照。",
+    id: "spotify",
+    name: "Spotify",
+    desc: "音乐专辑/艺人元数据来源。",
     enabled: false,
   },
 ]);
 
-const scanFrequency = ref("monitor");
-
 /**
- * 接入真实后端：拉取元数据设置并叠加到表单。命中后端时按 provider id 同步开关；
- * 后端永不回显明文 key，已配置时只给空输入框提示。
+ * 接入真实后端：拉取元数据设置并叠加到表单。开关状态优先按全局
+ * providerOrder 推断（在序即启用），provider 行存在时以其 enabled 为准；
+ * 后端永不回显明文 key，已配置时展示「已配置」状态。
  */
 async function loadSettings() {
   loading.value = true;
@@ -49,21 +67,21 @@ async function loadSettings() {
   try {
     const settings = await getMetadataSettings();
     const byId = new Map(settings.providers.map((p) => [p.providerId, p]));
+    const order = settings.global.providerOrder;
     for (const scraper of scrapers.value) {
       const provider = byId.get(scraper.id);
       if (provider) {
         scraper.enabled = provider.enabled;
+      } else if (order.length) {
+        scraper.enabled = order.includes(scraper.id);
       }
     }
     const lang = settings.global.defaultLanguage;
     if (lang) {
       selectedLanguage.value = lang;
     }
-    const tmdb = byId.get("tmdb");
-    if (tmdb?.hasKey) {
-      // 后端不回显明文 key，仅以占位提示「已配置」。
-      tmdbToken.value = "";
-    }
+    tmdbHasKey.value = byId.get("tmdb")?.hasKey ?? false;
+    tmdbToken.value = "";
   } catch {
     loadError.value = "元数据设置加载失败，请检查服务器连接或管理员权限。";
   } finally {
@@ -79,14 +97,8 @@ const languageOptions = [
   { label: "不指定语言", value: "" },
 ];
 
-const frequencyOptions = [
-  { label: "实时目录监控 (建议)", value: "monitor" },
-  { label: "每小时全盘自动扫描", value: "hourly" },
-  { label: "每日定时全盘扫描", value: "daily" },
-  { label: "仅手动触发扫描", value: "manual" },
-];
-
 const saving = ref(false);
+const testing = ref(false);
 
 async function handleSave() {
   saving.value = true;
@@ -126,6 +138,22 @@ async function handleSave() {
     uiStore.showToast("保存元数据设置失败，请检查后端响应。", "error");
   } finally {
     saving.value = false;
+  }
+}
+
+/** 连通性探测：用当前已保存的 key/代理对 TMDB 做一次受控探测。 */
+async function handleTestTmdb() {
+  testing.value = true;
+  try {
+    const result = await testMetadataProvider("tmdb");
+    uiStore.showToast(
+      result.ok ? "TMDB 连通性正常。" : `TMDB 探测失败：${result.message}`,
+      result.ok ? "success" : "warning",
+    );
+  } catch {
+    uiStore.showToast("TMDB 探测请求失败，请检查后端。", "error");
+  } finally {
+    testing.value = false;
   }
 }
 </script>
@@ -186,7 +214,7 @@ async function handleSave() {
                 v-model="tmdbToken"
                 :type="showToken ? 'text' : 'password'"
                 class="control-input"
-                placeholder="输入 TMDB 官方 API 令牌"
+                :placeholder="tmdbHasKey ? '已配置（留空保持不变）' : '输入 TMDB 官方 API 令牌'"
               />
               <button
                 class="action-btn"
@@ -196,29 +224,13 @@ async function handleSave() {
               >
                 {{ showToken ? "隐藏" : "显示" }}
               </button>
+              <button class="action-btn" type="button" :disabled="testing" @click="handleTestTmdb">
+                {{ testing ? "探测中..." : "测试连通" }}
+              </button>
             </div>
             <span class="field-hint"
-              >保存后后端会加密存储令牌；扫描/刷新元数据时会下载图片到本地缓存。</span
+              >保存后后端会加密存储令牌，永不回显明文；刮削时下载的图片会缓存到本地。</span
             >
-          </div>
-        </div>
-      </section>
-
-      <!-- Section 3: Scanning triggers -->
-      <section class="settings-card">
-        <div class="card-header">
-          <span class="indicator" />
-          <h3>物理路径扫描策略</h3>
-        </div>
-        <div class="card-body">
-          <div class="form-group">
-            <label for="meta-scan-frequency">自动更新触发机制</label>
-            <BaseSelect
-              id="meta-scan-frequency"
-              v-model="scanFrequency"
-              :options="frequencyOptions"
-              ariaLabel="选择自动更新扫描频率"
-            />
           </div>
         </div>
       </section>

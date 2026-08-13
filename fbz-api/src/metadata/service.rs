@@ -120,6 +120,9 @@ pub struct MetadataService {
     artwork_cache_dir: PathBuf,
     /// 查询响应缓存（TTL）：相同逻辑条目重复刷新时跳过联网。
     cache: Arc<crate::metadata::cache::MetadataCache>,
+    /// 插件同步调用器：按 job 发现订阅 `metadata.provider.query` 的插件并
+    /// 作为兜底/补空 provider 附加进 registry。`None` = 不启用插件刮削。
+    plugin_invoker: Option<crate::plugins::invoke::PluginSyncInvoker>,
 }
 
 /// Where the service gets its provider registry from.
@@ -230,7 +233,18 @@ impl MetadataService {
             cache: Arc::new(crate::metadata::cache::MetadataCache::new(
                 METADATA_CACHE_TTL,
             )),
+            plugin_invoker: None,
         })
+    }
+
+    /// 启用插件刮削器：订阅了 `metadata.provider.query` 的 HTTP 插件将作为
+    /// 兜底 base match / 补空 enrichment provider 参与每次刮削。
+    pub fn with_plugin_invoker(
+        mut self,
+        invoker: crate::plugins::invoke::PluginSyncInvoker,
+    ) -> Self {
+        self.plugin_invoker = Some(invoker);
+        self
     }
 
     pub fn with_provider(
@@ -246,6 +260,7 @@ impl MetadataService {
             cache: Arc::new(crate::metadata::cache::MetadataCache::new(
                 METADATA_CACHE_TTL,
             )),
+            plugin_invoker: None,
         }
     }
 
@@ -255,6 +270,21 @@ impl MetadataService {
     /// reuses the cached registry when the effective config is unchanged
     /// (preserving per-provider caches).
     async fn registry(
+        &self,
+    ) -> Result<(MetadataProviderRegistry, Option<MetadataGlobalSettings>), MetadataError> {
+        let (registry, global) = self.base_registry().await?;
+        // 插件 provider 按当前订阅动态附加：不参与 registry 缓存键，
+        // 插件启停下一个 job 即生效；无订阅时开销只是一条索引查询。
+        let registry = match &self.plugin_invoker {
+            Some(invoker) => registry.with_plugin_providers(
+                crate::metadata::provider::plugin_sync::discover_plugin_providers(invoker).await,
+            ),
+            None => registry,
+        };
+        Ok((registry, global))
+    }
+
+    async fn base_registry(
         &self,
     ) -> Result<(MetadataProviderRegistry, Option<MetadataGlobalSettings>), MetadataError> {
         match &self.provider {
