@@ -25,7 +25,13 @@ const props = withDefaults(defineProps<Props>(), {
 // 加载失败标记：同一 src 变化时重置，允许换头像后重新尝试。
 const failed = ref(false);
 
-const src = computed(() => userAvatarUrl(props.userId, props.version));
+// 只有明确知道用户设置过头像（version 非空）才请求头像端点：
+// 未设置头像时直接渲染首字母占位，避免整站每个头像都打出一条 404 噪音。
+const src = computed(() =>
+  props.version != null && props.version !== ""
+    ? userAvatarUrl(props.userId, props.version)
+    : undefined,
+);
 watch(src, () => {
   failed.value = false;
 });

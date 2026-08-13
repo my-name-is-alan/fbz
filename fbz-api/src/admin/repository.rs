@@ -588,6 +588,9 @@ pub struct AdminUserRecord {
     pub allow_transcode: bool,
     pub allow_new_device_login: bool,
     pub has_password: bool,
+    /// 头像缓存版本（`avatar_updated_at` epoch 秒）；`None` = 未设置头像，
+    /// 前端据此直接渲染首字母占位、不发头像请求（避免 404 噪音）。
+    pub avatar_version: Option<i64>,
     pub device_count: i64,
     pub active_session_count: i64,
     pub last_login_at: Option<String>,
@@ -1761,6 +1764,9 @@ impl AdminRepository {
                    u.allow_transcode,
                    u.allow_new_device_login,
                    u.password_hash is not null as has_password,
+                   case when u.avatar_content_type is not null
+                        then extract(epoch from u.avatar_updated_at)::bigint
+                   end as avatar_version,
 "#,
         );
         push_admin_user_counts_sql(&mut query);
@@ -1890,6 +1896,9 @@ impl AdminRepository {
                    u.allow_transcode,
                    u.allow_new_device_login,
                    u.password_hash is not null as has_password,
+                   case when u.avatar_content_type is not null
+                        then extract(epoch from u.avatar_updated_at)::bigint
+                   end as avatar_version,
 "#,
         );
         push_admin_user_counts_sql(&mut query);
@@ -1972,6 +1981,9 @@ impl AdminRepository {
                    u.allow_transcode,
                    u.allow_new_device_login,
                    u.password_hash is not null as has_password,
+                   case when u.avatar_content_type is not null
+                        then extract(epoch from u.avatar_updated_at)::bigint
+                   end as avatar_version,
 "#,
         );
         push_admin_user_counts_sql(&mut query);
@@ -4474,6 +4486,7 @@ impl AdminUserRecord {
             allow_transcode: row.try_get("allow_transcode")?,
             allow_new_device_login: row.try_get("allow_new_device_login")?,
             has_password: row.try_get("has_password")?,
+            avatar_version: row.try_get("avatar_version")?,
             device_count: row.try_get("device_count")?,
             active_session_count: row.try_get("active_session_count")?,
             last_login_at: row.try_get("last_login_at")?,

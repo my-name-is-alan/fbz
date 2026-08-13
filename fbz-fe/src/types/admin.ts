@@ -190,6 +190,8 @@ export interface AdminUser {
   allowTranscode: boolean;
   allowNewDeviceLogin: boolean;
   hasPassword: boolean;
+  /** 头像缓存版本；null = 未设置头像（渲染首字母占位，不发头像请求）。 */
+  avatarVersion: number | null;
   deviceCount: number;
   activeSessionCount: number;
   lastLoginAt: string | null;

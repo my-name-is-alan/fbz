@@ -52,6 +52,14 @@ function toFeatured(item: NavigationFeatured): FeaturedItem {
 /** 拉取并返回原始导航响应（库列表等其他消费方用）。 */
 export async function fetchNavigation(): Promise<NavigationResponse> {
   const { data } = await request.get<NavigationResponse>("/navigation");
+  // 同步权威头像版本到 auth store：null = 未设置头像（BaseAvatar 不发请求）。
+  // 动态引入避免 service 模块在 Pinia 安装前建立 store 依赖。
+  try {
+    const { useAuthStore } = await import("@/stores/auth.ts");
+    useAuthStore().setAvatarVersion(data.user.avatarVersion ?? null);
+  } catch {
+    // store 不可用（如测试环境）时忽略，头像回退首字母占位。
+  }
   return data;
 }
 

@@ -61,7 +61,7 @@ async function removeAvatar() {
   avatarBusy.value = true;
   try {
     await deleteUserAvatar(authStore.userId);
-    authStore.bumpAvatarVersion();
+    authStore.setAvatarVersion(null);
     uiStore.showToast("已恢复默认头像。", "success");
   } catch {
     uiStore.showToast("恢复默认头像失败，请稍后再试。", "error");

@@ -30,6 +30,10 @@ pub struct NavigationUserDto {
     pub name: String,
     /// 是否具备服务器管理权限（前端据此显隐管理后台入口）。
     pub is_admin: bool,
+    /// 头像缓存版本（`avatar_updated_at` epoch 秒）；`None` = 未设置头像。
+    /// 前端只在有值时才请求 `/api/users/{id}/avatar`，避免 404 噪音。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_version: Option<i64>,
 }
 
 /// 一个媒体库视图（对齐前端 `MediaLibrary`）。

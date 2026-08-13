@@ -529,6 +529,8 @@ pub struct AdminUserDto {
     pub allow_transcode: bool,
     pub allow_new_device_login: bool,
     pub has_password: bool,
+    /// 头像缓存版本；`None` = 未设置头像（前端渲染首字母占位，不发头像请求）。
+    pub avatar_version: Option<i64>,
     pub device_count: i64,
     pub active_session_count: i64,
     pub last_login_at: Option<String>,
@@ -3871,6 +3873,7 @@ impl From<AdminUserRecord> for AdminUserDto {
             allow_transcode: record.allow_transcode,
             allow_new_device_login: record.allow_new_device_login,
             has_password: record.has_password,
+            avatar_version: record.avatar_version,
             device_count: record.device_count,
             active_session_count: record.active_session_count,
             last_login_at: record.last_login_at,

@@ -33,6 +33,8 @@ export interface SystemUser {
   allowDownload: boolean;
   allowTranscode: boolean;
   allowNewDeviceLogin: boolean;
+  /** 头像缓存版本；null = 未设置头像（不请求头像端点）。 */
+  avatarVersion: number | null;
   deviceCount: number;
   activeSessionCount: number;
   lastLoginAt: string | null;
@@ -53,13 +55,26 @@ export const useAuthStore = defineStore("auth", () => {
   const userId = ref<string>(localStorage.getItem("fbz_auth_user_id") ?? "");
   const isAuthenticated = ref<boolean>(getAccessToken() !== null);
 
-  // 头像缓存版本：更换/删除头像后自增，作为 `<img src>` 的 `?v=` 击穿缓存。
-  const avatarVersion = ref<number>(Number(localStorage.getItem("fbz_auth_avatar_v") ?? "0"));
+  // 头像缓存版本：null = 未设置头像（BaseAvatar 直接渲染首字母、不发请求）。
+  // 有值时作为 `<img src>` 的 `?v=` 击穿缓存；导航接口返回权威值。
+  const storedAvatarVersion = localStorage.getItem("fbz_auth_avatar_v");
+  const avatarVersion = ref<number | null>(
+    storedAvatarVersion !== null && storedAvatarVersion !== "" ? Number(storedAvatarVersion) : null,
+  );
 
-  /** 头像更新后调用：自增版本并持久化，驱动所有引用处刷新。 */
+  /** 设置头像版本（null = 无头像）并持久化，驱动所有引用处刷新。 */
+  function setAvatarVersion(version: number | null): void {
+    avatarVersion.value = version;
+    if (version === null) {
+      localStorage.removeItem("fbz_auth_avatar_v");
+    } else {
+      localStorage.setItem("fbz_auth_avatar_v", String(version));
+    }
+  }
+
+  /** 头像上传后调用：以当前时间为新版本，立即击穿缓存。 */
   function bumpAvatarVersion(): void {
-    avatarVersion.value = Date.now();
-    localStorage.setItem("fbz_auth_avatar_v", String(avatarVersion.value));
+    setAvatarVersion(Date.now());
   }
 
   // System Users List：从后端 `/api/admin/users` 拉取真实数据，不再用 localStorage mock。
@@ -100,6 +115,7 @@ export const useAuthStore = defineStore("auth", () => {
       allowDownload: record.allowDownload,
       allowTranscode: record.allowTranscode,
       allowNewDeviceLogin: record.allowNewDeviceLogin,
+      avatarVersion: record.avatarVersion ?? null,
       deviceCount: record.deviceCount,
       activeSessionCount: record.activeSessionCount,
       lastLoginAt: record.lastLoginAt,
@@ -374,6 +390,7 @@ export const useAuthStore = defineStore("auth", () => {
     isAuthenticated,
     userId,
     avatarVersion,
+    setAvatarVersion,
     bumpAvatarVersion,
     users,
     usersLoading,
