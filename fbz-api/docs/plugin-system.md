@@ -181,6 +181,43 @@ The notification worker is disabled by default and can be enabled with `FBZ_NOTI
 
 Plugins can choose a logical channel, but they cannot choose target URLs, bot tokens, or webhook secrets. Those remain administrator-managed target config so plugin notifications do not become unrestricted outbound HTTP.
 
+## Synchronous Provider Invocation
+
+Async outbox dispatch is fire-and-forget: core emits an event and a worker
+eventually runs the plugin. Provider-style extension points (metadata provider
+queries, storage providers, danmaku sources) instead need the plugin's answer
+inside the calling job. `PluginSyncInvoker` (`src/plugins/invoke.rs`) is that
+path.
+
+Boundaries, by design:
+
+- Only `http` runtime plugins are callable synchronously. WASIp1 modules have
+  no sockets and pay cold-start per call, so subscriptions from other runtimes
+  are filtered out at discovery time.
+- Discovery reuses the hook subscription model: a plugin subscribes to a
+  capability event key (for example `metadata.provider.query`) in its manifest
+  `hooks`, and the same approval/enablement boundary as async dispatch decides
+  whether it is callable.
+- Requests reuse the async dispatch security primitives: entrypoint
+  validation, `PLUGIN_HTTP_ALLOWED_HOSTS`, HMAC signature headers when
+  `PLUGIN_SECRET_KEY` is configured, and the
+  `PLUGIN_HTTP_MAX_RESPONSE_BODY_BYTES` response cap. The request body carries
+  `invocation: "sync"` (also sent as the `x-fbz-plugin-invocation` header) so a
+  plugin can distinguish sync queries from async hook dispatches.
+- No Host API token is issued. A sync provider receives its whole input in the
+  request body and must answer from it; the caller validates the JSON response
+  against the capability's field allowlist before anything is persisted.
+- Each plugin gets a concurrency budget (`PLUGIN_SYNC_MAX_CONCURRENCY_PER_PLUGIN`)
+  and a consecutive-failure circuit breaker
+  (`PLUGIN_SYNC_CIRCUIT_FAILURE_THRESHOLD` failures open the circuit for
+  `PLUGIN_SYNC_CIRCUIT_COOLDOWN_SECONDS`). A slow or crashed plugin therefore
+  degrades to fast skips instead of stalling scan or metadata jobs. The total
+  per-call budget, including queue wait, is `PLUGIN_SYNC_TIMEOUT_MS`.
+- Failures are always audited to `plugin_sync_invocations`; successes are
+  audited only when the caller opts in, so hot provider paths do not write one
+  row per call. Sync invocations complete before the audit row is written, so
+  the table has no lease or stale-recovery machinery.
+
 ## First-Party Examples
 
 Plugin author workflow, manifest examples, HTTP dispatch signing, idempotency, Host API usage, packaging, and local smoke guidance are documented in `docs/plugin-development.md`.

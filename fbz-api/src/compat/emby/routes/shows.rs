@@ -132,7 +132,9 @@ pub async fn seasons(
         .await
         .map_err(|err| AppError::internal(format!("failed to list seasons: {err}")))?;
 
-    Ok(Json(show_items_result_with_overviews(&repository, result, window).await?))
+    Ok(Json(
+        show_items_result_with_overviews(&repository, result, window).await?,
+    ))
 }
 
 pub async fn episodes(
@@ -178,7 +180,9 @@ pub async fn episodes(
         .await
         .map_err(|err| AppError::internal(format!("failed to list episodes: {err}")))?;
 
-    Ok(Json(show_items_result_with_overviews(&repository, result, window).await?))
+    Ok(Json(
+        show_items_result_with_overviews(&repository, result, window).await?,
+    ))
 }
 
 pub async fn next_up(
@@ -285,10 +289,7 @@ async fn show_items_result_with_overviews(
     let total_record_count = result.total_record_count;
     let mut items = media_items_to_dtos(result.items);
 
-    let ids = items
-        .iter()
-        .map(|item| item.id.clone())
-        .collect::<Vec<_>>();
+    let ids = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
     let overviews = repository
         .fetch_item_overviews(&ids)
         .await

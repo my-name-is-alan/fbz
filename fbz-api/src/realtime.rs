@@ -38,10 +38,9 @@ impl SessionMessageHub {
         let mut inner = self.inner.lock().expect("session hub lock poisoned");
         inner.next_generation += 1;
         let generation = inner.next_generation;
-        inner.channels.insert(
-            session_id.to_owned(),
-            HubChannel { generation, sender },
-        );
+        inner
+            .channels
+            .insert(session_id.to_owned(), HubChannel { generation, sender });
         (generation, receiver)
     }
 

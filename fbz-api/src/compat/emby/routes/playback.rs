@@ -538,7 +538,11 @@ async fn playback_info_for_user(
         } else {
             None
         };
-        media_sources.push(media_source_to_dto(&source, transcode.as_ref(), access_token));
+        media_sources.push(media_source_to_dto(
+            &source,
+            transcode.as_ref(),
+            access_token,
+        ));
     }
 
     if media_sources.is_empty() {

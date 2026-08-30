@@ -38,6 +38,8 @@ export interface NavigationUser {
   id: string;
   name: string;
   isAdmin: boolean;
+  /** 头像缓存版本（epoch 秒）；缺省 = 未设置头像（前端不请求头像端点）。 */
+  avatarVersion?: number;
 }
 
 /** 一个媒体库视图。 */

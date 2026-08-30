@@ -181,6 +181,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             config.metadata.clone(),
             config.proxy.clone(),
             config.secrets.clone(),
+            config.plugins.clone(),
             config.storage.artwork_cache_dir.clone(),
             config.metadata_worker.clone(),
             shutdown_tx.subscribe(),

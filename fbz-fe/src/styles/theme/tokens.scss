@@ -1,15 +1,21 @@
-$fbz-color-bg: #0a0a0b;
-$fbz-color-bg-strong: #050506;
-$fbz-color-panel: #141416;
-$fbz-color-panel-strong: #1c1c20;
-$fbz-color-panel-elevated: #232328;
-$fbz-color-line: #2a2a2e;
-$fbz-color-line-bright: #3a3a40;
-$fbz-color-line-soft: #1f1f23;
-$fbz-color-text: #f3f3f4;
-$fbz-color-text-soft: #b2b2b8;
-$fbz-color-text-muted: #6f6f78;
-$fbz-color-text-disabled: #4a4a52;
+// ── FBZ 设计 token ───────────────────────────────────────────────
+// 家庭媒体中心（类 Emby）视觉基调：
+// - 分层深色：带极轻微蓝调的近黑背景（避免死黑），面板逐级提亮形成纵深
+// - 单一品牌色 #1ed760 只做强调（激活/主按钮/进度）
+// - 海报卡片 10px 圆角 + 柔和多层阴影，控件 8px
+// - 正文字号 13/15 起步，客厅距离可读
+$fbz-color-bg: #0e0f13;
+$fbz-color-bg-strong: #090a0d;
+$fbz-color-panel: #15171c;
+$fbz-color-panel-strong: #1c1f25;
+$fbz-color-panel-elevated: #242830;
+$fbz-color-line: #2a2e37;
+$fbz-color-line-bright: #3b404c;
+$fbz-color-line-soft: #1f222a;
+$fbz-color-text: #f4f5f7;
+$fbz-color-text-soft: #b6bac3;
+$fbz-color-text-muted: #7c8090;
+$fbz-color-text-disabled: #4d515e;
 $fbz-color-brand-500: #1ed760;
 $fbz-color-brand-600: #1bc356;
 $fbz-color-cyan-500: #33d6ff;
@@ -25,13 +31,13 @@ $fbz-space-5: 20px;
 $fbz-space-6: 24px;
 $fbz-space-8: 32px;
 $fbz-font-size-xs: 11px;
-$fbz-font-size-sm: 12px;
-$fbz-font-size-md: 14px;
-$fbz-font-size-lg: 18px;
-$fbz-font-size-xl: 24px;
-$fbz-radius-card: 4px;
-$fbz-radius-control: 6px;
-$fbz-radius-hero: 10px;
+$fbz-font-size-sm: 13px;
+$fbz-font-size-md: 15px;
+$fbz-font-size-lg: 20px;
+$fbz-font-size-xl: 28px;
+$fbz-radius-card: 10px;
+$fbz-radius-control: 8px;
+$fbz-radius-hero: 16px;
 $fbz-radius-round: 999px;
 $fbz-motion-fast: 120ms;
 $fbz-motion-base: 180ms;
@@ -77,8 +83,10 @@ $fbz-z-overlay: 50;
     --fbz-radius-hero: #{$fbz-radius-hero};
     --fbz-radius-round: #{$fbz-radius-round};
     --fbz-shadow-panel: 0 20px 50px rgba(0, 0, 0, 0.5);
+    --fbz-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.28);
+    --fbz-shadow-card-hover: 0 6px 16px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.4);
     --fbz-shadow-focus: 0 0 0 3px color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
-    --fbz-color-panel-transparent: rgba(20, 20, 22, 0);
+    --fbz-color-panel-transparent: rgba(21, 23, 28, 0);
     // 字体：正文走系统优先的现代字栈（借鉴 HDHive），数字/品牌用 Orbitron 展示体
     --fbz-font-sans:
       ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
@@ -106,5 +114,7 @@ $fbz-z-overlay: 50;
     --fbz-color-text-disabled: #aeaeb2;
     --fbz-color-panel-transparent: rgba(255, 255, 255, 0);
     --fbz-shadow-panel: 0 10px 30px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.02);
+    --fbz-shadow-card: 0 1px 4px rgba(0, 0, 0, 0.08), 0 6px 18px rgba(0, 0, 0, 0.08);
+    --fbz-shadow-card-hover: 0 4px 10px rgba(0, 0, 0, 0.1), 0 14px 32px rgba(0, 0, 0, 0.12);
   }
 }

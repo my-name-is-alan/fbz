@@ -113,7 +113,7 @@ Vue 3 SPA, Composition API + `<script setup lang="ts">` everywhere. Toolchain is
 Layout (`src/`):
 
 - `main.ts` → `App.vue` → `layouts/default.vue` (public shell) or `layouts/admin.vue` (admin shell). `App.vue` is entry-only — no business logic.
-- `router/index.ts` — manually maintained route table. Routes match folder paths (`/movie/:id` → `views/detail/movie/index.vue`). The admin section currently dispatches every child route to `views/account/index.vue` until the in-progress migration to dedicated admin pages lands; admin components are split out under `components/admin/`.
+- `router/index.ts` — manually maintained route table. Routes match folder paths (`/movie/:id` → `views/detail/movie/index.vue`). Admin child routes each map to a dedicated page under `views/admin/**/index.vue` (e.g. `/admin/users` → `views/admin/users/index.vue`); pages wrap domain components from `components/admin/` in the shared `AdminPageShell` banner shell.
 - `views/` — pages. `components/` — auto-imported components (don't write `import Xxx from …` for in-project components). Base components use a `Base` prefix.
 - `stores/` — Pinia function-style stores (`auth`, `library`, `playback`, `theme`, `ui`).
 - `service/request.ts` — single `axios` instance (`baseURL = import.meta.env.VITE_API_BASE_URL ?? "/api"`); per-domain modules live in `service/modules/`.

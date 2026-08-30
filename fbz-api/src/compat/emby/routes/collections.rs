@@ -360,7 +360,6 @@ fn normalize_required_collection_id(value: &str, field: &'static str) -> Result<
     Ok(value.to_owned())
 }
 
-
 #[cfg(test)]
 mod tests {
     use axum::extract::Query;

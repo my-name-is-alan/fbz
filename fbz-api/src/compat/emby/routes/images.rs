@@ -731,7 +731,9 @@ pub async fn remote_image_proxy(
 }
 
 /// 拉取远端图片并作为图片响应回传（RemoteSearch/Image 与 Images/Remote 共用）。
-pub(super) async fn remote_image_passthrough_response(image_url: &str) -> Result<Response, AppError> {
+pub(super) async fn remote_image_passthrough_response(
+    image_url: &str,
+) -> Result<Response, AppError> {
     let bytes = fetch_remote_image_bytes(image_url).await?;
     let content_type = probe_image_bytes(&bytes)
         .map(|(extension, _, _)| match extension {
@@ -1944,9 +1946,9 @@ async fn store_item_image_file(
 
     let output_path = artwork_cache_dir.join(&storage_key);
     if let Some(parent) = output_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|err| AppError::internal(format!("failed to create image directory: {err}")))?;
+        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+            AppError::internal(format!("failed to create image directory: {err}"))
+        })?;
     }
     tokio::fs::write(&output_path, &decoded.bytes)
         .await
@@ -1987,7 +1989,9 @@ pub(super) fn ensure_public_remote_image_url(url: &str) -> Result<(), AppError> 
 
 fn is_private_or_loopback_host(host: &str) -> bool {
     let normalized = host.to_ascii_lowercase();
-    if normalized == "localhost" || normalized.ends_with(".localhost") || normalized.ends_with(".local")
+    if normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized.ends_with(".local")
     {
         return true;
     }
@@ -2086,7 +2090,15 @@ fn safe_storage_key_path(storage_key: &str) -> Result<PathBuf, AppError> {
     let mut safe = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) => safe.push(part),
+            Component::Normal(part) => {
+                // 平台无关拒绝：Windows 盘符/ADS 冒号与反斜杠分隔符在
+                // Linux 上会被解析成普通文件名组件，不能进入缓存路径拼接。
+                let text = part.to_string_lossy();
+                if text.contains(':') || text.contains('\\') {
+                    return Err(AppError::forbidden("artwork storage key is invalid"));
+                }
+                safe.push(part)
+            }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(AppError::forbidden("artwork storage key is invalid"));

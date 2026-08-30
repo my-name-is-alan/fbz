@@ -32,6 +32,19 @@ pub async fn load_navigation(
     database: DbPool,
     user: &AuthenticatedUser,
 ) -> Result<NavigationDto, sqlx::Error> {
+    // 头像缓存版本：有自定义头像才返回 epoch，前端据此决定是否请求头像端点。
+    let avatar_version: Option<i64> = sqlx::query_scalar(
+        r#"
+        select extract(epoch from u.avatar_updated_at)::bigint
+        from users u
+        where u.id = $1
+          and u.avatar_content_type is not null
+          and u.avatar_updated_at is not null
+        "#,
+    )
+    .bind(user.id)
+    .fetch_optional(&database)
+    .await?;
     let repository = LibraryRepository::new(database);
 
     let views = repository.list_user_views(user.id).await?;
@@ -96,7 +109,7 @@ pub async fn load_navigation(
     }
 
     Ok(NavigationDto {
-        user: user_to_dto(user),
+        user: user_to_dto(user, avatar_version),
         libraries: views
             .into_iter()
             .map(|view| library_view_to_dto(view, &counts_by_library))
@@ -145,11 +158,12 @@ fn latest_browse_query(user_id: i64) -> BrowseItemsInput {
     }
 }
 
-fn user_to_dto(user: &AuthenticatedUser) -> NavigationUserDto {
+fn user_to_dto(user: &AuthenticatedUser, avatar_version: Option<i64>) -> NavigationUserDto {
     NavigationUserDto {
         id: user.public_id.clone(),
         name: user.username.clone(),
         is_admin: user.can_manage_server(),
+        avatar_version,
     }
 }
 

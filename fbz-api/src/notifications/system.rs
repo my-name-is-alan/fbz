@@ -102,11 +102,7 @@ pub async fn enqueue_system_notification(
 
 /// Emby level 文案 → 表约束允许的 level。未知值一律 info。
 pub fn normalize_notification_level(value: Option<&str>) -> &'static str {
-    match value
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("warn" | "warning") => "warning",
         Some("error" | "fatal") => "error",
         Some("success") => "success",

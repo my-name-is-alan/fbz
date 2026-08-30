@@ -593,7 +593,10 @@ fn remote_search_kind_item_type(kind: RemoteSearchKind) -> Option<&'static str> 
 
 fn remote_search_candidate_to_dto(candidate: RemoteSearchCandidate) -> RemoteSearchResultDto {
     let mut provider_ids = BTreeMap::new();
-    provider_ids.insert(candidate.provider_key.clone(), candidate.external_id.clone());
+    provider_ids.insert(
+        candidate.provider_key.clone(),
+        candidate.external_id.clone(),
+    );
 
     RemoteSearchResultDto {
         name: Some(candidate.name),

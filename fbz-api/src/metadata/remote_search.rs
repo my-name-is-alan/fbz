@@ -145,9 +145,11 @@ impl RemoteSearchService {
                 .json::<TmdbSearchResult>()
                 .await
                 .map_err(|err| RemoteSearchError::Http(err.to_string()))?;
-            return Ok(candidate_from_result(result, kind, &effective.tmdb_image_base_url)
-                .into_iter()
-                .collect());
+            return Ok(
+                candidate_from_result(result, kind, &effective.tmdb_image_base_url)
+                    .into_iter()
+                    .collect(),
+            );
         }
 
         let Some(name) = request
@@ -174,11 +176,10 @@ impl RemoteSearchService {
         if let Some(language) = normalized_bcp47(request.language.as_deref()) {
             query.push(("language", language));
         }
-        if let Some(country) = request
-            .country
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| value.len() == 2 && value.chars().all(|ch| ch.is_ascii_alphabetic()))
+        if let Some(country) =
+            request.country.as_deref().map(str::trim).filter(|value| {
+                value.len() == 2 && value.chars().all(|ch| ch.is_ascii_alphabetic())
+            })
         {
             query.push(("region", country.to_ascii_uppercase()));
         }

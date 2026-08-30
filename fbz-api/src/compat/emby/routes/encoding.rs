@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    auth::service::AuthenticatedUser, error::AppError,
-    settings::repository::SettingsRepository, state::AppState,
+    auth::service::AuthenticatedUser, error::AppError, settings::repository::SettingsRepository,
+    state::AppState,
 };
 
 use super::access::authenticate_request_user;

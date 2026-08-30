@@ -123,29 +123,36 @@ function onContextMenu(e: MouseEvent) {
 </template>
 
 <style scoped lang="scss">
+// Emby 式「悬浮海报卡」：卡片本体透明无边框，海报块承担圆角 + 阴影，
+// 悬停整体上浮、阴影加深并浮出播放按钮；文字区透明置于海报下方。
 .media-card {
   display: block;
   cursor: pointer;
   text-decoration: none;
   color: inherit;
-  overflow: hidden;
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: var(--fbz-radius-card);
-  background: linear-gradient(180deg, var(--fbz-color-panel) 0%, var(--fbz-color-bg-strong) 100%);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
-  transition:
-    border-color var(--fbz-motion-fast),
-    box-shadow var(--fbz-motion-fast),
-    transform var(--fbz-motion-fast);
+  outline: none;
 
   &:hover,
   &:focus-visible,
   &:focus-within {
-    border-color: var(--fbz-color-brand-500);
+    .thumb {
+      box-shadow: var(--fbz-shadow-card-hover);
+      transform: translateY(-4px) scale(1.015);
+    }
+
+    .thumb :deep(img) {
+      transform: scale(1.045);
+    }
+
+    .title {
+      color: var(--fbz-color-brand-500);
+    }
+  }
+
+  &:focus-visible .thumb {
     box-shadow:
-      0 12px 32px color-mix(in srgb, var(--fbz-color-brand-500) 18%, transparent),
-      0 4px 12px rgba(0, 0, 0, 0.4);
-    transform: translateY(-4px);
+      var(--fbz-shadow-card-hover),
+      0 0 0 2px var(--fbz-color-brand-500);
   }
 
   &:hover .play-overlay,
@@ -158,24 +165,20 @@ function onContextMenu(e: MouseEvent) {
 .thumb {
   position: relative;
   overflow: hidden;
+  border-radius: var(--fbz-radius-card);
   background: var(--fbz-color-panel);
+  box-shadow: var(--fbz-shadow-card);
+  transition:
+    box-shadow var(--fbz-motion-base),
+    transform var(--fbz-motion-base);
 
   :deep(.media-poster) {
     border-radius: 0;
   }
 
-  &::after {
-    position: absolute;
-    inset: auto 0 0;
-    z-index: 1;
-    height: 34%;
-    pointer-events: none;
-    content: "";
-    background: linear-gradient(
-      180deg,
-      var(--fbz-color-panel-transparent) 0%,
-      var(--fbz-color-panel) 100%
-    );
+  :deep(img) {
+    transition: transform var(--fbz-motion-slow) ease;
+    will-change: transform;
   }
 }
 
@@ -184,24 +187,25 @@ function onContextMenu(e: MouseEvent) {
   z-index: 3;
   left: 50%;
   top: 50%;
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   display: grid;
   place-content: center;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: color-mix(in srgb, var(--fbz-color-brand-500) 92%, transparent);
+  border: 0;
+  background: var(--fbz-color-brand-500);
   color: #07120a;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   opacity: 0;
-  transform: translate(-50%, -50%) scale(0.92);
+  transform: translate(-50%, -50%) scale(0.88);
   transition:
-    opacity var(--fbz-motion-fast),
-    transform var(--fbz-motion-fast),
+    opacity var(--fbz-motion-base),
+    transform var(--fbz-motion-base),
     background var(--fbz-motion-fast);
 
   &:hover {
     background: var(--fbz-color-brand-600);
+    transform: translate(-50%, -50%) scale(1.08);
   }
 }
 
@@ -215,10 +219,10 @@ function onContextMenu(e: MouseEvent) {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  color: var(--fbz-color-brand-500);
-  font-family: var(--fbz-font-display);
+  color: var(--fbz-color-amber-500);
   font-size: var(--fbz-font-size-xs);
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
 }
 
@@ -226,39 +230,32 @@ function onContextMenu(e: MouseEvent) {
   position: absolute;
   inset: auto 0 0 0;
   z-index: 2;
-  height: 3px;
-  background: rgba(255, 255, 255, 0.15);
+  height: 4px;
+  background: rgba(255, 255, 255, 0.18);
 
   span {
     display: block;
     height: 100%;
+    border-radius: 0 2px 2px 0;
     background: var(--fbz-color-brand-500);
   }
 }
 
 .footer {
-  position: relative;
-  margin-top: -14px;
-  padding: 18px 10px 10px;
-  background: linear-gradient(
-    180deg,
-    var(--fbz-color-panel-transparent) 0%,
-    var(--fbz-color-panel) 22%,
-    var(--fbz-color-bg-strong) 100%
-  );
+  padding: 10px 2px 2px;
 }
 
 .title {
-  margin: 0 0 3px;
-  font-family: var(--fbz-font-display);
+  margin: 0 0 2px;
   font-size: 14px;
-  font-weight: 700;
-  line-height: 1.3;
+  font-weight: 600;
+  line-height: 1.35;
   text-align: left;
-  letter-spacing: 0;
+  color: var(--fbz-color-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: color var(--fbz-motion-fast);
 }
 
 // 副标题 + 评分
@@ -271,9 +268,8 @@ function onContextMenu(e: MouseEvent) {
 
 .subtitle {
   font-size: var(--fbz-font-size-sm);
-  font-family: var(--fbz-font-display);
   color: var(--fbz-color-text-muted);
-  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -282,30 +278,20 @@ function onContextMenu(e: MouseEvent) {
 .res-badge {
   position: absolute;
   z-index: 2;
-  top: 6px;
-  right: 6px;
+  top: 8px;
+  right: 8px;
   flex: 0 0 auto;
-  padding: 2px 6px;
-  border-radius: 3px;
-  border: 1px solid rgb(255 255 255 / 14%);
-  background: rgb(0 0 0 / 62%);
-  color: rgb(255 255 255 / 82%);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 22%);
+  padding: 2px 7px;
+  border-radius: var(--fbz-radius-round);
+  border: 0;
+  background: rgb(0 0 0 / 66%);
+  color: rgb(255 255 255 / 88%);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  font-family: var(--fbz-font-display);
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0;
-  line-height: 1.5;
-}
-
-// 桌面沿用 HDHive 式紧凑媒体标题，不随容器过度放大
-@media (min-width: 768px) {
-  .title {
-    font-size: 14px;
-    font-weight: 700;
-  }
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  line-height: 1.6;
 }
 
 @media (hover: none) {

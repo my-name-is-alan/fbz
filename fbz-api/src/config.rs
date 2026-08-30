@@ -272,6 +272,14 @@ pub struct PluginConfig {
     pub host_api_max_calls_per_run: u32,
     pub secret_key: Option<String>,
     pub http_allowed_hosts: Vec<String>,
+    /// 同步调用（provider 查询）单次总预算，含并发排队等待。
+    pub sync_timeout_ms: u64,
+    /// 单插件同步调用并发预算。
+    pub sync_max_concurrency_per_plugin: u16,
+    /// 连续失败达到该阈值后打开熔断。
+    pub sync_circuit_failure_threshold: u32,
+    /// 熔断打开后的冷却窗口。
+    pub sync_circuit_cooldown_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -628,6 +636,22 @@ impl Config {
                     "127.0.0.1,localhost,::1,host.docker.internal",
                     &source,
                 ),
+                sync_timeout_ms: parse_or("PLUGIN_SYNC_TIMEOUT_MS", 10_000_u64, &source)?,
+                sync_max_concurrency_per_plugin: parse_or(
+                    "PLUGIN_SYNC_MAX_CONCURRENCY_PER_PLUGIN",
+                    4_u16,
+                    &source,
+                )?,
+                sync_circuit_failure_threshold: parse_or(
+                    "PLUGIN_SYNC_CIRCUIT_FAILURE_THRESHOLD",
+                    5_u32,
+                    &source,
+                )?,
+                sync_circuit_cooldown_seconds: parse_or(
+                    "PLUGIN_SYNC_CIRCUIT_COOLDOWN_SECONDS",
+                    60_u64,
+                    &source,
+                )?,
             },
             schedules: ScheduleConfig {
                 incremental_scan: get_or("SCHEDULE_INCREMENTAL_SCAN", "15m", &source),
@@ -902,6 +926,27 @@ impl Config {
         if self.plugins.timeout_ms == 0 {
             return Err(ConfigError::new(
                 "PLUGIN_TIMEOUT_MS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.plugins.sync_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "PLUGIN_SYNC_TIMEOUT_MS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.plugins.sync_max_concurrency_per_plugin == 0 {
+            return Err(ConfigError::new(
+                "PLUGIN_SYNC_MAX_CONCURRENCY_PER_PLUGIN",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.plugins.sync_circuit_failure_threshold == 0 {
+            return Err(ConfigError::new(
+                "PLUGIN_SYNC_CIRCUIT_FAILURE_THRESHOLD",
                 "must be greater than zero",
             ));
         }

@@ -216,7 +216,9 @@ impl MediaRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(|row| row.try_get::<i64, _>("id")).collect()
+        rows.into_iter()
+            .map(|row| row.try_get::<i64, _>("id"))
+            .collect()
     }
 
     /// 取内嵌附件流（字体等，stream_type='attachment'），带库权限过滤。
@@ -1199,7 +1201,10 @@ impl MediaRepository {
     /// 多版本合并（Emby `Videos/MergeVersions`）：把其余条目的媒体文件全部挂到
     /// 首个条目名下（成为该条目的备选版本），其余条目软删除、播放状态并入。
     /// 返回 None = 可解析条目不足两个。
-    pub async fn merge_video_versions(&self, item_ids: &[String]) -> Result<Option<u64>, sqlx::Error> {
+    pub async fn merge_video_versions(
+        &self,
+        item_ids: &[String],
+    ) -> Result<Option<u64>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
         let mut internal_ids = Vec::new();

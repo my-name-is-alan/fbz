@@ -301,10 +301,12 @@ async function backendDetail(
     return undefined;
   }
 
+  // 剧集（series）没有自己的媒体源，PlaybackInfo 必然 404（版本属于具体分集），
+  // 跳过请求避免每次进剧集详情页都产生一条控制台 404 噪音。
   const [imageTypes, similar, versions] = await Promise.all([
     fetchImageTypes(id),
     fetchSimilar(id),
-    fetchPlaybackVersions(id),
+    detailType === "movie" ? fetchPlaybackVersions(id) : Promise.resolve([]),
   ]);
 
   const runtimeSeconds = ticksToSeconds(item.RunTimeTicks);

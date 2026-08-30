@@ -16,8 +16,7 @@ use axum::{
 use serde_json::json;
 
 use crate::{
-    auth::repository::AuthRepository, error::AppError, realtime::SessionMessageHub,
-    state::AppState,
+    auth::repository::AuthRepository, error::AppError, realtime::SessionMessageHub, state::AppState,
 };
 
 use super::access::{access_token_from_request, authenticate_request_user};
@@ -63,7 +62,11 @@ async fn handle_session_socket(mut socket: WebSocket, state: AppState, session_i
         "Data": FORCE_KEEP_ALIVE_SECONDS,
     })
     .to_string();
-    if socket.send(Message::Text(force_keep_alive.into())).await.is_err() {
+    if socket
+        .send(Message::Text(force_keep_alive.into()))
+        .await
+        .is_err()
+    {
         state.session_hub().unregister(&session_id, generation);
         return;
     }

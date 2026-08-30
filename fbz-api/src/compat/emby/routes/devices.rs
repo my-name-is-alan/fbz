@@ -458,7 +458,9 @@ fn sanitize_camera_path_segment(value: &str) -> Result<String, AppError> {
     if value.chars().any(|ch| {
         ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
     }) {
-        return Err(AppError::unprocessable("path segment contains invalid characters"));
+        return Err(AppError::unprocessable(
+            "path segment contains invalid characters",
+        ));
     }
 
     Ok(value.to_owned())

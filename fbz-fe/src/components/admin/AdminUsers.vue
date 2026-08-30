@@ -5,8 +5,6 @@ const router = useRouter();
 const authStore = useAuthStore();
 
 // 列表内头像的缓存键：进页面时固定一次即可（他人头像不在本会话内频繁变动）。
-const avatarCacheKey = Date.now();
-
 // 进入用户管理页时从后端拉取真实用户列表。
 onMounted(() => {
   authStore.loadUsers();
@@ -49,7 +47,7 @@ function formatLastLogin(value: string | null): string {
           <BaseAvatar
             :user-id="user.id"
             :name="user.displayName || user.username"
-            :version="avatarCacheKey"
+            :version="user.avatarVersion"
             :size="44"
             :class="{ 'is-disabled': !user.active }"
           />

@@ -192,7 +192,10 @@ pub async fn update_system_configuration_partial(
 }
 
 fn named_configuration_setting_key(key: &str) -> String {
-    format!("{EMBY_CONFIGURATION_SETTING_KEY}.{}", key.to_ascii_lowercase())
+    format!(
+        "{EMBY_CONFIGURATION_SETTING_KEY}.{}",
+        key.to_ascii_lowercase()
+    )
 }
 
 fn parse_configuration_object(body: &Bytes) -> Result<Value, AppError> {

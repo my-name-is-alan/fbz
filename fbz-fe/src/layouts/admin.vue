@@ -901,10 +901,6 @@ useEventListener(window, "keydown", (e) => {
   flex: 1;
   padding: var(--fbz-space-5);
   overflow-y: auto;
-
-  :deep(.account-view) {
-    padding: 0 0 80px 0;
-  }
 }
 
 // ───── Mobile Layouts ─────

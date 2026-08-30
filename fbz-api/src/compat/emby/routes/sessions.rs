@@ -757,7 +757,10 @@ fn canonical_playstate_command(command: &str) -> Result<&'static str, AppError> 
         .ok_or_else(|| AppError::unprocessable("playstate command is not supported"))
 }
 
-fn session_record_to_dto(record: SessionInfoRecord, supports_remote_control: bool) -> SessionInfoDto {
+fn session_record_to_dto(
+    record: SessionInfoRecord,
+    supports_remote_control: bool,
+) -> SessionInfoDto {
     SessionInfoDto {
         id: record.id,
         user_id: record.user_id,
