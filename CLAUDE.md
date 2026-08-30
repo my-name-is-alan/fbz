@@ -127,7 +127,7 @@ Auto-imports cover Vue / Vue Router / Pinia / `@vueuse/core` and a curated set o
 
 - Strict TypeScript; `import type` for types; no `enum`/`namespace`; `@/*` alias.
 - All SFC styles must be `<style lang="scss">`; never add a `.css` file under `src/`.
-- Single brand color `--fbz-color-brand-500: #1ed760` on a `#0a0a0b` background; no gradients/multicolor decoration. Resolution badges in `tmdb.ts:resolutionColors` are the documented exception.
+- Single brand color `--fbz-color-brand-500: #1ed760` on a layered near-black `#0e0f13` background; no decorative gradients/multicolor. Media cards use token radius 10px / control 8px. Resolution badges may use functional colors; the rest of the UI stays brand-green + grayscale.
 - Use `MediaCard` for all media tiles, `BaseScroller` for all horizontal rows, `BaseSelect` for all dropdowns (never native `<select>`), `MediaPoster` for posters.
 - Responsive breakpoints: desktop ≥1024, tablet 600–1024, phone <600.
 - Detail routes by type: `/movie/:id`, `/tv/:id`, `/person/:id`, `/collection/:id`. `libraryId` (movie/series/anime/documentary) and `detailType` (movie/tv) are decoupled.
