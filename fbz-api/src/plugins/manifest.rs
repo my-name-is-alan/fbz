@@ -20,6 +20,7 @@ const MAX_CONFIG_OPTIONS: usize = 64;
 
 const SUPPORTED_PERMISSIONS: &[&str] = &[
     "admin.menu",
+    "storage.provider",
     "library.read",
     "library.write",
     "media.read",
@@ -73,6 +74,14 @@ pub struct PluginManifest {
     pub menu: Vec<PluginMenuItemManifest>,
     #[serde(default, rename = "configSchema")]
     pub config_schema: Vec<PluginConfigFieldManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "adminUi")]
+    pub admin_ui: Option<PluginAdminUiManifest>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "storageProvider"
+    )]
+    pub storage_provider: Option<PluginStorageProviderManifest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -141,6 +150,27 @@ pub struct PluginConfigOptionManifest {
     pub label: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStorageProviderManifest {
+    pub handler: String,
+}
+
+/// An optional isolated HTML page bundled in the approved package.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAdminUiManifest {
+    pub path: String,
+    #[serde(default)]
+    pub actions: Vec<PluginAdminActionManifest>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAdminActionManifest {
+    pub key: String,
+    pub handler: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedPluginManifest {
     pub manifest: PluginManifest,
@@ -203,6 +233,61 @@ impl PluginManifest {
         }
         validate_menu_items(&self.menu, &self.permissions)?;
         validate_config_schema(&self.config_schema)?;
+        if let Some(provider) = &self.storage_provider {
+            if self.runtime != "http" || !has_permission(&self.permissions, "storage.provider") {
+                return Err(invalid_field(
+                    "storageProvider",
+                    "requires HTTP runtime and storage.provider permission",
+                ));
+            }
+            validate_handler("storageProvider.handler", &provider.handler)?;
+        }
+        if self.storage_provider.is_some() && self.admin_ui.is_none() {
+            return Err(invalid_field(
+                "storageProvider",
+                "requires adminUi for account management",
+            ));
+        }
+        if let Some(ui) = &self.admin_ui {
+            if self.runtime != "http" {
+                return Err(invalid_field("adminUi", "requires HTTP runtime"));
+            }
+            if self.menu.is_empty() || !has_permission(&self.permissions, "admin.menu") {
+                return Err(invalid_field(
+                    "adminUi",
+                    "requires an approved admin.menu entry",
+                ));
+            }
+            validate_relative_entrypoint(&ui.path)?;
+            if !ui.path.starts_with("ui/")
+                || !ui.path.ends_with(".html")
+                || ui.path.contains('\\')
+                || ui
+                    .path
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err(invalid_field(
+                    "adminUi.path",
+                    "must be a ui/*.html package path",
+                ));
+            }
+            validate_count("adminUi.actions", ui.actions.len(), 32)?;
+            let mut keys = BTreeSet::new();
+            for action in &ui.actions {
+                validate_handler("adminUi.actions.key", &action.key)?;
+                validate_handler("adminUi.actions.handler", &action.handler)?;
+                if action.handler.starts_with("storage.") && self.storage_provider.is_none() {
+                    return Err(invalid_field(
+                        "adminUi.actions.handler",
+                        "storage.connect requires storageProvider",
+                    ));
+                }
+                if !keys.insert(action.key.as_str()) {
+                    return Err(invalid_field("adminUi.actions.key", "must be unique"));
+                }
+            }
+        }
 
         if !self.menu.is_empty() && !has_permission(&self.permissions, "admin.menu") {
             return Err(PluginManifestError::MissingPermission {
@@ -710,6 +795,34 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn storage_package_declares_isolated_page_and_provider() {
+        let manifest: PluginManifest =
+            serde_json::from_str(include_str!("../../plugins/guangya-storage/manifest.json"))
+                .unwrap();
+        assert!(manifest.validate().is_ok());
+    }
+    #[test]
+    fn isolated_page_rejects_traversal_and_missing_permission() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../plugins/guangya-storage/manifest.json"))
+                .unwrap();
+        value["adminUi"]["path"] = serde_json::json!("ui/../secret.html");
+        assert!(
+            serde_json::from_value::<PluginManifest>(value.clone())
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        value["adminUi"]["path"] = serde_json::json!("ui/index.html");
+        value["permissions"] = serde_json::json!([{"key":"admin.menu"}]);
+        assert!(
+            serde_json::from_value::<PluginManifest>(value)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
     #[test]
     fn valid_manifest_is_accepted_and_fingerprinted() {
         let manifest: PluginManifest = serde_json::from_value(json!({

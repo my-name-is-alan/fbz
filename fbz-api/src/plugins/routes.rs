@@ -60,6 +60,7 @@ const UPLOAD_SUBDIR: &str = "uploads";
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(super::admin_ui::router())
         .route("/api/admin/plugins", get(list_plugins))
         .route("/api/admin/plugins/capabilities", get(admin_capabilities))
         .route("/api/admin/plugins/menu-items", get(list_menu_items))
@@ -1728,6 +1729,14 @@ fn validate_and_extract_plugin_zip(
     }
 
     let manifest = read_plugin_manifest_from_zip(&mut archive)?;
+    if let Some(ui) = &expected_manifest.admin_ui {
+        let entry = archive.by_name(&ui.path).map_err(|_| {
+            AppError::unprocessable("plugin adminUi.path is missing from the package")
+        })?;
+        if entry.size() > 512 * 1024 {
+            return Err(AppError::unprocessable("plugin UI exceeds 512 KiB"));
+        }
+    }
     if &manifest != expected_manifest {
         return Err(AppError::unprocessable(
             "plugin package manifest.json must match request manifest",

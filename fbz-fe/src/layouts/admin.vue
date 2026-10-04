@@ -13,14 +13,18 @@ const mobileMenuOpen = ref(false);
 // 已启用插件声明的后台菜单项（admin.menu 权限），渲染为独立导航分组。
 const pluginMenuItems = ref<PluginMenuItem[]>([]);
 
-onMounted(async () => {
+async function refreshPluginMenu() {
   try {
     pluginMenuItems.value = await listPluginMenuItems();
   } catch {
-    // 菜单加载失败不阻塞后台使用（如无管理员权限或后端不可用）。
     pluginMenuItems.value = [];
   }
+}
+onMounted(() => {
+  void refreshPluginMenu();
+  window.addEventListener("fbz:plugin-lifecycle", refreshPluginMenu);
 });
+onBeforeUnmount(() => window.removeEventListener("fbz:plugin-lifecycle", refreshPluginMenu));
 
 /** 插件菜单顶层项（parentKey 为空），按插件名和 weight 稳定排序。 */
 const pluginNavItems = computed(() =>

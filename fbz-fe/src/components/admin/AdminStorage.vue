@@ -7,6 +7,7 @@ interface Account {
   name: string;
   status: string;
   qps: number;
+  provider?: string;
   cloudUserId?: string;
 }
 interface Mount {
@@ -34,6 +35,10 @@ interface Login {
   interval: number;
   expiresIn: number;
 }
+const props = withDefaults(defineProps<{ providerId?: string; providerName?: string }>(), {
+  providerId: "guangya",
+  providerName: "光鸭",
+});
 const accounts = ref<Account[]>([]);
 const mounts = ref<Mount[]>([]);
 const configured = ref(true);
@@ -108,10 +113,14 @@ async function refresh() {
       accounts: Account[];
       mounts: Mount[];
       configured: boolean;
+      encryptionConfigured: boolean;
     }>("/api/admin/storage");
-    accounts.value = result.accounts;
-    mounts.value = result.mounts;
-    configured.value = result.configured;
+    accounts.value = result.accounts.filter(
+      (a) => a.provider === props.providerId || (props.providerId === "guangya" && !a.provider),
+    );
+    mounts.value = result.mounts.filter((m) => accounts.value.some((a) => a.id === m.accountId));
+    configured.value =
+      props.providerId === "guangya" ? result.configured : result.encryptionConfigured;
     initialized.value = true;
   } catch (err) {
     error.value = message(err);
@@ -181,6 +190,7 @@ async function addAccount() {
     const result = await serverRequest<{ id: string }>("/api/admin/storage/accounts", {
       name: accountName.value.trim(),
       qps: qps.value,
+      providerId: props.providerId,
     });
     id = result.id;
     accountName.value = "";
@@ -286,7 +296,7 @@ useIntervalFn(() => {
 <template>
   <section class="storage-panel">
     <p v-if="!configured" class="warning">
-      尚未配置服务器凭据加密和插件通信密钥。请按部署文档启动光鸭插件后再添加账号。
+      尚未配置服务器凭据加密或插件通信密钥。请检查部署配置后再添加账号。
     </p>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-if="notice" role="status" class="notice">{{ notice }}</p>
@@ -328,7 +338,7 @@ useIntervalFn(() => {
     </div>
     <BaseModal
       :open="addingAccount"
-      title="连接光鸭账号"
+      :title="`连接${props.providerName}账号`"
       description="凭据由服务器加密保存，不需要提供账号密码。"
       @close="addingAccount = false"
       ><p v-if="error" class="du-alert du-alert-error">{{ error }}</p>
@@ -355,7 +365,7 @@ useIntervalFn(() => {
     <BaseEmptyState
       v-if="initialized && !accounts.length"
       icon="cloud"
-      title="连接你的第一个光鸭账号"
+      :title="`连接你的第一个${props.providerName}账号`"
       description="扫码登录后，选择已刮削的目录即可挂载。"
     />
     <BaseModal :open="!!editingAccount" title="账号设置" @close="editingAccount = undefined"
@@ -381,7 +391,7 @@ useIntervalFn(() => {
         <div>
           <strong>{{ account.name }}</strong>
           <p>
-            光鸭网盘
+            {{ props.providerName }}
             <span class="account-status" :class="{ connected: account.status === 'ready' }">{{
               labels[account.status] ?? account.status
             }}</span>
@@ -410,13 +420,13 @@ useIntervalFn(() => {
         </button>
       </div>
     </article>
-    <BaseModal :open="!!login" title="扫码连接光鸭" @close="cancelLogin"
+    <BaseModal :open="!!login" :title="`扫码连接${props.providerName}`" @close="cancelLogin"
       ><p v-if="error" class="du-alert du-alert-error">{{ error }}</p>
-      <section v-if="login" class="login-panel" aria-label="扫码连接光鸭">
-        <img :src="qr" alt="使用光鸭客户端扫描此二维码登录" />
+      <section v-if="login" class="login-panel" :aria-label="`扫码连接${props.providerName}`">
+        <img :src="qr" :alt="`使用${props.providerName}客户端扫描此二维码登录`" />
         <div>
-          <h3>使用光鸭扫码授权</h3>
-          <p>请在光鸭客户端确认登录。二维码剩余 {{ remaining }} 秒。</p>
+          <h3>使用 {{ props.providerName }} 扫码授权</h3>
+          <p>请在 {{ props.providerName }} 客户端确认登录。二维码剩余 {{ remaining }} 秒。</p>
           <p v-if="login.userCode">授权码：{{ login.userCode }}</p>
           <a :href="login.url" target="_blank" rel="noopener noreferrer">打开官方授权页面 ↗</a
           ><button class="du-btn du-btn-sm" @click="cancelLogin">关闭二维码</button>
@@ -479,7 +489,7 @@ useIntervalFn(() => {
               v-model="libraryName"
               required
               maxlength="120"
-              placeholder="例如：光鸭电影" /></label
+              placeholder="例如：云盘电影" /></label
           ><label
             >FBZ 挂载地址<input
               class="du-input"
@@ -543,7 +553,7 @@ useIntervalFn(() => {
     </article>
     <BaseModal
       :open="!!disconnectTarget"
-      title="断开光鸭连接？"
+      :title="`断开${props.providerName}连接？`"
       description="媒体索引会保留；继续访问云端文件时需要重新扫码。"
       @close="disconnectTarget = undefined"
       ><template #actions

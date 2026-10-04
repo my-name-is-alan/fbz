@@ -1,0 +1,9 @@
+{
+  "id":"org.fbz.guangya","name":"光鸭网盘","version":"0.1.0","apiVersion":"1",
+  "runtime":"http","entrypoint":"http://127.0.0.1:8098/fbz-plugin",
+  "description":"读取光鸭已刮削目录作为只读媒体来源。",
+  "permissions":[{"key":"admin.menu","reason":"在后台显示账号和挂载管理页"},{"key":"storage.provider","reason":"按需读取目录与播放地址"}],
+  "menu":[{"key":"org.fbz.guangya.cloud","label":"光鸭网盘","path":"/admin/plugins/org.fbz.guangya/cloud","requiredPermission":"admin.menu"}],
+  "adminUi":{"path":"ui/index.html","actions":[{"key":"status","handler":"admin.status"}]},
+  "storageProvider":{"handler":"storage.rpc"}
+}

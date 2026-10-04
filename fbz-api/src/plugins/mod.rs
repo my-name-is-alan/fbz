@@ -1,3 +1,4 @@
+pub mod admin_ui;
 pub mod execution;
 pub mod hooks;
 pub mod host;

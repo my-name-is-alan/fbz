@@ -283,3 +283,22 @@ Plugins must not:
 2. Add WASIp2/component support and native Host API imports.
 3. Add stronger stale temp-dir scavenging for interrupted WASI runs.
 4. Expand hook coverage as new Emby-compatible domains land.
+## 可安装的后台页面与存储源
+
+插件包现在可以在 `manifest.json` 声明 `adminUi` 和 `storageProvider`。这两项均属于现有 `apiVersion: "1"` 的可选扩展；旧包省略字段时，序列化哈希保持原样。光鸭包的清单与页面在 `plugins/guangya-storage/manifest.json`、`ui/index.html`。
+
+- `menu` 声明后台侧边栏入口，仍限制在 `/admin/plugins/{id}` 下；启用、审批和所需权限决定入口是否可见。
+- `adminUi.path` 必须指向包内 `ui/*.html`，最大 512 KiB。页面在没有同源权限的 sandbox iframe 中运行，CSP 不允许网络请求、表单提交或加载外部脚本。宿主不把管理员令牌交给插件页面。
+- `adminUi.actions` 显式列出动作 key 与 HTTP handler。页面使用 `parent.postMessage({type:'fbz-plugin-action',id,action,payload},'*')`；宿主核对 iframe 来源与 key，再用管理员鉴权调用受控动作端点。结果以 `{type:'fbz-plugin-result',id,result}` 返回。宿主不转发任意 URL，服务端再次核查当前包已批准且启用、动作属于该包，并使用既有签名、目标主机 allowlist、超时、并发预算和审计。
+- `storageProvider.handler` 要求 `storage.provider` 权限和 HTTP runtime。账号由 FBZ 加密保存，provider ID 指向当前已批准且启用的插件。宿主按账号限速，将 `auth.start` / `auth.poll` / `list` / `resolve` / `read` 请求交给插件；插件按原有响应契约返回数据与轮换后的凭据。媒体库权限、索引与进度仍由 FBZ 控制，禁用插件会停止新的 provider 请求。支持相同设备扫码协议的其他网盘无需修改核心代码。`adminUi.actions` 可以声明 `storage.accounts`、`storage.createAccount`、`storage.connect` 三个宿主动作，供非扫码方式的插件页面列出和创建本插件账号、提交自定义登录字段。宿主仅处理属于当前 provider 的 accountId，并加密保存插件返回的 credentials。
+
+### 光鸭包使用
+
+1. 在 API 与光鸭进程中设置相同的 `PLUGIN_SECRET_KEY`，API 的 `PLUGIN_HTTP_ALLOWED_HOSTS` 放行插件主机。保留 `FBZ_SECRET_KEY` 以解密已有账号；旧直连方式所需 `FBZ_STORAGE_PLUGIN_KEY` 可在完成旧账号接管后移除。
+2. 启动光鸭 Node 进程。运行 `./scripts/package-plugin.ps1 -PluginDir plugins/guangya-storage` 生成 ZIP，再通过插件市场或手动上传、审核、启用。生产安装仍遵守签名策略，不能因为是官方示例而跳过审批。
+3. 启用后侧边栏出现「光鸭网盘」。如已有旧账号，在插件页点击「接管旧账号」；宿主先验证新插件进程签名及就绪，再只更新账号的 provider 标识，保留密文、媒体库、条目和观看进度。新账号从插件页添加。
+4. 禁用或卸载插件不会删除账号、媒体库或观看历史。已签发的 CDN 直链在自身过期前可能仍可用，属于外部 CDN 的实际边界。
+
+当前页面 SDK 支持单个包内 HTML 文件与消息桥接，没有直接开放 Vue 组件或任意宿主 DOM 操作。存储宿主 UI 的扫码流程采用设备授权协议；不支持该协议的 provider 应通过 `storage.connect` 动作提供自己的登录表单。
+
+外部 HTTP 服务可单独部署；包清单的本机地址可由 `FBZ_PLUGIN_HTTP_ENDPOINT_OVERRIDES` 覆盖为容器内网地址，例如 `{"org.fbz.guangya":"http://guangya-storage:8098/fbz-plugin"}`，仍需将对应主机加入 `PLUGIN_HTTP_ALLOWED_HOSTS`。宿主不会因为安装 ZIP 自动执行其中的 Node 程序。
