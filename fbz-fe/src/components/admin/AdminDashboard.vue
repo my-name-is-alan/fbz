@@ -66,7 +66,7 @@ useIntervalFn(refresh, 5000);
   <section class="dashboard">
     <header class="server-header">
       <div>
-        <p class="eyebrow">你的私人媒体服务器</p>
+        <p class="eyebrow">服务器概览</p>
         <h1>FBZ Server</h1>
       </div>
       <div class="server-state">
@@ -499,5 +499,31 @@ footer {
   footer {
     flex-direction: column;
   }
+}
+
+.server-header {
+  padding: 0 0 28px;
+}
+h1 {
+  font-size: 24px;
+}
+.metrics {
+  padding-block: 26px;
+}
+.metrics dd {
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+}
+.section-head h2 {
+  font-size: 23px;
+  font-weight: 550;
+}
+.session-card {
+  border-radius: 10px;
+  padding: 22px;
+}
+.empty-playback {
+  min-height: 150px;
+  border-radius: 10px;
 }
 </style>

@@ -13,7 +13,9 @@ interface Mount {
   id: string;
   name: string;
   accountId: string;
-  libraryId: string;
+  libraryId: string | null;
+  mountPath: string;
+  refreshMinutes: number;
   path: string;
   status: string;
   scanned: number;
@@ -35,6 +37,7 @@ interface Login {
 const accounts = ref<Account[]>([]);
 const mounts = ref<Mount[]>([]);
 const configured = ref(true);
+const initialized = ref(false);
 const busy = ref(false);
 const error = ref("");
 const notice = ref("");
@@ -42,7 +45,7 @@ const accountName = ref("");
 const addingAccount = ref(false);
 const choosingDirectory = ref(false);
 const disconnectTarget = ref<Account>();
-const qps = ref(1);
+const qps = ref(10);
 const selected = ref("");
 const login = ref<Login>();
 const qr = ref("");
@@ -54,7 +57,32 @@ const entries = ref<Entry[]>([]);
 const nextPage = ref<number | null>(null);
 const directoryLoaded = ref(false);
 const libraryName = ref("");
-const libraryType = ref("movies");
+const mountPath = ref("/cloud/");
+const refreshMinutes = ref(60);
+const editingAccount = ref<Account>();
+const editName = ref("");
+const editQps = ref(10);
+function editAccount(account: Account) {
+  editingAccount.value = account;
+  editName.value = account.name;
+  editQps.value = account.qps;
+}
+async function saveAccount() {
+  if (!editingAccount.value) return;
+  busy.value = true;
+  try {
+    await serverRequest(`/api/admin/storage/accounts/${editingAccount.value.id}/settings`, {
+      name: editName.value,
+      qps: editQps.value,
+    });
+    editingAccount.value = undefined;
+    await refresh();
+  } catch (e) {
+    error.value = message(e);
+  } finally {
+    busy.value = false;
+  }
+}
 const library = useLibraryStore();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let generation = 0;
@@ -84,6 +112,7 @@ async function refresh() {
     accounts.value = result.accounts;
     mounts.value = result.mounts;
     configured.value = result.configured;
+    initialized.value = true;
   } catch (err) {
     error.value = message(err);
   }
@@ -212,25 +241,14 @@ async function mountDirectory() {
           .slice(1)
           .map((p) => p.name)
           .join("/"),
-      libraryType: libraryType.value,
+      mountPath: mountPath.value.trim(),
+      refreshMinutes: refreshMinutes.value,
     });
-    notice.value = "云端媒体库已创建，点击开始扫描导入 NFO 和图片。";
+    notice.value = "目录已挂载。请到媒体库页面添加媒体库并选择此挂载地址。";
     choosingDirectory.value = false;
     libraryName.value = "";
     await refresh();
     await library.refresh();
-  } catch (err) {
-    error.value = message(err);
-  } finally {
-    busy.value = false;
-  }
-}
-async function scan(mount: Mount) {
-  busy.value = true;
-  error.value = "";
-  try {
-    await serverRequest(`/api/admin/storage/mounts/${mount.id}/scan`, {});
-    await refresh();
   } catch (err) {
     error.value = message(err);
   } finally {
@@ -272,9 +290,32 @@ useIntervalFn(() => {
     </p>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-if="notice" role="status" class="notice">{{ notice }}</p>
+    <p v-if="!initialized && !error" role="status" class="hint">正在读取账号与挂载目录…</p>
+    <div v-if="initialized" class="storage-summary" aria-label="挂载概览">
+      <div>
+        <span>已连接账号</span
+        ><strong
+          >{{ accounts.filter((a) => a.status === "ready").length
+          }}<small> / {{ accounts.length }}</small></strong
+        >
+      </div>
+      <div>
+        <span>挂载目录</span><strong>{{ mounts.length }}</strong>
+      </div>
+      <div>
+        <span>已导入视频</span
+        ><strong>{{ mounts.reduce((total, mount) => total + mount.imported, 0) }}</strong>
+      </div>
+      <div>
+        <span>读取方式</span
+        ><strong class="summary-mode"><BaseIcon name="cloud" :size="17" />云端直读</strong>
+      </div>
+    </div>
     <div class="section-head">
       <div>
-        <h2>光鸭账号</h2>
+        <h2>
+          连接账号 <span class="count">{{ accounts.length }}</span>
+        </h2>
         <p>扫码授权，无需提供密码。每个账号独立保存登录状态。</p>
       </div>
       <button
@@ -305,19 +346,51 @@ useIntervalFn(() => {
             v-model.number="qps"
             type="number"
             min="1"
-            max="5" /></label
+            max="20" /></label
         ><button class="du-btn du-btn-sm du-btn-primary primary" :disabled="busy || !configured">
           添加账号并扫码
         </button>
       </form></BaseModal
     >
-    <p class="hint">默认 1 QPS。播放与目录请求共享额度，遇到限流会冷却；这不是光鸭官方限额。</p>
+    <BaseEmptyState
+      v-if="initialized && !accounts.length"
+      icon="cloud"
+      title="连接你的第一个光鸭账号"
+      description="扫码登录后，选择已刮削的目录即可挂载。"
+    />
+    <BaseModal :open="!!editingAccount" title="账号设置" @close="editingAccount = undefined"
+      ><p v-if="error" class="du-alert du-alert-error">{{ error }}</p>
+      <form class="account-form" @submit.prevent="saveAccount">
+        <label>账号备注<input class="du-input" v-model="editName" required maxlength="120" /></label
+        ><label
+          >QPS 上限<input
+            class="du-input"
+            type="number"
+            v-model.number="editQps"
+            min="1"
+            max="20"
+            required
+        /></label>
+        <p class="hint">默认 10，最高 20。当前账号串行请求，限流时自动退避。</p>
+        <button class="du-btn du-btn-primary primary" :disabled="busy">保存设置</button>
+      </form></BaseModal
+    >
     <article v-for="account in accounts" :key="account.id" class="account-row">
-      <div>
-        <strong>{{ account.name }}</strong>
-        <p>{{ labels[account.status] ?? account.status }} · {{ account.qps }} QPS</p>
+      <div class="account-identity">
+        <span class="provider-icon"><BaseIcon name="cloud" :size="24" /></span>
+        <div>
+          <strong>{{ account.name }}</strong>
+          <p>
+            光鸭网盘
+            <span class="account-status" :class="{ connected: account.status === 'ready' }">{{
+              labels[account.status] ?? account.status
+            }}</span>
+          </p>
+        </div>
       </div>
+      <span class="account-quota">{{ account.qps }} <small>请求 / 秒</small></span>
       <div class="actions">
+        <button class="du-btn du-btn-sm" @click="editAccount(account)">设置</button>
         <button
           class="du-btn du-btn-sm"
           v-if="account.status === 'ready'"
@@ -401,40 +474,55 @@ useIntervalFn(() => {
         </div>
         <form class="mount-form" @submit.prevent="mountDirectory">
           <label
-            >媒体库名称<input
+            >挂载名称<input
               class="du-input"
               v-model="libraryName"
               required
               maxlength="120"
               placeholder="例如：光鸭电影" /></label
           ><label
-            >内容类型<BaseSelect
-              v-model="libraryType"
-              :options="[
-                { label: '电影', value: 'movies' },
-                { label: '剧集', value: 'tv' },
-              ]" /></label
-          ><button
+            >FBZ 挂载地址<input
+              class="du-input"
+              v-model="mountPath"
+              placeholder="/cloud/movies"
+              required
+          /></label>
+          <label
+            >自动刷新周期（分钟，0 为手动）<input
+              class="du-input"
+              type="number"
+              min="0"
+              max="10080"
+              v-model.number="refreshMinutes"
+              required
+          /></label>
+          <button
             class="du-btn du-btn-sm du-btn-primary primary"
             :disabled="busy || !directoryLoaded || !libraryName.trim()"
           >
             挂载当前目录
           </button>
         </form>
-        <p class="hint">使用目录中已有 NFO、海报和字幕，不重新刮削、不修改云端文件。</p>
+        <p class="hint">挂载地址是 FBZ 内部虚拟路径，不会创建媒体库或修改云端文件。</p>
       </section></BaseModal
     >
     <div class="section-head mounts-heading">
       <div>
-        <h2>已挂载目录</h2>
+        <h2>
+          挂载目录 <span class="count">{{ mounts.length }}</span>
+        </h2>
         <p>扫描断点自动保存；失败时保留原媒体库，修复问题后继续。</p>
       </div>
     </div>
-    <p v-if="!mounts.length" class="hint">还没有云端媒体库。连接账号并选择一个目录开始。</p>
+    <p v-if="initialized && !mounts.length" class="hint">
+      还没有挂载目录。连接账号后选择目录，设置虚拟挂载地址。
+    </p>
     <article v-for="mount in mounts" :key="mount.id" class="mount-row">
       <div>
-        <h3>{{ mount.name }}</h3>
+        <h3><BaseIcon name="folder" :size="20" />{{ mount.name }}</h3>
         <p>{{ mount.path }}</p>
+        <p>挂载地址：{{ mount.mountPath }}</p>
+        <p>{{ mount.refreshMinutes ? `每 ${mount.refreshMinutes} 分钟刷新` : "手动刷新" }}</p>
         <p>
           {{
             mount.status === "idle"
@@ -448,14 +536,9 @@ useIntervalFn(() => {
         <p v-if="mount.lastError" class="error">{{ mount.lastError }}</p>
       </div>
       <div class="actions">
-        <RouterLink :to="`/library/${mount.libraryId}`">浏览媒体库 →</RouterLink
-        ><button
-          class="du-btn du-btn-sm"
-          :disabled="busy || ['scanning', 'importing'].includes(mount.status)"
-          @click="scan(mount)"
-        >
-          {{ mount.status === "failed" ? "继续扫描" : "开始扫描" }}
-        </button>
+        <RouterLink class="browse-link" to="/admin/libraries">{{
+          mount.libraryId ? "管理关联媒体库 →" : "添加媒体库 →"
+        }}</RouterLink>
       </div>
     </article>
     <BaseModal
@@ -544,8 +627,8 @@ button:hover:not(:disabled) {
   border-color: var(--fbz-color-text-muted);
 }
 .primary {
-  background: var(--fbz-color-brand-500);
-  color: #07120a;
+  background: var(--fbz-color-text);
+  color: var(--fbz-color-bg);
   font-weight: 600;
   border-color: transparent;
 }
@@ -699,5 +782,166 @@ a:hover {
 .directory-panel .entries {
   max-height: 35dvh;
   overflow: auto;
+}
+
+.storage-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 24px;
+  padding: 0 0 30px;
+  margin-bottom: 32px;
+  border-bottom: 1px solid var(--fbz-color-line-soft);
+}
+.storage-summary > div {
+  display: grid;
+  gap: 12px;
+}
+.storage-summary span {
+  color: var(--fbz-color-text-muted);
+  font-size: 13px;
+}
+.storage-summary strong {
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.storage-summary small {
+  font-size: 14px;
+  color: var(--fbz-color-text-muted);
+  font-weight: 400;
+}
+.storage-summary .summary-mode {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 15px;
+}
+h2 {
+  font-size: 19px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.count {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--fbz-color-panel-strong);
+  color: var(--fbz-color-text-muted);
+}
+.section-head {
+  margin-bottom: 20px;
+}
+.section-head p {
+  font-size: 13px;
+}
+.account-row {
+  padding: 22px;
+  background: var(--fbz-color-panel);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  gap: 18px;
+}
+.account-identity {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+}
+.account-identity strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+.provider-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border: 1px solid var(--fbz-color-line);
+  border-radius: 12px;
+  color: var(--fbz-color-text-soft);
+}
+.account-status {
+  margin-left: 10px;
+  font-size: 12px;
+}
+.account-status.connected {
+  color: color-mix(in srgb, var(--fbz-color-brand-500) 65%, var(--fbz-color-text));
+}
+.account-status:before {
+  content: "•";
+  margin-right: 5px;
+}
+.account-quota {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.account-quota small {
+  color: var(--fbz-color-text-muted);
+}
+.actions {
+  gap: 8px;
+}
+.actions .du-btn {
+  font-size: 12px;
+  padding: 0 12px;
+  min-height: 34px;
+  height: 34px;
+}
+.mounts-heading {
+  margin-top: 40px;
+}
+.mount-row {
+  padding: 22px 4px;
+}
+.mount-row h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+}
+.mount-row h3 svg {
+  color: var(--fbz-color-text-muted);
+}
+.mount-row p {
+  font-size: 12px;
+}
+.browse-link {
+  font-size: 12px;
+  padding: 8px;
+}
+@media (max-width: 1100px) {
+  .account-row {
+    flex-wrap: wrap;
+  }
+  .account-row .actions {
+    width: 100%;
+    padding-left: 60px;
+  }
+}
+@media (max-width: 650px) {
+  .storage-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 24px;
+  }
+  .account-row .actions {
+    padding-left: 0;
+  }
+  .account-row {
+    padding: 18px;
+  }
+  .section-head {
+    gap: 14px;
+    align-items: flex-start;
+  }
+  .section-head .du-btn {
+    flex-shrink: 0;
+  }
+  .mount-form {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

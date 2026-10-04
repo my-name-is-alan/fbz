@@ -7,7 +7,6 @@ const groups = [
     items: [
       { label: "仪表盘", to: "/admin", name: "admin-dashboard", icon: "home" },
       { label: "媒体库", to: "/admin/libraries", name: "admin-libraries", icon: "library" },
-      { label: "云盘挂载", to: "/admin/storage", name: "admin-storage", icon: "cloud" },
       { label: "插件", to: "/admin/plugins", name: "admin-plugins", icon: "grid" },
       { label: "用户与权限", to: "/admin/users", name: "admin-users", icon: "user" },
     ],
@@ -49,7 +48,7 @@ function active(name: string) {
       <aside class="admin-sidebar">
         <div class="console-identity">
           <span><BaseIcon name="settings" :size="21" /></span>
-          <div><strong>FBZ 控制台</strong><small>管理你的媒体空间</small></div>
+          <div><strong>FBZ 控制台</strong><small>服务器管理</small></div>
         </div>
         <nav aria-label="后台管理导航">
           <div v-for="group in groups" :key="group.label" class="navigation-group">
@@ -98,12 +97,12 @@ function active(name: string) {
   color: var(--fbz-color-text);
 }
 .admin-frame {
-  max-width: 1520px;
+  max-width: 1700px;
   margin: auto;
   display: grid;
-  grid-template-columns: 230px minmax(0, 1fr);
-  gap: 50px;
-  padding: calc(var(--header-h) + 36px) 4.5vw 70px;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 64px;
+  padding: calc(var(--header-h) + 48px) 4.5vw 70px;
 }
 .admin-sidebar {
   position: sticky;
@@ -130,12 +129,12 @@ function active(name: string) {
 }
 .console-identity strong {
   display: block;
-  font-size: 13px;
-  font-weight: 550;
+  font-size: 15px;
+  font-weight: 600;
 }
 .console-identity small {
   display: block;
-  font-size: 10px;
+  font-size: 13px;
   color: var(--fbz-color-text-muted);
   margin-top: 4px;
 }
@@ -144,21 +143,21 @@ function active(name: string) {
   flex: 1;
 }
 .navigation-group > p {
-  font-size: 10px;
+  font-size: 13px;
   color: var(--fbz-color-text-muted);
-  letter-spacing: 0.8px;
+  letter-spacing: 0;
   padding: 0 12px;
   margin: 16px 0 8px;
 }
 .du-menu {
   width: 100%;
   padding: 0;
-  gap: 3px;
+  gap: 2px;
 }
 .du-menu a {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 450;
-  padding: 11px 13px;
+  padding: 10px 14px;
   gap: 13px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -180,7 +179,7 @@ footer {
   justify-content: space-between;
   padding: 20px 13px 0;
   color: var(--fbz-color-text-muted);
-  font-size: 10px;
+  font-size: 13px;
   letter-spacing: 1px;
 }
 .admin-main {
@@ -201,20 +200,20 @@ footer {
   box-shadow: none;
 }
 .admin-main :deep(.page-heading) {
-  font-size: 28px;
+  font-size: 26px;
   line-height: 1.25;
   font-weight: 550;
   letter-spacing: -0.8px;
   margin: 0 0 10px;
 }
 .admin-main :deep(.description-text) {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--fbz-color-text-muted);
   line-height: 1.8;
 }
 .admin-main :deep(.du-btn) {
   font-family: var(--fbz-font-sans);
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0;
   min-height: 34px;
   border-radius: 8px;
@@ -272,6 +271,28 @@ footer {
   }
   .admin-main :deep(.page-heading) {
     font-size: 25px;
+  }
+}
+
+.admin-main :deep(.panel-header-banner) {
+  padding-bottom: 26px;
+  border-bottom: 1px solid var(--fbz-color-line-soft);
+  margin-bottom: 30px;
+}
+.admin-main :deep(.description-text) {
+  font-size: 13px;
+}
+.admin-main :deep(.du-btn-primary) {
+  background: var(--fbz-color-text);
+  color: var(--fbz-color-bg);
+}
+.admin-sidebar footer {
+  border-top: 1px solid var(--fbz-color-line-soft);
+  margin-top: 20px;
+}
+@media (min-width: 801px) {
+  .admin-sidebar {
+    top: calc(var(--header-h) + 32px);
   }
 }
 </style>

@@ -2,7 +2,7 @@ use super::{nfo, read_small, sql_error};
 use crate::{error::AppError, state::AppState};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 
 pub fn is_video(name: &str) -> bool {
     matches!(
@@ -158,6 +158,7 @@ async fn save_artwork(
     item: i64,
     entries: &[Value],
     media_name: &str,
+    prefetch: bool,
 ) -> Result<(), AppError> {
     for (kind, names) in [
         (
@@ -177,7 +178,22 @@ async fn save_artwork(
                     .any(|ext| n == format!("{base}.{ext}"))
             })
         }) {
-            let (key, _) = cached(state, account, entry, 10 * 1024 * 1024).await?;
+            let extension = entry["name"]
+                .as_str()
+                .unwrap_or("")
+                .rsplit('.')
+                .next()
+                .unwrap_or("jpg")
+                .to_ascii_lowercase();
+            let hash = format!(
+                "{:x}",
+                Sha256::digest(format!("{account}:{}:{}", entry["id"], entry["version"]))
+            );
+            let key = format!("storage/{hash}.{extension}");
+            sqlx::query("insert into storage_artwork_sources(storage_key,account_id,entry) values($1,$2::uuid,$3) on conflict(storage_key) do update set entry=excluded.entry").bind(&key).bind(account).bind(entry).execute(&mut **tx).await.map_err(sql_error)?;
+            if prefetch {
+                cached(state, account, entry, 10 * 1024 * 1024).await?;
+            }
             sqlx::query("delete from artwork where media_item_id=$1 and source='storage' and artwork_type=$2").bind(item).bind(kind).execute(&mut **tx).await.map_err(sql_error)?;
             sqlx::query("insert into artwork(media_item_id,artwork_type,source,storage_key,is_primary) values($1,$2,'storage',$3,true)").bind(item).bind(kind).bind(key).execute(&mut **tx).await.map_err(sql_error)?;
         }
@@ -202,8 +218,20 @@ pub async fn import_video(
         .ok_or_else(|| AppError::unprocessable("missing file ID"))?;
     let name = entry["name"].as_str().unwrap_or("Untitled");
     let entries = siblings(tx, mount, parent_dir, generation).await?;
+    let options =
+        sqlx::query("select nfo_source,image_cache from storage_mounts where id::text=$1")
+            .bind(mount)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(sql_error)?;
+    let use_nfo = options.get::<String, _>("nfo_source") == "cloud";
+    let prefetch = options.get::<String, _>("image_cache") == "prefetch";
     // Invalid NFO is a per-item warning; a network error must not advance the checkpoint.
-    let mut meta = match metadata(state, account, &entries, name, library_type == "tv").await {
+    let mut meta = match if use_nfo {
+        metadata(state, account, &entries, name, library_type == "tv").await
+    } else {
+        Ok(nfo::Nfo::default())
+    } {
         Ok(meta) => meta,
         Err(AppError::UnprocessableEntity { message }) if message.starts_with("NFO") => {
             sqlx::query("update storage_entries set entry=entry||$3 where mount_id::text=$1 and remote_id=$2").bind(mount).bind(file_id).bind(json!({"warning":message})).execute(&mut **tx).await.map_err(sql_error)?;
@@ -229,7 +257,7 @@ pub async fn import_video(
         let mut series_entries = Vec::new();
         for _ in 0..32 {
             let siblings = siblings(tx, mount, &dir, generation).await?;
-            if let Some(nfo) = siblings.iter().find(|e| {
+            if let Some(nfo) = siblings.iter().filter(|_| use_nfo).find(|e| {
                 e["name"]
                     .as_str()
                     .unwrap_or("")
@@ -237,6 +265,10 @@ pub async fn import_video(
             }) {
                 let (_, bytes) = cached(state, account, nfo, 2 * 1024 * 1024).await?;
                 series_meta = Some(nfo::parse(&bytes)?);
+                series_entries = siblings;
+                break;
+            }
+            if !use_nfo {
                 series_entries = siblings;
                 break;
             }
@@ -285,7 +317,16 @@ pub async fn import_video(
             sqlx::query("update media_items set title=$2,overview=$3,production_year=$4,metadata_status='manual',is_deleted=false where id=$1")
                 .bind(series).bind(series_title).bind(&series_meta.plot).bind(series_meta.year).execute(&mut **tx).await.map_err(sql_error)?;
         }
-        save_artwork(state, tx, account, series, &series_entries, "tvshow").await?;
+        save_artwork(
+            state,
+            tx,
+            account,
+            series,
+            &series_entries,
+            "tvshow",
+            prefetch,
+        )
+        .await?;
         let season = meta.season.unwrap_or(1).max(0);
         parent_item = Some(
             group(
@@ -341,7 +382,7 @@ pub async fn import_video(
         let genre_id:i64=sqlx::query_scalar("insert into genres(name,name_normalized) values($1,$2) on conflict(name_normalized) do update set name=excluded.name returning id").bind(genre.trim()).bind(genre.trim().to_lowercase()).fetch_one(&mut **tx).await.map_err(sql_error)?;
         sqlx::query("insert into media_item_genres(media_item_id,genre_id) values($1,$2) on conflict do nothing").bind(item).bind(genre_id).execute(&mut **tx).await.map_err(sql_error)?;
     }
-    save_artwork(state, tx, account, item, &entries, name).await?;
+    save_artwork(state, tx, account, item, &entries, name, prefetch).await?;
     sqlx::query("delete from media_streams where media_file_id=$1 and stream_type='subtitle'")
         .bind(media_file)
         .execute(&mut **tx)
@@ -378,4 +419,25 @@ mod tests {
         assert!(!is_video("film.nfo"));
         assert!(!is_video("folder"));
     }
+}
+
+/// Called only after the artwork endpoint has checked the library ACL.
+pub async fn ensure_artwork(state: &AppState, key: &str) -> Result<(), AppError> {
+    if !key.starts_with("storage/") || key.contains("..") || key.contains('\\') {
+        return Ok(());
+    }
+    if state.config().storage.artwork_cache_dir.join(key).is_file() {
+        return Ok(());
+    }
+    let row=sqlx::query("select account_id::text as account,entry from storage_artwork_sources where storage_key=$1").bind(key).fetch_optional(super::db(state)?).await.map_err(sql_error)?;
+    if let Some(row) = row {
+        cached(
+            state,
+            &row.get::<String, _>("account"),
+            &row.get::<Value, _>("entry"),
+            10 * 1024 * 1024,
+        )
+        .await?;
+    }
+    Ok(())
 }

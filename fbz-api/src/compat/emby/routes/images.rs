@@ -688,6 +688,9 @@ async fn item_image_by_index(
         .map_err(|err| AppError::internal(format!("failed to get item image: {err}")))?
         .ok_or_else(|| AppError::not_found("item image not found"))?;
 
+    if let Some(key) = artwork.storage_key.as_deref() {
+        crate::storage::importer::ensure_artwork(&state, key).await?;
+    }
     artwork_response(&state.config().storage, artwork).await
 }
 

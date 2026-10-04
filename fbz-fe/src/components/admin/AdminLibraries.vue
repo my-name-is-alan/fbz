@@ -8,6 +8,92 @@ const busy = ref(false);
 const name = ref("");
 const path = ref("");
 const kind = ref("movies");
+interface CloudMount {
+  id: string;
+  name: string;
+  mountPath: string;
+  libraryId: string | null;
+  status: string;
+  refreshMinutes: number;
+  nfoSource: string;
+  imageCache: string;
+  lastError?: string;
+  scanned: number;
+  imported: number;
+  lastRefreshedAt?: string;
+  nextRefreshAt?: string;
+}
+const mounts = ref<CloudMount[]>([]);
+const cloudStatus: Record<string, string> = {
+  idle: "就绪",
+  scanning: "读取目录中",
+  importing: "导入资料中",
+  failed: "等待重试",
+};
+const source = ref("local");
+const mountId = ref("");
+const nfoSource = ref("cloud");
+const imageCache = ref("on_demand");
+const refreshMinutes = ref(60);
+const editing = ref<CloudMount>();
+const mountOptions = computed(() =>
+  mounts.value
+    .filter((m) => !m.libraryId)
+    .map((m) => ({ label: `${m.mountPath} · ${m.name}`, value: m.id })),
+);
+watch(mountId, (id) => {
+  const mount = mounts.value.find((m) => m.id === id);
+  if (mount) refreshMinutes.value = mount.refreshMinutes;
+});
+watch(source, (value) => {
+  if (value === "cloud" && kind.value === "music") kind.value = "movies";
+});
+function editSettings(mount: CloudMount) {
+  editing.value = mount;
+  nfoSource.value = mount.nfoSource;
+  imageCache.value = mount.imageCache;
+  refreshMinutes.value = mount.refreshMinutes;
+}
+function newLibrary() {
+  creating.value = true;
+  source.value = "local";
+  mountId.value = "";
+  nfoSource.value = "cloud";
+  imageCache.value = "on_demand";
+  refreshMinutes.value = 60;
+}
+async function saveSettings() {
+  if (!editing.value) return;
+  busy.value = true;
+  error.value = "";
+  try {
+    await serverRequest(`/api/admin/storage/mounts/${editing.value.id}/settings`, {
+      nfoSource: nfoSource.value,
+      imageCache: imageCache.value,
+      refreshMinutes: refreshMinutes.value,
+    });
+    editing.value = undefined;
+    await refresh();
+  } catch (e) {
+    error.value = errorMessage(e);
+  } finally {
+    busy.value = false;
+  }
+}
+async function scanCloud(mount: CloudMount) {
+  busy.value = true;
+  error.value = "";
+  try {
+    await serverRequest(`/api/admin/storage/mounts/${mount.id}/scan`, {});
+    message.value = "云端扫描已排队";
+    await refresh();
+  } catch (e) {
+    error.value = errorMessage(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 const message = ref("");
 const error = ref("");
 const jobs = ref<ServerJob[]>([]);
@@ -20,25 +106,40 @@ async function refresh() {
   await library.refresh();
   if (!readSession()) return;
   try {
+    mounts.value = (await serverRequest<{ mounts: CloudMount[] }>("/api/admin/storage")).mounts;
     jobs.value = await serverRequest<ServerJob[]>("/api/admin/jobs?limit=20");
   } catch (err) {
     error.value = errorMessage(err);
   }
 }
 async function create() {
-  if (busy.value || !name.value.trim() || !path.value.trim()) return;
+  if (
+    busy.value ||
+    !name.value.trim() ||
+    (source.value === "local" ? !path.value.trim() : !mountId.value)
+  )
+    return;
   busy.value = true;
   error.value = "";
   message.value = "";
   try {
-    await serverRequest("/api/admin/libraries", {
-      name: name.value.trim(),
-      libraryType: kind.value,
-      paths: path.value
-        .split("\n")
-        .map((p) => p.trim())
-        .filter(Boolean),
-    });
+    if (source.value === "cloud") {
+      await serverRequest(`/api/admin/storage/mounts/${mountId.value}/library`, {
+        name: name.value.trim(),
+        libraryType: kind.value,
+        nfoSource: nfoSource.value,
+        imageCache: imageCache.value,
+        refreshMinutes: refreshMinutes.value,
+      });
+    } else
+      await serverRequest("/api/admin/libraries", {
+        name: name.value.trim(),
+        libraryType: kind.value,
+        paths: path.value
+          .split("\n")
+          .map((p) => p.trim())
+          .filter(Boolean),
+      });
     creating.value = false;
     name.value = "";
     path.value = "";
@@ -89,7 +190,7 @@ useIntervalFn(() => {
   <section class="server-libraries">
     <div class="section-toolbar">
       <span>{{ library.libraries.length }} 个媒体库</span
-      ><button class="du-btn du-btn-sm du-btn-primary primary" @click="creating = !creating">
+      ><button class="du-btn du-btn-sm du-btn-primary primary" @click="newLibrary">
         <BaseIcon name="plus" :size="16" /> 添加媒体库
       </button>
     </div>
@@ -106,9 +207,36 @@ useIntervalFn(() => {
         <div class="form-columns">
           <label
             >名称<input class="du-input" v-model="name" required placeholder="例如：电影" /></label
-          ><label>内容类型<BaseSelect v-model="kind" :options="kinds" /></label>
+          ><label
+            >内容类型<BaseSelect
+              v-model="kind"
+              :options="source === 'cloud' ? kinds.filter((k) => k.value !== 'music') : kinds"
+          /></label>
         </div>
         <label
+          >媒体来源<BaseSelect
+            v-model="source"
+            :options="[
+              { label: '本地目录', value: 'local' },
+              { label: '插件挂载目录', value: 'cloud' },
+            ]"
+        /></label>
+        <template v-if="source === 'cloud'">
+          <label
+            >挂载地址<BaseSelect
+              v-model="mountId"
+              :options="[{ label: '选择未关联的挂载目录', value: '' }, ...mountOptions]"
+          /></label>
+          <p v-if="!mountOptions.length" class="muted">
+            没有可用挂载，请先在<RouterLink to="/admin/plugins">光鸭插件</RouterLink>中添加目录。
+          </p>
+          <CloudLibraryPolicy
+            v-model:nfo-source="nfoSource"
+            v-model:image-cache="imageCache"
+            v-model:refresh-minutes="refreshMinutes"
+          />
+        </template>
+        <label v-else
           >服务器上的媒体目录<textarea
             class="du-textarea"
             v-model="path"
@@ -117,10 +245,25 @@ useIntervalFn(() => {
             placeholder="每行一个完整路径，例如 D:\Media\Movies 或 /media/movies"
           />
         </label>
-        <p class="muted">填写运行 FBZ 服务的机器可访问的目录。创建后再启动扫描。</p>
+        <p v-if="source === 'local'" class="muted">
+          填写运行 FBZ 服务的机器可访问的目录。创建后再启动扫描。
+        </p>
         <button class="du-btn du-btn-sm du-btn-primary primary" :disabled="busy || !readSession()">
           {{ busy ? "正在创建…" : "创建媒体库" }}
         </button>
+      </form></BaseModal
+    >
+    <BaseModal :open="!!editing" title="媒体库来源与扫描策略" @close="editing = undefined"
+      ><p v-if="error" class="du-alert du-alert-error">{{ error }}</p>
+      <form class="create-library" @submit.prevent="saveSettings">
+        <p class="muted">{{ editing?.mountPath }}</p>
+        <CloudLibraryPolicy
+          v-model:nfo-source="nfoSource"
+          v-model:image-cache="imageCache"
+          v-model:refresh-minutes="refreshMinutes"
+        />
+        <p class="muted">修改资料策略后，下次完整扫描生效；已有缓存不会删除。</p>
+        <button class="du-btn du-btn-primary" :disabled="busy">保存设置</button>
       </form></BaseModal
     >
     <p v-if="error || library.error" class="error" role="alert">{{ error || library.error }}</p>
@@ -141,6 +284,20 @@ useIntervalFn(() => {
         <div class="library-description">
           <h3>{{ lib.name }}</h3>
           <p v-for="entry in lib.paths" :key="entry">{{ entry }}</p>
+          <template v-for="mount in mounts.filter((m) => m.libraryId === lib.id)" :key="mount.id"
+            ><p>{{ mount.mountPath }}</p>
+            <p>
+              {{ mount.refreshMinutes ? `每 ${mount.refreshMinutes} 分钟刷新` : "手动刷新" }} ·
+              {{ cloudStatus[mount.status] ?? mount.status }} · 已导入 {{ mount.imported }} 个视频
+            </p>
+            <p v-if="mount.lastRefreshedAt">
+              最近刷新：{{ new Date(mount.lastRefreshedAt).toLocaleString() }}
+            </p>
+            <p v-if="mount.refreshMinutes && mount.nextRefreshAt">
+              下次检查：{{ new Date(mount.nextRefreshAt).toLocaleString() }}
+            </p>
+            <p v-if="mount.lastError" class="error">{{ mount.lastError }}</p></template
+          >
         </div>
         <RouterLink :to="`/library/${lib.id}`">浏览</RouterLink
         ><button
@@ -151,7 +308,25 @@ useIntervalFn(() => {
         >
           扫描媒体库
         </button>
-        <RouterLink v-else to="/admin/storage">管理云盘挂载</RouterLink>
+        <template v-else-if="mounts.find((m) => m.libraryId === lib.id)">
+          <button
+            class="du-btn du-btn-sm"
+            :disabled="busy"
+            @click="editSettings(mounts.find((m) => m.libraryId === lib.id)!)"
+          >
+            设置
+          </button>
+          <button
+            class="du-btn du-btn-sm"
+            :disabled="
+              busy ||
+              ['scanning', 'importing'].includes(mounts.find((m) => m.libraryId === lib.id)!.status)
+            "
+            @click="scanCloud(mounts.find((m) => m.libraryId === lib.id)!)"
+          >
+            扫描媒体库
+          </button>
+        </template>
       </article>
       <p v-if="readSession() && !library.loading && !library.libraries.length" class="empty">
         还没有媒体库。添加一个目录，开始整理你的收藏。

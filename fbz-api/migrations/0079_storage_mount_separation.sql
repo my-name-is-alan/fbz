@@ -1,0 +1,13 @@
+ALTER TABLE storage_mounts ALTER COLUMN library_id DROP NOT NULL;
+ALTER TABLE storage_mounts ADD COLUMN name text NOT NULL DEFAULT '';
+ALTER TABLE storage_mounts ADD COLUMN mount_path text;
+UPDATE storage_mounts m SET name=l.name, mount_path='/cloud/'||m.id::text FROM libraries l WHERE l.id=m.library_id;
+ALTER TABLE storage_mounts ALTER COLUMN mount_path SET NOT NULL;
+ALTER TABLE storage_mounts ADD CONSTRAINT storage_mount_path_unique UNIQUE(mount_path);
+ALTER TABLE storage_mounts ADD COLUMN refresh_minutes integer NOT NULL DEFAULT 60 CHECK(refresh_minutes=0 OR refresh_minutes BETWEEN 5 AND 10080);
+ALTER TABLE storage_mounts ADD COLUMN next_refresh_at timestamptz NOT NULL DEFAULT now()+interval '1 hour';
+ALTER TABLE storage_mounts ADD COLUMN last_refreshed_at timestamptz;
+ALTER TABLE storage_mounts ADD COLUMN failure_count integer NOT NULL DEFAULT 0;
+ALTER TABLE storage_mounts ADD COLUMN nfo_source text NOT NULL DEFAULT 'cloud' CHECK(nfo_source IN ('cloud','filename'));
+ALTER TABLE storage_mounts ADD COLUMN image_cache text NOT NULL DEFAULT 'prefetch' CHECK(image_cache IN ('prefetch','on_demand'));
+CREATE TABLE storage_artwork_sources(storage_key text PRIMARY KEY,account_id uuid NOT NULL REFERENCES storage_accounts(id),entry jsonb NOT NULL);

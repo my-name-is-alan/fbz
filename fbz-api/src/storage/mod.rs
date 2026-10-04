@@ -1,6 +1,7 @@
 pub mod importer;
 pub mod nfo;
 pub mod scan;
+mod settings;
 
 use crate::{
     admin::access::authenticate_admin, db::DbPool, error::AppError,
@@ -32,6 +33,7 @@ fn cipher(state: &AppState) -> Result<SecretCipher, AppError> {
 }
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(settings::router())
         .route("/api/admin/storage", get(overview))
         .route("/api/admin/storage/accounts", post(create_account))
         .route("/api/admin/storage/accounts/{id}/login", post(start_login))
@@ -180,7 +182,7 @@ async fn overview(
 ) -> Result<Json<Value>, AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let accounts: Vec<Value> = sqlx::query_scalar("select jsonb_build_object('id',id,'name',name,'status',status,'cloudUserId',cloud_user_id,'qps',qps) from storage_accounts order by created_at").fetch_all(db(&state)?).await.map_err(sql_error)?;
-    let mounts: Vec<Value> = sqlx::query_scalar("select jsonb_build_object('id',m.id,'accountId',m.account_id,'name',l.name,'libraryId',l.public_id,'rootId',root_id,'path',display_path,'status',status,'scanned',scanned,'imported',imported,'lastError',last_error) from storage_mounts m join libraries l on l.id=m.library_id order by m.updated_at desc").fetch_all(db(&state)?).await.map_err(sql_error)?;
+    let mounts: Vec<Value> = sqlx::query_scalar("select jsonb_build_object('id',m.id,'accountId',m.account_id,'name',m.name,'mountPath',m.mount_path,'refreshMinutes',m.refresh_minutes,'nfoSource',m.nfo_source,'imageCache',m.image_cache,'lastRefreshedAt',m.last_refreshed_at,'nextRefreshAt',m.next_refresh_at,'libraryId',l.public_id,'rootId',root_id,'path',display_path,'status',status,'scanned',scanned,'imported',imported,'lastError',last_error) from storage_mounts m left join libraries l on l.id=m.library_id order by m.updated_at desc").fetch_all(db(&state)?).await.map_err(sql_error)?;
     Ok(Json(
         json!({"accounts":accounts,"mounts":mounts,"configured":cipher(&state).is_ok() && std::env::var("FBZ_STORAGE_PLUGIN_KEY").is_ok()}),
     ))
@@ -201,7 +203,7 @@ async fn create_account(
     if input.name.trim().is_empty() || input.name.len() > 120 {
         return Err(AppError::unprocessable("请填写账号名称"));
     }
-    let id:String=sqlx::query_scalar("insert into storage_accounts(provider,name,device_id,qps) values('guangya',$1,gen_random_uuid()::text,$2) returning id::text").bind(input.name.trim()).bind(input.qps.unwrap_or(1).clamp(1,5)).fetch_one(db(&state)?).await.map_err(sql_error)?;
+    let id:String=sqlx::query_scalar("insert into storage_accounts(provider,name,device_id,qps) values('guangya',$1,gen_random_uuid()::text,$2) returning id::text").bind(input.name.trim()).bind(input.qps.unwrap_or(10).clamp(1,20)).fetch_one(db(&state)?).await.map_err(sql_error)?;
     Ok(Json(json!({"id":id})))
 }
 async fn start_login(
@@ -329,7 +331,8 @@ struct MountInput {
     root_id: String,
     name: String,
     display_path: String,
-    library_type: String,
+    mount_path: String,
+    refresh_minutes: Option<i32>,
 }
 async fn create_mount(
     State(state): State<AppState>,
@@ -337,14 +340,16 @@ async fn create_mount(
     uri: Uri,
     Json(input): Json<MountInput>,
 ) -> Result<Json<Value>, AppError> {
-    let admin = authenticate_admin(&state, &headers, &uri).await?;
-    if !["movies", "tv"].contains(&input.library_type.as_str())
-        || input.name.trim().is_empty()
+    authenticate_admin(&state, &headers, &uri).await?;
+    settings::validate_mount_path(&input.mount_path)?;
+    let interval = input.refresh_minutes.unwrap_or(60);
+    settings::validate_interval(interval)?;
+    if input.name.trim().is_empty()
         || input.name.len() > 120
         || input.root_id.len() > 256
         || input.display_path.len() > 2048
     {
-        return Err(AppError::unprocessable("媒体库参数无效"));
+        return Err(AppError::unprocessable("挂载参数无效"));
     }
     rpc(
         &state,
@@ -352,19 +357,11 @@ async fn create_mount(
         json!({"op":"list","parentId":input.root_id,"page":0}),
     )
     .await?;
-    let mut tx = db(&state)?.begin().await.map_err(sql_error)?;
-    let lib: i64 =
-        sqlx::query_scalar("insert into libraries(name,library_type) values($1,$2) returning id")
-            .bind(input.name.trim())
-            .bind(&input.library_type)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(sql_error)?;
-    sqlx::query("insert into library_permissions(library_id,user_id,can_view,can_download,can_transcode) values($1,$2,true,true,false)").bind(lib).bind(admin.id).execute(&mut *tx).await.map_err(sql_error)?;
-    let id:String=sqlx::query_scalar("insert into storage_mounts(account_id,library_id,root_id,display_path) values($1::uuid,$2,$3,$4) returning id::text").bind(&input.account_id).bind(lib).bind(&input.root_id).bind(&input.display_path).fetch_one(&mut *tx).await.map_err(sql_error)?;
-    tx.commit().await.map_err(sql_error)?;
+    let id:String=sqlx::query_scalar("insert into storage_mounts(account_id,root_id,display_path,name,mount_path,refresh_minutes) values($1::uuid,$2,$3,$4,$5,$6) returning id::text")
+      .bind(&input.account_id).bind(&input.root_id).bind(&input.display_path).bind(input.name.trim()).bind(&input.mount_path).bind(interval).fetch_one(db(&state)?).await.map_err(sql_error)?;
     Ok(Json(json!({"id":id})))
 }
+
 #[derive(Deserialize)]
 struct ScanInput {
     #[serde(default)]
@@ -379,7 +376,10 @@ async fn queue_scan(
 ) -> Result<StatusCode, AppError> {
     authenticate_admin(&state, &headers, &uri).await?;
     let mut tx = db(&state)?.begin().await.map_err(sql_error)?;
-    let row=sqlx::query("select status,root_id,frontier,import_cursor from storage_mounts where id::text=$1 for update").bind(&id).fetch_optional(&mut *tx).await.map_err(sql_error)?.ok_or_else(||AppError::not_found("挂载不存在"))?;
+    let row=sqlx::query("select status,root_id,frontier,import_cursor,library_id from storage_mounts where id::text=$1 for update").bind(&id).fetch_optional(&mut *tx).await.map_err(sql_error)?.ok_or_else(||AppError::not_found("挂载不存在"))?;
+    if row.get::<Option<i64>, _>("library_id").is_none() {
+        return Err(AppError::unprocessable("请先在媒体库中选择此挂载"));
+    }
     if ["scanning", "importing"].contains(&row.get::<String, _>("status").as_str()) {
         return Err(AppError::unprocessable("扫描正在运行"));
     }

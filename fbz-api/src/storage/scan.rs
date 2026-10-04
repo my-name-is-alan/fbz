@@ -19,6 +19,7 @@ pub fn spawn_worker(state: AppState) {
     });
 }
 pub async fn step(state: &AppState) -> Result<bool, AppError> {
+    sqlx::query("update storage_mounts m set status=case when m.status='failed' then case when jsonb_array_length(frontier)>0 then 'scanning' else 'importing' end else 'scanning' end,generation=case when m.status='failed' then generation else generation+1 end,frontier=case when m.status='failed' then frontier else jsonb_build_array(jsonb_build_object('id',root_id,'page',0)) end,import_cursor=case when m.status='failed' then import_cursor else '' end,scanned=case when m.status='failed' then scanned else 0 end,imported=case when m.status='failed' then imported else 0 end,last_error=null,updated_at=now() where m.id in(select s.id from storage_mounts s join storage_accounts a on a.id=s.account_id where s.library_id is not null and s.refresh_minutes>0 and s.next_refresh_at<=now() and s.status in ('idle','failed') and a.status='ready' for update of s skip locked limit 1)").execute(db(state)?).await.map_err(sql_error)?;
     let mut tx = db(state)?.begin().await.map_err(sql_error)?;
     let row=sqlx::query("select m.*,m.id::text as mount_key,m.account_id::text as account_key,l.library_type from storage_mounts m join libraries l on l.id=m.library_id where m.status in ('scanning','importing') order by m.updated_at for update of m skip locked limit 1")
         .fetch_optional(&mut *tx).await.map_err(sql_error)?;
@@ -64,7 +65,7 @@ pub async fn step(state: &AppState) -> Result<bool, AppError> {
                 for kind in ["season", "series"] {
                     sqlx::query("update media_items mi set is_deleted=true where mi.item_type=$2 and mi.id in (select media_item_id from storage_groups where mount_id::text=$1) and not exists(select 1 from media_items child where child.parent_id=mi.id and child.is_deleted=false)").bind(&id).bind(kind).execute(&mut *tx).await.map_err(sql_error)?;
                 }
-                sqlx::query("update storage_mounts set status='idle',last_error=null,updated_at=now() where id::text=$1").bind(&id).execute(&mut *tx).await.map_err(sql_error)?;
+                sqlx::query("update storage_mounts set status='idle',last_error=null,last_refreshed_at=now(),failure_count=0,next_refresh_at=now()+greatest(refresh_minutes,5)*interval '1 minute',updated_at=now() where id::text=$1").bind(&id).execute(&mut *tx).await.map_err(sql_error)?;
             }
         }Ok(())
     }.await;
@@ -72,7 +73,7 @@ pub async fn step(state: &AppState) -> Result<bool, AppError> {
         Ok(()) => tx.commit().await.map(|_| true).map_err(sql_error),
         Err(error) => {
             tx.rollback().await.map_err(sql_error)?;
-            sqlx::query("update storage_mounts set status='failed',last_error=$2,updated_at=now() where id::text=$1").bind(&id).bind(error.message()).execute(db(state)?).await.map_err(sql_error)?;
+            sqlx::query("update storage_mounts set status='failed',last_error=$2,failure_count=least(failure_count+1,10),next_refresh_at=now()+least(1440,greatest(refresh_minutes,5)*power(2,least(failure_count,8))) * interval '1 minute',updated_at=now() where id::text=$1").bind(&id).bind(error.message()).execute(db(state)?).await.map_err(sql_error)?;
             Ok(true)
         }
     }

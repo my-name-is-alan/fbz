@@ -17,7 +17,11 @@ $poll=Api "/api/admin/storage/accounts/$($account.id)/poll" @{attemptId=$login.a
 if (!$poll.authenticated) { throw 'Fixture did not authenticate' }
 $directory=Api "/api/admin/storage/accounts/$($account.id)/directories?parentId=&page=0"
 if ($directory.entries[0].id -ne 'movies') { throw 'Directory mapping failed' }
-$mount=Api '/api/admin/storage/mounts' @{accountId=$account.id;rootId='movies';name="Storage fixture $([guid]::NewGuid().ToString('N').Substring(0,8))";displayPath='/已刮削电影';libraryType='movies'}
+$mount=Api '/api/admin/storage/mounts' @{accountId=$account.id;rootId='movies';name="Storage fixture $([guid]::NewGuid().ToString('N').Substring(0,8))";displayPath='/已刮削电影';mountPath=('/cloud/fixture-'+[guid]::NewGuid().ToString('N'));refreshMinutes=0}
+$unbound=(Api '/api/admin/storage').mounts | Where-Object id -eq $mount.id
+if ($unbound.libraryId) { throw 'Mount unexpectedly created a library' }
+$cloudLibrary=Api "/api/admin/storage/mounts/$($mount.id)/library" @{name='Storage policy fixture';libraryType='movies';nfoSource='cloud';imageCache='on_demand';refreshMinutes=0}
+if (!$cloudLibrary.id) {throw 'Cloud library not created'}
 Api "/api/admin/storage/mounts/$($mount.id)/scan" @{} | Out-Null
 $deadline=(Get-Date).AddSeconds(120)
 do {

@@ -15,7 +15,7 @@ export class Scheduler {
     this.queues.set(key, state);
     const result = state.tail.then(async () => {
       await new Promise(r => setTimeout(r, Math.max(0, state.next - Date.now())));
-      try { return await fn(); } finally { state.next = Date.now() + 1000 / Math.min(5, Math.max(1, qps || 1)); }
+      try { return await fn(); } finally { state.next = Date.now() + 1000 / Math.min(20, Math.max(1, qps || 10)); }
     });
     state.tail = result.catch(() => {});
     return result;
@@ -87,7 +87,7 @@ export function expiry(url, now = Date.now()) {
 export function createProvider({ fetchImpl = fetch, apiBase = 'https://api.guangyapan.com', accountBase = 'https://account.guangyapan.com', profile = resolveGuangyaProfile(), smallReader = readSmall } = {}) {
   const scheduler = new Scheduler(); const urls = new Map();
   async function dispatch(input) {
-    const { op, accountId, deviceId, qps = 1 } = input;
+    const { op, accountId, deviceId, qps = 10 } = input;
     let credentials = input.credentials ?? {}; let changed = false;
     const accountHeaders = () => buildAccountHeaders({ deviceId, profile, token: credentials.access_token });
     async function call(path, body, account = false, method = 'POST') {
