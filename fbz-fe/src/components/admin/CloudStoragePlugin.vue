@@ -10,7 +10,10 @@ async function refresh() {
       "/api/admin/storage",
     );
     configured.value = data.configured;
-    count.value = data.accounts.length;
+    count.value = data.accounts.filter((a: unknown) => {
+      const record = a as { provider?: string };
+      return !record.provider || record.provider === "guangya";
+    }).length;
   } catch (e) {
     error.value = errorMessage(e);
   }
@@ -20,20 +23,20 @@ onMounted(refresh);
 <template>
   <section class="plugins-page">
     <p v-if="error" class="du-alert du-alert-error">{{ error }}</p>
-    <div class="plugin-section">
+    <div v-if="count" class="plugin-section">
       <h2>存储插件</h2>
       <span>1 个可用集成</span>
     </div>
-    <article class="plugin-card">
+    <article v-if="count" class="plugin-card">
       <span class="plugin-icon"><BaseIcon name="cloud" :size="28" /></span>
       <div class="plugin-description">
-        <h3>光鸭网盘 <span class="du-badge du-badge-sm">存储源</span></h3>
+        <h3>旧版光鸭连接 <span class="du-badge du-badge-sm">存储源</span></h3>
         <p>扫码连接账号，将云端目录挂载到 FBZ，再通过媒体库添加内容。</p>
         <small>{{ configured ? `已配置 · ${count} 个账号` : "服务端尚未配置" }} · 只读访问</small>
       </div>
       <button class="du-btn du-btn-sm" @click="configuring = true">配置插件</button>
     </article>
-    <p class="plugin-note">
+    <p v-if="count" class="plugin-note">
       NFO 来源与图片缓存策略在媒体库设置中配置。插件配置不会自动创建媒体库。
     </p>
     <BaseModal

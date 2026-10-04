@@ -185,7 +185,7 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 
 ### 光鸭插件与媒体库边界
 
-光鸭入口位于 AdminPlugins 的配置弹窗，旧 /admin/storage 重定向至插件页。AdminStorage 只负责账号、扫码和虚拟挂载，不创建媒体库。AdminLibraries 保留远端本地媒体库编辑器，CloudLibraries 通过独立挂载关联接口创建云盘媒体库，CloudLibraryPolicy 提供实际支持的 NFO 来源、图片缓存、刷新周期。不要恢复演示插件安装/卸载成功反馈。自动刷新由后端持久状态驱动，前端轮询仅显示结果。
+光鸭新入口来自已批准且启用的插件包菜单；AdminPlugins 中的旧版配置弹窗仅用于未接管的历史账号。旧 /admin/storage 重定向至插件页。AdminStorage 只负责账号、扫码和虚拟挂载，不创建媒体库。AdminLibraries 保留远端本地媒体库编辑器，CloudLibraries 通过独立挂载关联接口创建云盘媒体库，CloudLibraryPolicy 提供实际支持的 NFO 来源、图片缓存、刷新周期。不要恢复演示插件安装/卸载成功反馈。自动刷新由后端持久状态驱动，前端轮询仅显示结果。
 
 ## 2026-10-05 远端合并约定
 
@@ -195,3 +195,7 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 - App.vue 全局只挂载一个 PlaybackOverlay；默认布局不能重复挂载。电影、分集、首页入口必须保留 source.proxyUri 与 server 播放会话信息。
 - TMDB mock 已随远端移除，媒体与详情来自真实 API。保留远端音乐、照片、搜索、设置和插件功能。
 - 光鸭迁移重编号为 0097–0099；db/legacy_storage.rs 只对精确匹配的历史校验值做迁移记录兼容，禁止通用关闭 SQLx 校验。
+
+### 安装包页面与存储源
+
+PluginAdminFrame 从已审批并启用的插件包读取 adminUi 页面，仅以 sandbox iframe 和受限 postMessage 动作桥接渲染；管理令牌不得进入 iframe。光鸭通过 storageProvider.handler 注册，AdminStorage 由插件页面复用并按 providerId 隔离账号。旧版 Guangya 卡仅作为未接管账号的兼容入口。新增同协议存储插件应只添加插件包，不改前端路由或 Rust 核心。HTTP runtime 的外部进程需独立部署并由管理员配置签名密钥和主机 allowlist。

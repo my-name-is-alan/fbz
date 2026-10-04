@@ -113,6 +113,7 @@ async function refreshAll() {
     error.value = "插件管理数据加载失败，请确认后端已初始化且当前用户具备管理员权限。";
   } finally {
     loading.value = false;
+    window.dispatchEvent(new Event("fbz:plugin-lifecycle"));
   }
 }
 

@@ -45,6 +45,18 @@ use crate::{
     },
 };
 
+/// Deployment-specific HTTP address mapping; the normal host allowlist still applies at invoke time.
+pub fn resolved_http_entrypoint(plugin_id: &str, declared: &str) -> String {
+    let Ok(value) = std::env::var("FBZ_PLUGIN_HTTP_ENDPOINT_OVERRIDES") else {
+        return declared.to_owned();
+    };
+    serde_json::from_str::<std::collections::HashMap<String, String>>(&value)
+        .ok()
+        .and_then(|overrides| overrides.get(plugin_id).cloned())
+        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+        .unwrap_or_else(|| declared.to_owned())
+}
+
 /// 同步调用协议标识，随请求体和 `x-fbz-plugin-invocation` 头下发给插件。
 pub const PLUGIN_SYNC_INVOCATION_KIND: &str = "sync";
 /// v1 仅支持 HTTP runtime 的同步调用。
@@ -208,8 +220,37 @@ impl PluginSyncInvoker {
         payload: &Value,
         audit: SyncAuditMode,
     ) -> PluginSyncOutcome {
+        self.invoke_with_response_limit(
+            subscriber,
+            capability,
+            payload,
+            audit,
+            self.config.http_max_response_body_bytes,
+            self.config.sync_timeout_ms,
+        )
+        .await
+    }
+
+    /// Storage reads may carry a bounded artwork/subtitle body larger than ordinary plugin events.
+    pub async fn invoke_with_response_limit(
+        &self,
+        subscriber: &PluginSyncSubscriber,
+        capability: &str,
+        payload: &Value,
+        audit: SyncAuditMode,
+        max_response_bytes: usize,
+        timeout_ms: u64,
+    ) -> PluginSyncOutcome {
         let started = Instant::now();
-        let result = self.invoke_inner(subscriber, capability, payload).await;
+        let result = self
+            .invoke_inner(
+                subscriber,
+                capability,
+                payload,
+                max_response_bytes.min(45 * 1024 * 1024),
+                timeout_ms.min(55_000).max(1),
+            )
+            .await;
         let duration = started.elapsed();
 
         let should_audit = matches!(audit, SyncAuditMode::All) || result.is_err();
@@ -242,6 +283,8 @@ impl PluginSyncInvoker {
         subscriber: &PluginSyncSubscriber,
         capability: &str,
         payload: &Value,
+        max_response_bytes: usize,
+        timeout_ms: u64,
     ) -> Result<Value, PluginSyncError> {
         if subscriber.runtime.trim() != SYNC_INVOKE_SUPPORTED_RUNTIME {
             return Err(PluginSyncError::UnsupportedRuntime(
@@ -258,7 +301,7 @@ impl PluginSyncInvoker {
 
         // per-plugin 并发预算：等待窗口计入总调用预算，超时视为 Busy。
         let semaphore = self.semaphore_for(&subscriber.plugin_id);
-        let timeout = Duration::from_millis(self.config.sync_timeout_ms);
+        let timeout = Duration::from_millis(timeout_ms);
         let permit = match tokio::time::timeout(timeout, semaphore.acquire_owned()).await {
             Ok(Ok(permit)) => permit,
             Ok(Err(_)) | Err(_) => {
@@ -269,7 +312,7 @@ impl PluginSyncInvoker {
         };
 
         let result = self
-            .execute_http_sync(subscriber, capability, payload, timeout)
+            .execute_http_sync(subscriber, capability, payload, timeout, max_response_bytes)
             .await;
         drop(permit);
 
@@ -289,6 +332,7 @@ impl PluginSyncInvoker {
         capability: &str,
         payload: &Value,
         timeout: Duration,
+        max_response_bytes: usize,
     ) -> Result<Value, PluginSyncError> {
         let uri = validate_http_entrypoint(&subscriber.entrypoint)
             .map_err(|err| PluginSyncError::Runtime(err.to_string()))?;
@@ -335,10 +379,9 @@ impl PluginSyncInvoker {
             .await
             .map_err(|err| PluginSyncError::Runtime(reqwest_runtime_error(err).to_string()))?;
         let status = response.status();
-        let response_body =
-            read_limited_response_body(response, self.config.http_max_response_body_bytes)
-                .await
-                .map_err(|err| PluginSyncError::Runtime(err.to_string()))?;
+        let response_body = read_limited_response_body(response, max_response_bytes)
+            .await
+            .map_err(|err| PluginSyncError::Runtime(err.to_string()))?;
 
         if !status.is_success() {
             let text = String::from_utf8_lossy(&response_body);

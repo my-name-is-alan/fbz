@@ -379,3 +379,17 @@ node --check examples/plugins/webhook-notifier-template/server.mjs
 - 写 metadata/artwork/marker 是否只写插件自己的 source。
 - 失败是否返回非 2xx 让后端重试，而不是吞掉错误。
 - 日志是否避免打印 token、secret、webhook URL。
+## 自带管理页面与存储能力
+
+`adminUi` 可选字段示例：
+
+```json
+"adminUi": {"path":"ui/index.html","actions":[{"key":"status","handler":"admin.status"}]},
+"storageProvider": {"handler":"storage.rpc"}
+```
+
+声明管理页需 `admin.menu` 和至少一个 `menu` 项；声明存储源需 `storage.provider` 权限。页面是包内 `ui/*.html`，脚本/CSS 可内联；沙箱不能访问宿主令牌，也不能直接联网。用 `postMessage` 发送 `fbz-plugin-action` 并监听 `fbz-plugin-result`，可参考 `plugins/guangya-storage/ui/index.html`。插件自身 HTTP 入口验证 `PLUGIN_SECRET_KEY` 的 HMAC 签名，可参考 `plugins/guangya-storage/server.mjs`。安装包必须保留审批和签名要求。
+
+存储 provider 的同步请求通过 `hookEvent: "storage.provider.request"`、`handler: storageProvider.handler` 发送。`request` 包含 `op`、`accountId`、`deviceId`、`qps`、加密凭据解密后的 `credentials` 及具体文件参数。插件返回 `{data, credentials?, error?}`；`credentials` 仅在宿主加密保存，前端不会收到。支持的操作为 `auth.start`、`auth.poll`、`auth.connect`、`list`、`resolve`、`read`；每种响应格式参照现有光鸭 provider。一个插件只接收自己账号的请求。宿主仍验证 CDN URL 与按权限回传的播放字节。
+
+插件管理页可声明动作 `storage.accounts`、`storage.createAccount`、`storage.connect`，由宿主完成账号隔离及凭据加密；这些动作的 handler 仅在插件声明 `storageProvider` 后可用。HTTP 运行时的服务进程仍需由部署管理员独立启动/更新，安装 ZIP 只注册经过审核的包和页面。

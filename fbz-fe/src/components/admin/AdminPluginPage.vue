@@ -19,6 +19,7 @@ import type {
   PluginMenuItem,
   PluginSummary,
 } from "@/types/admin.ts";
+import { serverRequest } from "@/service/modules/server.ts";
 import { useUiStore } from "@/stores/ui.ts";
 
 const route = useRoute();
@@ -33,6 +34,29 @@ const menuItems = ref<PluginMenuItem[]>([]);
 const config = ref<PluginConfig | null>(null);
 const configValues = ref<Record<string, unknown>>({});
 const savingConfig = ref(false);
+const storageProvider = ref(false);
+const legacyCount = ref(0);
+const storageVersion = ref(0);
+async function checkLegacy() {
+  if (pluginId.value !== "org.fbz.guangya") return;
+  try {
+    const data = await serverRequest<{ accounts: { provider: string }[] }>("/api/admin/storage");
+    legacyCount.value = data.accounts.filter((a) => a.provider === "guangya").length;
+  } catch {
+    legacyCount.value = 0;
+  }
+}
+async function adoptLegacy() {
+  try {
+    await serverRequest(`/api/admin/storage/providers/${pluginId.value}/adopt-legacy`, {});
+    await checkLegacy();
+    storageVersion.value++;
+    uiStore.showToast("旧光鸭账号已由插件接管", "success");
+  } catch {
+    uiStore.showToast("接管失败，请检查插件进程与签名密钥", "error");
+  }
+}
+watch(pluginId, () => void checkLegacy(), { immediate: true });
 
 /** 当前插件声明的菜单项（按 weight 排序），用于页内分区导航。 */
 const pluginMenu = computed(() =>
@@ -146,6 +170,27 @@ watch(pluginId, () => void loadAll(), { immediate: true });
           {{ item.label }}
         </RouterLink>
       </nav>
+
+      <PluginAdminFrame
+        :plugin-id="pluginId"
+        :page-path="route.path"
+        @capabilities="storageProvider = $event"
+      />
+      <section v-if="storageProvider && legacyCount" class="plugin-card">
+        <div class="card-body">
+          <p>
+            发现
+            {{ legacyCount }} 个旧光鸭账号。接管后保留媒体库和观看进度，账号请求会由当前插件处理。
+          </p>
+          <button class="du-btn" type="button" @click="adoptLegacy">接管旧账号</button>
+        </div>
+      </section>
+      <AdminStorage
+        v-if="storageProvider"
+        :key="storageVersion"
+        :provider-id="pluginId"
+        :provider-name="plugin?.name ?? pluginId"
+      />
 
       <!-- 插件概要 -->
       <section class="plugin-card">

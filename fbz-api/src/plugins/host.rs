@@ -339,6 +339,13 @@ struct PluginPermissionCapability {
 
 const PLUGIN_PERMISSION_CAPABILITIES: &[PluginPermissionCapability] = &[
     PluginPermissionCapability {
+        key: "storage.provider",
+        category: "storage",
+        risk_level: "high",
+        description: "Serve account-scoped directory, metadata and playback requests through the controlled storage provider contract.",
+        manifest_features: &["storageProvider"],
+    },
+    PluginPermissionCapability {
         key: "admin.menu",
         category: "admin",
         risk_level: "medium",

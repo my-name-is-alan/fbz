@@ -10,6 +10,7 @@ if (!(Test-Path -LiteralPath $keyFile)) {
 $keys=Get-Content -LiteralPath $keyFile | ConvertFrom-Json
 $env:FBZ_SECRET_KEY=$keys.cipher
 $env:FBZ_STORAGE_PLUGIN_KEY=$keys.plugin
+$env:PLUGIN_SECRET_KEY=$keys.plugin
 $env:FBZ_GUANGYA_PLUGIN_URL='http://127.0.0.1:8098/rpc'
 if($Build){Push-Location $root;try{cargo build --bin fbz-api;if($LASTEXITCODE -ne 0){throw 'Rust build failed'}}finally{Pop-Location}}
 $binary=Join-Path $root 'target/debug/fbz-api.exe'

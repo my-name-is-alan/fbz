@@ -197,6 +197,8 @@ mod tests {
             schedules: Vec::new(),
             menu: Vec::new(),
             config_schema: Vec::new(),
+            admin_ui: None,
+            storage_provider: None,
         }
     }
 
