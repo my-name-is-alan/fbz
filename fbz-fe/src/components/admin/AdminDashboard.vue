@@ -1,529 +1,429 @@
 <script setup lang="ts">
+import { listAdminJobs, listScheduledTasks } from "@/service/modules/admin.ts";
 import { useLibraryStore } from "@/stores/library.ts";
-import {
-  readSession,
-  serverRequest,
-  errorMessage,
-  serverAddress,
-} from "@/service/modules/server.ts";
-import type { ServerJob, ServerPlayback } from "@/service/modules/server.ts";
-const library = useLibraryStore();
-const loading = ref(false);
-const error = ref("");
-const online = ref(false);
-const version = ref("—");
-const sessions = ref<ServerPlayback[]>([]);
-const jobs = ref<ServerJob[]>([]);
-const counts = ref({ MovieCount: 0, EpisodeCount: 0, SeriesCount: 0 });
-const updated = ref("");
-async function refresh() {
-  if (loading.value || !readSession()) return;
-  loading.value = true;
-  error.value = "";
+import type { AdminJob, ScheduledTask } from "@/types/admin.ts";
+
+const libraryStore = useLibraryStore();
+
+const jobs = ref<AdminJob[]>([]);
+const scheduledTasks = ref<ScheduledTask[]>([]);
+const loadingOps = shallowRef(false);
+const opsError = shallowRef("");
+
+const totalMovies = computed(() => {
+  return libraryStore.libraries
+    .filter((l) => l.kind === "movie" || l.kind === "documentary")
+    .reduce((sum, l) => sum + l.count, 0);
+});
+
+const totalSeries = computed(() => {
+  return libraryStore.libraries
+    .filter((l) => l.kind === "series" || l.kind === "anime")
+    .reduce((sum, l) => sum + l.count, 0);
+});
+
+const queuedJobs = computed(() => jobs.value.filter((job) => job.status === "queued").length);
+const runningJobs = computed(
+  () => jobs.value.filter((job) => job.status === "running" || job.lockActive).length,
+);
+const failedJobs = computed(() => jobs.value.filter((job) => job.status === "failed").length);
+const enabledScheduledTasks = computed(
+  () => scheduledTasks.value.filter((task) => task.enabled).length,
+);
+const activeScheduledRuns = computed(() =>
+  scheduledTasks.value.reduce((sum, task) => sum + task.activeRunCount, 0),
+);
+
+onMounted(async () => {
+  if (!libraryStore.loaded) void libraryStore.loadFromBackend();
+  await loadOpsSummary();
+});
+
+function formatTime(value: string | null): string {
+  if (!value) return "未完成";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+async function loadOpsSummary() {
+  loadingOps.value = true;
+  opsError.value = "";
   try {
-    const [info, totals, playing, tasks] = await Promise.all([
-      serverRequest<{ Version: string }>("/emby/System/Info"),
-      serverRequest<typeof counts.value>("/emby/Items/Counts"),
-      serverRequest<ServerPlayback[]>("/api/admin/playback"),
-      serverRequest<ServerJob[]>("/api/admin/jobs?limit=8"),
+    const [jobPage, taskPage] = await Promise.all([
+      listAdminJobs({ limit: 8 }),
+      listScheduledTasks({ limit: 20 }),
     ]);
-    version.value = info.Version;
-    counts.value = totals;
-    sessions.value = playing;
-    jobs.value = tasks;
-    online.value = true;
-    updated.value = new Date().toLocaleTimeString();
-    await library.refresh();
-  } catch (err) {
-    error.value = errorMessage(err);
-    online.value = false;
+    jobs.value = jobPage.items;
+    scheduledTasks.value = taskPage.items;
+  } catch {
+    opsError.value = "后台任务摘要加载失败，请检查管理员权限。";
   } finally {
-    loading.value = false;
+    loadingOps.value = false;
   }
 }
-const jobNames: Record<string, string> = {
-  "library.scan": "媒体库扫描",
-  "media.probe": "媒体信息探测",
-  "metadata.refresh": "元数据刷新",
-};
-const status: Record<string, string> = {
-  queued: "排队中",
-  running: "执行中",
-  completed: "已完成",
-  succeeded: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
-function time(ticks: number) {
-  const seconds = Math.floor(ticks / 1e7);
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-}
-onMounted(refresh);
-useIntervalFn(refresh, 5000);
 </script>
 
 <template>
-  <section class="dashboard">
-    <header class="server-header">
-      <div>
-        <p class="eyebrow">服务器概览</p>
-        <h1>FBZ Server</h1>
-      </div>
-      <div class="server-state">
-        <span class="connection" :class="{ online }"><i />{{ online ? "已连接" : "未连接" }}</span
-        ><span class="version">版本 {{ version }}</span
-        ><button class="du-btn du-btn-sm" :disabled="loading" @click="refresh">
-          {{ loading ? "更新中…" : "刷新" }}
-        </button>
-      </div>
-    </header>
-    <p v-if="error" class="error" role="alert">
-      {{ error }} <RouterLink to="/user/login">重新连接 →</RouterLink>
-    </p>
-    <div v-if="!readSession()" class="connect-prompt">
-      <h2>连接你的媒体服务器</h2>
-      <p>登录后，在这里查看媒体库、播放会话和扫描任务。</p>
-      <RouterLink to="/user/login">连接服务器 →</RouterLink>
-    </div>
-    <dl class="metrics">
-      <div>
-        <dt>电影</dt>
-        <dd>{{ online ? counts.MovieCount : "—" }}</dd>
-      </div>
-      <div>
-        <dt>剧集</dt>
-        <dd>{{ online ? counts.SeriesCount : "—" }}</dd>
-      </div>
-      <div>
-        <dt>分集</dt>
-        <dd>{{ online ? counts.EpisodeCount : "—" }}</dd>
-      </div>
-      <div>
-        <dt>媒体库</dt>
-        <dd>{{ online ? library.libraries.length : "—" }}</dd>
-      </div>
-      <div>
-        <dt>播放会话</dt>
-        <dd>{{ online ? sessions.length : "—" }}</dd>
-      </div>
-    </dl>
-    <section class="playback-section">
-      <div class="section-head">
-        <div>
-          <h2>正在播放</h2>
-          <p>查看播放状态与进度，暂停后也会保留当前会话。</p>
+  <div class="admin-dashboard-view">
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="card-title">后台 Job</div>
+        <div class="metric-line">
+          <span class="metric-value">{{ jobs.length }}</span>
+          <span class="metric-meta">最近采样任务</span>
         </div>
-        <span class="meta">{{ sessions.length }} 个会话</span>
+        <div class="mini-stats">
+          <span>queued {{ queuedJobs }}</span>
+          <span>running {{ runningJobs }}</span>
+          <span>failed {{ failedJobs }}</span>
+        </div>
       </div>
-      <div v-if="sessions.length" class="session-grid">
-        <article
-          v-for="(session, index) in sessions"
-          :key="`${session.Id}-${index}`"
-          class="session-card"
-        >
-          <div class="session-heading">
-            <div class="media-monogram">{{ session.Name.slice(0, 1) }}</div>
-            <div>
-              <h3>{{ session.Name }}</h3>
-              <p>{{ session.UserName }}</p>
-              <span class="playing-label">{{ session.IsPaused ? "已暂停" : "正在播放" }}</span>
+
+      <div class="metric-card">
+        <div class="card-title">计划任务</div>
+        <div class="metric-line">
+          <span class="metric-value">{{ scheduledTasks.length }}</span>
+          <span class="metric-meta">已注册任务</span>
+        </div>
+        <div class="mini-stats">
+          <span>enabled {{ enabledScheduledTasks }}</span>
+          <span>active {{ activeScheduledRuns }}</span>
+        </div>
+      </div>
+
+      <div class="metric-card">
+        <div class="card-title">媒体库</div>
+        <div class="metric-line">
+          <span class="metric-value">{{ libraryStore.libraries.length }}</span>
+          <span class="metric-meta">真实库配置</span>
+        </div>
+        <div class="mini-stats">
+          <span>items {{ libraryStore.totalCount }}</span>
+        </div>
+      </div>
+    </div>
+
+    <p v-if="opsError" class="ops-error">{{ opsError }}</p>
+
+    <div class="dashboard-mid-row">
+      <div class="summary-section">
+        <div class="sub-label">媒体统计</div>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="icon">🎬</span>
+            <div class="stat-info">
+              <span class="number">{{ totalMovies }}</span>
+              <span class="label">电影总数</span>
             </div>
           </div>
-          <div class="timeline">
-            <span
-              >{{ time(session.PositionTicks) }} /
-              {{ session.RunTimeTicks ? time(session.RunTimeTicks) : "—" }}</span
-            ><span>{{
-              session.RunTimeTicks
-                ? Math.min(100, Math.round((session.PositionTicks / session.RunTimeTicks) * 100)) +
-                  "%"
-                : ""
-            }}</span>
+          <div class="stat-item">
+            <span class="icon">📺</span>
+            <div class="stat-info">
+              <span class="number">{{ totalSeries }}</span>
+              <span class="label">剧集与动漫</span>
+            </div>
           </div>
-          <progress
-            :value="session.PositionTicks"
-            :max="session.RunTimeTicks || Math.max(1, session.PositionTicks)"
-          />
-          <div class="stream-info">
-            <span>播放方式</span
-            ><strong>{{
-              {
-                direct_play: "直接播放",
-                direct_stream: "直接串流",
-                transcode: "转码播放",
-                strm_redirect: "远程直连",
-              }[session.PlayMethod] ?? session.PlayMethod
-            }}</strong>
+          <div class="stat-item">
+            <span class="icon">📁</span>
+            <div class="stat-info">
+              <span class="number">{{ libraryStore.totalCount }}</span>
+              <span class="label">媒体条目总数</span>
+            </div>
           </div>
-        </article>
-      </div>
-      <div v-else class="empty-playback">
-        <svg
-          viewBox="0 0 48 48"
-          width="42"
-          height="42"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.2"
-        >
-          <rect x="5" y="9" width="38" height="26" rx="4" />
-          <path d="m21 17 9 5-9 5z M17 41h14 M24 35v6" />
-        </svg>
-        <div>
-          <h3>{{ online ? "还没有正在播放的内容" : "等待服务器连接" }}</h3>
-          <p>
-            {{
-              online
-                ? "从媒体库选择一部影片，或使用 Emby 兼容客户端开始播放。"
-                : "连接后将显示服务器返回的播放状态。"
-            }}
-          </p>
         </div>
-        <RouterLink to="/library">打开媒体库 →</RouterLink>
       </div>
-    </section>
-    <section>
-      <div class="section-head">
-        <div>
-          <h2>任务动态</h2>
-          <p>扫描、媒体探测与元数据任务的最新状态。</p>
+
+      <div class="streams-section">
+        <div class="sub-label">
+          <span>计划任务状态</span>
+          <RouterLink class="sub-link" to="/admin/scheduled-tasks">查看全部</RouterLink>
         </div>
-        <RouterLink to="/admin/libraries">管理媒体库 →</RouterLink>
-      </div>
-      <p v-if="!jobs.length" class="empty-activity">暂无任务。添加媒体库后，启动第一次扫描。</p>
-      <div v-for="job in jobs" :key="job.id" class="activity">
-        <span class="activity-dot" :class="job.status" />
-        <div>
-          <strong>{{ jobNames[job.jobType] ?? "后台任务" }}</strong>
-          <p v-if="job.lastError" class="error">{{ job.lastError }}</p>
+
+        <div v-if="loadingOps" class="streams-empty">
+          <span>正在读取任务状态...</span>
         </div>
-        <span>{{ status[job.status] ?? job.status }}</span
-        ><time>{{ new Date(job.updatedAt).toLocaleTimeString() }}</time>
+        <div v-else-if="scheduledTasks.length === 0" class="streams-empty">
+          <span>后端当前未注册计划任务。</span>
+        </div>
+        <div v-else class="task-list">
+          <div v-for="task in scheduledTasks.slice(0, 5)" :key="task.id" class="task-item">
+            <div>
+              <span class="task-name">{{ task.taskKey }}</span>
+              <span class="task-meta">{{ task.scheduleKind }} / {{ task.scheduleValue }}</span>
+            </div>
+            <span class="task-status" :class="{ enabled: task.enabled }">
+              {{ task.enabled ? "启用" : "禁用" }}
+            </span>
+          </div>
+        </div>
       </div>
-    </section>
-    <footer>
-      <span>{{ readSession() ? serverAddress() : "FBZ · 自托管媒体库" }}</span
-      ><span v-if="updated">最后更新 {{ updated }}</span>
-    </footer>
-  </section>
+    </div>
+
+    <div class="activity-section">
+      <div class="sub-label">
+        <span>最近任务动态</span>
+        <button class="text-refresh" type="button" :disabled="loadingOps" @click="loadOpsSummary">
+          刷新
+        </button>
+      </div>
+      <div v-if="loadingOps" class="activity-empty">正在读取后台任务...</div>
+      <div v-else-if="jobs.length === 0" class="activity-empty">后端当前没有后台任务记录。</div>
+      <div v-else class="job-list">
+        <div v-for="job in jobs" :key="job.id" class="job-row">
+          <div class="job-main">
+            <span class="job-type">{{ job.jobType }}</span>
+            <span class="job-meta">{{ job.queueName }} / attempts {{ job.attempts }}</span>
+            <span v-if="job.lastError" class="job-error">{{ job.lastError }}</span>
+          </div>
+          <div class="job-side">
+            <span class="job-status" :class="job.status">{{ job.status }}</span>
+            <span class="job-time">{{ formatTime(job.finishedAt ?? job.updatedAt) }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped lang="scss">
-.dashboard {
-  max-width: 1180px;
-  font-size: 13px;
-}
-.server-header,
-.server-state,
-.section-head {
+.admin-dashboard-view {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
+  flex-direction: column;
+  gap: var(--fbz-space-5);
 }
-.server-header {
-  padding: 10px 0 28px;
-}
-h1 {
-  margin: 8px 0 0;
-  font-size: 28px;
-  font-weight: 600;
-  letter-spacing: -0.8px;
-}
-.eyebrow {
-  color: var(--fbz-color-text-muted);
-  font-size: 11px;
-  letter-spacing: 1px;
-  margin: 0;
-}
-.server-state {
-  justify-content: flex-end;
-  font-size: 12px;
-}
-.version {
-  color: var(--fbz-color-text-muted);
-}
-.connection {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 24px;
-  color: var(--fbz-color-text-muted);
-}
-.connection i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.connection.online {
-  color: var(--fbz-color-brand-500);
-}
-button {
-  background: none;
-  color: var(--fbz-color-text-soft);
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 6px;
-  padding: 7px 12px;
-  cursor: pointer;
-}
-button:disabled {
-  opacity: 0.5;
-}
-.metrics {
+
+.metrics-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  border-top: 1px solid var(--fbz-color-line-soft);
-  padding: 26px 0;
-  margin: 0 0 34px;
-  gap: 24px;
-}
-dt {
-  color: var(--fbz-color-text-muted);
-  font-size: 12px;
-  margin-bottom: 12px;
-}
-dd {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--fbz-color-brand-500);
-}
-h2 {
-  font-size: 22px;
-  font-weight: 550;
-  margin: 0 0 9px;
-  letter-spacing: -0.4px;
-}
-h3 {
-  font-size: 14px;
-  margin: 0 0 8px;
-  font-weight: 550;
-}
-p {
-  color: var(--fbz-color-text-muted);
-  line-height: 1.6;
-  margin: 0;
-}
-.section-head {
-  margin-bottom: 24px;
-}
-.meta,
-time {
-  color: var(--fbz-color-text-muted);
-  font-size: 12px;
-}
-.playback-section {
-  margin-bottom: 56px;
-}
-.session-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 20px;
-}
-.session-card {
-  padding: 18px;
-  background: var(--fbz-color-panel);
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: 8px;
-  max-width: 360px;
-}
-.session-heading {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.media-monogram {
-  display: grid;
-  place-items: center;
-  width: 64px;
-  height: 88px;
-  border-radius: 4px;
-  background: var(--fbz-color-panel-elevated);
-  color: var(--fbz-color-text-soft);
-  font-size: 28px;
-  flex-shrink: 0;
-}
-.playing-label {
-  display: inline-block;
-  color: var(--fbz-color-brand-500);
-  font-size: 11px;
-  margin-top: 10px;
-}
-.timeline,
-.stream-info {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 11px;
-  color: var(--fbz-color-text-muted);
-}
-.stream-info {
-  border-top: 1px solid var(--fbz-color-line-soft);
-  padding-top: 14px;
-  margin-top: 16px;
-}
-.stream-info strong {
-  font-weight: 500;
-  color: var(--fbz-color-text-soft);
-}
-progress {
-  appearance: none;
-  width: 100%;
-  height: 3px;
-  margin: 10px 0 0;
-  border: 0;
-}
-progress::-webkit-progress-bar {
-  background: var(--fbz-color-line);
-}
-progress::-webkit-progress-value {
-  background: var(--fbz-color-brand-500);
-}
-.empty-playback {
-  display: flex;
-  align-items: center;
-  gap: 22px;
-  padding: 32px 0;
-  border-top: 1px solid var(--fbz-color-line-soft);
-  border-bottom: 1px solid var(--fbz-color-line-soft);
-}
-.empty-playback svg {
-  color: var(--fbz-color-text-muted);
-  flex-shrink: 0;
-}
-.empty-playback a {
-  margin-left: auto;
-  white-space: nowrap;
-}
-a {
-  color: var(--fbz-color-text-soft);
-  text-decoration: none;
-  font-size: 12px;
-}
-a:hover {
-  color: var(--fbz-color-brand-500);
-}
-.activity {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 18px 0;
-  border-top: 1px solid var(--fbz-color-line-soft);
-}
-.activity > div {
-  flex: 1;
-  min-width: 0;
-}
-.activity strong {
-  font-weight: 500;
-}
-.activity > span:not(.activity-dot) {
-  color: var(--fbz-color-text-soft);
-  font-size: 12px;
-}
-.activity-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--fbz-color-text-muted);
-}
-.activity-dot.completed,
-.activity-dot.succeeded {
-  background: var(--fbz-color-brand-500);
-}
-.activity-dot.failed {
-  background: var(--fbz-color-danger-500);
-}
-.empty-activity {
-  padding: 24px 0;
-  border-top: 1px solid var(--fbz-color-line-soft);
-}
-.error {
-  color: var(--fbz-color-danger-500);
-  overflow-wrap: anywhere;
-}
-footer {
-  margin-top: 48px;
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  color: var(--fbz-color-text-muted);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-.connect-prompt {
-  padding: 24px;
-  margin-bottom: 24px;
-  background: var(--fbz-color-panel);
-  border-radius: 8px;
-}
-.connect-prompt a {
-  display: inline-block;
-  margin-top: 14px;
-  color: var(--fbz-color-brand-500);
-}
-:is(button, a):focus-visible {
-  outline: 2px solid var(--fbz-color-brand-500);
-  outline-offset: 4px;
-}
-@media (max-width: 600px) {
-  .server-header {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 20px;
-  }
-  .server-state {
-    gap: 14px;
-  }
-  .metrics {
-    grid-template-columns: repeat(3, 1fr);
-    gap: 24px 12px;
-  }
-  .empty-playback {
-    flex-wrap: wrap;
-  }
-  .empty-playback a {
-    margin: 0;
-  }
-  .section-head {
-    gap: 12px;
-    align-items: flex-start;
-  }
-  .activity time {
-    display: none;
-  }
-  footer {
-    flex-direction: column;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--fbz-space-4);
+
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
   }
 }
 
-.server-header {
-  padding: 0 0 28px;
+.metric-card {
+  background: var(--fbz-color-panel-strong);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: 6px;
+  padding: var(--fbz-space-4) var(--fbz-space-5);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+
+  .card-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--fbz-color-text-muted);
+    letter-spacing: 0.5px;
+  }
 }
-h1 {
+
+.metric-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--fbz-space-3);
+}
+
+.metric-value {
+  font-family: var(--fbz-font-display);
   font-size: 24px;
+  font-weight: 800;
+  color: var(--fbz-color-text);
 }
-.metrics {
-  padding-block: 26px;
+
+.metric-meta,
+.mini-stats,
+.job-meta,
+.job-time,
+.task-meta {
+  font-size: var(--fbz-font-size-xs);
+  color: var(--fbz-color-text-muted);
 }
-.metrics dd {
-  font-size: 24px;
-  font-variant-numeric: tabular-nums;
+
+.mini-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fbz-space-2);
 }
-.section-head h2 {
-  font-size: 23px;
-  font-weight: 550;
+
+.ops-error {
+  margin: 0;
+  color: var(--fbz-color-danger-500);
+  font-size: var(--fbz-font-size-sm);
 }
-.session-card {
-  border-radius: 10px;
-  padding: 22px;
+
+.dashboard-mid-row {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: var(--fbz-space-4);
+
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
+  }
 }
-.empty-playback {
-  min-height: 150px;
-  border-radius: 10px;
+
+.sub-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fbz-color-text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: var(--fbz-space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sub-link,
+.text-refresh {
+  border: 0;
+  background: transparent;
+  color: var(--fbz-color-brand-500);
+  font-size: var(--fbz-font-size-xs);
+  font-weight: 800;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+}
+
+.stats-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fbz-space-2);
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: var(--fbz-space-3) var(--fbz-space-4);
+  background: var(--fbz-color-panel-strong);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: 6px;
+
+  .icon {
+    font-size: 20px;
+  }
+
+  .stat-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+
+    .number {
+      font-family: var(--fbz-font-display);
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .label {
+      font-size: 10px;
+      color: var(--fbz-color-text-muted);
+      font-weight: 700;
+    }
+  }
+}
+
+.streams-section,
+.activity-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.streams-empty,
+.activity-empty {
+  border: 1px dashed var(--fbz-color-line-soft);
+  border-radius: 6px;
+  background: var(--fbz-color-panel-strong);
+  padding: 40px;
+  color: var(--fbz-color-text-muted);
+  text-align: center;
+  font-size: var(--fbz-font-size-sm);
+}
+
+.task-list,
+.job-list {
+  background: var(--fbz-color-panel-strong);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.task-item,
+.job-row {
+  padding: var(--fbz-space-3) var(--fbz-space-4);
+  border-top: 1px solid var(--fbz-color-line-soft);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--fbz-space-4);
+
+  &:first-child {
+    border-top: 0;
+  }
+}
+
+.task-name,
+.job-type {
+  display: block;
+  color: var(--fbz-color-text);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 800;
+}
+
+.task-status,
+.job-status {
+  align-self: flex-start;
+  border: 1px solid var(--fbz-color-line);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--fbz-color-text-muted);
+  font-size: var(--fbz-font-size-xs);
+  font-weight: 800;
+
+  &.enabled,
+  &.completed,
+  &.succeeded {
+    border-color: color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
+    color: var(--fbz-color-brand-500);
+  }
+
+  &.failed {
+    border-color: color-mix(in srgb, var(--fbz-color-danger-500) 30%, transparent);
+    color: var(--fbz-color-danger-500);
+  }
+}
+
+.job-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.job-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.job-error {
+  color: var(--fbz-color-danger-500);
+  font-size: var(--fbz-font-size-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 520px;
 }
 </style>

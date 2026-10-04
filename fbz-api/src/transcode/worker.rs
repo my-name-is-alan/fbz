@@ -10,13 +10,14 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
+    admin::repository::AdminRepository,
     config::{TranscodeConfig, TranscodeWorkerConfig},
     db::DbPool,
     media::tools::MediaToolDiagnostics,
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
     transcode::{
         cleanup::cleanup_session_output_dir_best_effort,
-        planner::{FfmpegPlan, TranscodePlanError, build_ffmpeg_plan},
+        planner::{FfmpegPlan, TranscodePlanError, TranscodeTuning, build_ffmpeg_plan_with_tuning},
         repository::{TranscodeClaimOutcome, TranscodeClaimRecord, TranscodeRepository},
         service::TranscodeQueueService,
     },
@@ -38,6 +39,7 @@ pub fn spawn_transcode_worker(
         let worker_id = crate::transcode::service::transcode_worker_id("transcode");
         let service = TranscodeQueueService::new(pool.clone(), transcode_config.clone());
         let repository = TranscodeRepository::new(pool.clone());
+        let admin_repository = AdminRepository::new(pool.clone());
         let hook_dispatcher = PluginHookDispatcher::new(pool);
         let mut tick = interval(Duration::from_secs(worker_config.interval_seconds));
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -65,7 +67,7 @@ pub fn spawn_transcode_worker(
                     }
                 }
                 _ = tick.tick() => {
-                    run_once(&service, &repository, &hook_dispatcher, &transcode_config, &transcode_cache_dir, &media_tools, &worker_id).await;
+                    run_once(&service, &repository, &admin_repository, &hook_dispatcher, &transcode_config, &transcode_cache_dir, &media_tools, &worker_id).await;
                 }
             }
         }
@@ -74,9 +76,11 @@ pub fn spawn_transcode_worker(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
     service: &TranscodeQueueService,
     repository: &TranscodeRepository,
+    admin_repository: &AdminRepository,
     hook_dispatcher: &PluginHookDispatcher,
     transcode_config: &TranscodeConfig,
     transcode_cache_dir: &PathBuf,
@@ -85,14 +89,34 @@ async fn run_once(
 ) {
     match service.claim_next(worker_id).await {
         Ok(TranscodeClaimOutcome::Claimed(session)) => {
+            // 管理端「转码设置」按会话读取（单行表，读取成本可忽略），改配置即时生效。
+            let tuning = match admin_repository.get_transcode_settings().await {
+                Ok(Some(settings)) => TranscodeTuning::from_settings(
+                    &settings.hardware_acceleration,
+                    &settings.preferred_encoder,
+                    &settings.max_resolution,
+                    settings.segment_duration,
+                    settings.throttle,
+                ),
+                Ok(None) => TranscodeTuning::default(),
+                Err(err) => {
+                    warn!(error = %err, "failed to load transcode settings; using defaults");
+                    TranscodeTuning::default()
+                }
+            };
             dispatch_transcode_hook(
                 hook_dispatcher,
                 transcode_hook_event(TRANSCODE_STARTED_EVENT, "running", &session, None),
             )
             .await;
-            if let Err(err) =
-                execute_claimed_session(repository, transcode_config, media_tools, session.clone())
-                    .await
+            if let Err(err) = execute_claimed_session(
+                repository,
+                transcode_config,
+                media_tools,
+                &tuning,
+                session.clone(),
+            )
+            .await
             {
                 let cleanup_reason = transcode_cleanup_reason(&err);
                 let message = err.to_string();
@@ -228,9 +252,10 @@ async fn execute_claimed_session(
     repository: &TranscodeRepository,
     transcode_config: &TranscodeConfig,
     media_tools: &MediaToolDiagnostics,
+    tuning: &TranscodeTuning,
     session: TranscodeClaimRecord,
 ) -> Result<(), TranscodeWorkerError> {
-    let plan = build_ffmpeg_plan(transcode_config, media_tools, &session)?;
+    let plan = build_ffmpeg_plan_with_tuning(transcode_config, media_tools, &session, tuning)?;
     run_ffmpeg(&plan).await?;
     let updated = repository.mark_succeeded(&session.id).await?;
     if !updated {

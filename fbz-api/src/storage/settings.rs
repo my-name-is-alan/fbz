@@ -119,7 +119,7 @@ async fn create_library(
     validate_settings(&input.settings)?;
     if input.name.trim().is_empty()
         || input.name.len() > 120
-        || !["movies", "tv"].contains(&input.library_type.as_str())
+        || !["movies", "tvshows"].contains(&input.library_type.as_str())
     {
         return Err(AppError::unprocessable("媒体库名称或类型无效"));
     }

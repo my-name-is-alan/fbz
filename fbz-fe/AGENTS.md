@@ -57,12 +57,11 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 ## 应用架构
 
 - `App.vue` 只保留应用入口级结构，不写页面布局、业务逻辑或临时样式；布局放在 `src/layouts/`。
-- 全局壳层布局是 `src/layouts/default.vue`：`AppHeader` + `RouterView`（手机导航由 AppHeader 提供），不做卡片跨路由飞渡或页面切换动画，保证媒体网格进入详情时足够轻量。`App.vue` 渲染 RouterView、GlobalUiContainer 和唯一的 PlaybackOverlay，播放器跨路由保留。
+- 全局壳层布局是 `src/layouts/default.vue`：`AppHeader` + `AppDrawer` + `RouterView` + `MusicPlayerBar`，不做卡片跨路由飞渡或页面切换动画，保证媒体网格进入详情时足够轻量。`App.vue` 渲染 RouterView、GlobalUiContainer 和唯一的 PlaybackOverlay，播放器跨路由保留。
 - 媒体卡片统一用 `MediaCard`：卡片主体进入详情，海报上的播放按钮打开全屏播放覆盖层，不走播放路由。`MediaItem.detailType`（movie/tv）决定详情与播放类型，与 libraryId 解耦（动漫=tv、纪录片=movie）。
 - 路由必须与文件目录对应，例如 `/user/login` 对应 `src/views/user/login/index.vue`；动态路由如 `/library/:id` 放在 `src/views/library/detail/index.vue`（不使用 `[id].vue` 文件名约定，路由表在 `src/router/index.ts` 手动维护）。
 - 详情页按类型分路径：`/movie/:id`、`/tv/:id`、`/person/:id`、`/collection/:id`，分别对应 `src/views/detail/{movie,tv,person,collection}/index.vue`。系列（collection）是一等概念，影片详情会链接到其所属系列。详情区块组件在 `src/components/detail/`：`DetailHero`（poster+fanart 头部 + 多版本下拉）、`CastRow`（演职员，左右箭头滚动）、`SeasonEpisodes`（季/集，默认定位到「继续观看」的季集）、`SimilarRow`（相似推荐）。
 - 网络请求统一走 `src/service/request.ts` 导出的 `request` 单例；新增接口模块放在 `src/service/modules/`。真实登录、媒体库、条目、PlaybackInfo 与进度回传由 `service/modules/server.ts` 和 `playback-reporter.ts` 提供，禁止在失败后退回模拟成功。
-- 历史 TMDB 设计数据（仅供旧详情页及登录装饰引用，首页与真实媒体库不得使用）：`scripts/fetch-tmdb.mjs` 一次性抓取（discover 多页 + 详情/相似/季 + 系列 + 高频演员），烤成两个文件：`tmdb-catalog.json`（轻量目录，约数百条，随包加载，用于首页/媒体库网格）与 `tmdb-details.json`（完整详情，体积大，**在 `tmdb.ts` 里用动态 `import()` 懒加载**，只在详情页下载一次）。`tmdb.ts` 提供 `imageUrl()`、`catalogItems`、`itemsByLibrary()`、`getXxxDetail()` 异步取详情、`versionsFor()`（合成播放版本/规格/字幕，TMDB 不提供）等。libraryId（movie/series/anime/documentary）= 归属库，type（movie/tv）= 详情路由类型，二者解耦。**token 只在抓取脚本里用（读 `.env` 的 `api_token`，注意值有行尾中文注释，解析只取引号内），绝不进前端构建包**；图片走公开 CDN `image.tmdb.org`（无需 token）。重新抓取改脚本里的 discover 页数/题材后跑 `node scripts/fetch-tmdb.mjs`。接后端后把 `tmdb.ts` 的函数换成对 fbz-api 的请求即可，页面消费方不变。
 - Pinia store 使用函数式 `defineStore("id", () => {})`，状态优先使用 `ref` / `computed`。
 - 组件中解构 store 优先使用 `storeToRefs()`。
 - 安装 Pinia 使用官网写法：`const pinia = createPinia(); app.use(pinia)`；如果路由守卫会读取 store，插件安装顺序保持 `Pinia` 先于 `Router`。
@@ -186,4 +185,13 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 
 ### 光鸭插件与媒体库边界
 
-光鸭入口位于 AdminPlugins 的配置弹窗，旧 /admin/storage 重定向至插件页。AdminStorage 只负责账号、扫码和虚拟挂载，不创建媒体库。AdminLibraries 通过独立挂载关联接口创建云盘媒体库，CloudLibraryPolicy 提供实际支持的 NFO 来源、图片缓存、刷新周期。不要恢复演示插件安装/卸载成功反馈。自动刷新由后端持久状态驱动，前端轮询仅显示结果。
+光鸭入口位于 AdminPlugins 的配置弹窗，旧 /admin/storage 重定向至插件页。AdminStorage 只负责账号、扫码和虚拟挂载，不创建媒体库。AdminLibraries 保留远端本地媒体库编辑器，CloudLibraries 通过独立挂载关联接口创建云盘媒体库，CloudLibraryPolicy 提供实际支持的 NFO 来源、图片缓存、刷新周期。不要恢复演示插件安装/卸载成功反馈。自动刷新由后端持久状态驱动，前端轮询仅显示结果。
+
+## 2026-10-05 远端合并约定
+
+- 保留远端真实插件市场、安装包审核、插件配置与菜单路由；CloudStoragePlugin 是 AdminPlugins 中的存储集成，不替换插件市场。
+- 后台沿用 views/admin/\*\* 独立路由及 AdminPageShell，不再使用 account/index.vue 集中切换器。
+- 登录以 request.ts 的 fbz_access_token 与 fbz_auth_user_id 为准，旧 fbz_session 仅做一次迁移；退出必须清理旧记录。server.ts 复用该会话，避免两套登录状态分裂。
+- App.vue 全局只挂载一个 PlaybackOverlay；默认布局不能重复挂载。电影、分集、首页入口必须保留 source.proxyUri 与 server 播放会话信息。
+- TMDB mock 已随远端移除，媒体与详情来自真实 API。保留远端音乐、照片、搜索、设置和插件功能。
+- 光鸭迁移重编号为 0097–0099；db/legacy_storage.rs 只对精确匹配的历史校验值做迁移记录兼容，禁止通用关闭 SQLx 校验。

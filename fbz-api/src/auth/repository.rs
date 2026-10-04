@@ -49,6 +49,32 @@ pub struct AuthenticatedUserRecord {
     pub role_name_normalized: String,
 }
 
+/// 长期 API key 行（管理端列表/创建响应）。AccessToken 只在创建时以明文返回一次，
+/// 列表回显 token_prefix。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiKeyRecord {
+    pub id: String,
+    pub app_name: String,
+    pub token_prefix: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub user_name: Option<String>,
+}
+
+impl ApiKeyRecord {
+    fn from_row(row: sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row as _;
+        Ok(Self {
+            id: row.try_get("id")?,
+            app_name: row.try_get("app_name")?,
+            token_prefix: row.try_get("token_prefix")?,
+            created_at: row.try_get("created_at")?,
+            last_used_at: row.try_get("last_used_at")?,
+            user_name: row.try_get("user_name")?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionInfoRecord {
     pub id: String,
@@ -73,6 +99,39 @@ pub struct DeviceInfoRecord {
     pub last_user_id: String,
     pub date_last_activity: Option<String>,
     pub icon_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CameraUploadRecord {
+    pub album: String,
+    pub name: String,
+    pub upload_id: String,
+    pub mime_type: String,
+    pub created_at: Option<String>,
+}
+
+impl CameraUploadRecord {
+    fn from_row(row: sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row as _;
+        Ok(Self {
+            album: row.try_get("album")?,
+            name: row.try_get("name")?,
+            upload_id: row.try_get("upload_id")?,
+            mime_type: row.try_get("mime_type")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertCameraUploadInput {
+    pub device_internal_id: i64,
+    pub album: String,
+    pub name: String,
+    pub upload_id: String,
+    pub mime_type: String,
+    pub file_path: String,
+    pub size_bytes: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -284,7 +343,7 @@ impl AuthRepository {
         &self,
         token: &str,
     ) -> Result<Option<AuthenticatedUserRecord>, sqlx::Error> {
-        sqlx::query(
+        let session_user = sqlx::query(
             r#"
             update sessions s
             set last_seen_at = now()
@@ -313,7 +372,188 @@ impl AuthRepository {
         .fetch_optional(&self.pool)
         .await?
         .map(AuthenticatedUserRecord::from_row)
+        .transpose()?;
+        if session_user.is_some() {
+            return Ok(session_user);
+        }
+
+        // 会话未命中时回退长期 API key（`Auth/Keys` 创建，绑定创建者账号）。
+        sqlx::query(
+            r#"
+            update api_keys ak
+            set last_used_at = now()
+            from users u
+            join roles r on r.id = u.role_id
+            where ak.user_id = u.id
+              and ak.token_hash = $1
+              and ak.revoked_at is null
+              and (ak.expires_at is null or ak.expires_at > now())
+              and u.is_disabled = false
+            returning
+                u.id,
+                u.public_id::text as public_id,
+                u.username,
+                r.name as role_name,
+                r.name_normalized as role_name_normalized
+            "#,
+        )
+        .bind(hash_token(token))
+        .fetch_optional(&self.pool)
+        .await?
+        .map(AuthenticatedUserRecord::from_row)
         .transpose()
+    }
+
+    /// 列出未吊销的 API key（管理端视图，lower-bound 计数）。
+    pub async fn list_api_keys(
+        &self,
+        start_index: i64,
+        limit: i64,
+    ) -> Result<(Vec<ApiKeyRecord>, u32), sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                ak.public_id::text as id,
+                ak.name as app_name,
+                ak.token_prefix,
+                to_char(ak.created_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                    as created_at,
+                to_char(ak.last_used_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                    as last_used_at,
+                u.username as user_name
+            from api_keys ak
+            left join users u on u.id = ak.user_id
+            where ak.revoked_at is null
+            order by ak.created_at desc, ak.id desc
+            offset $1
+            limit $2 + 1
+            "#,
+        )
+        .bind(start_index)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let visible_limit = limit.max(0) as usize;
+        let has_more = rows.len() > visible_limit;
+        let records = rows
+            .into_iter()
+            .take(visible_limit)
+            .map(ApiKeyRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let total = if records.is_empty() {
+            0
+        } else {
+            start_index
+                .max(0)
+                .saturating_add(records.len() as i64)
+                .saturating_add(i64::from(has_more))
+                .try_into()
+                .unwrap_or(u32::MAX)
+        };
+
+        Ok((records, total))
+    }
+
+    /// 创建长期 API key（绑定创建者账号）。`token`/`token_prefix` 由调用方
+    /// （`issue_access_token`）生成，DB 只存哈希与前缀。
+    pub async fn create_api_key(
+        &self,
+        user_id: i64,
+        app_name: &str,
+        token_hash: &[u8],
+        token_prefix: &str,
+    ) -> Result<ApiKeyRecord, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            insert into api_keys (user_id, name, token_hash, token_prefix)
+            values ($1, $2, $3, $4)
+            returning
+                public_id::text as id,
+                name as app_name,
+                token_prefix,
+                to_char(created_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                    as created_at,
+                null::text as last_used_at,
+                null::text as user_name
+            "#,
+        )
+        .bind(user_id)
+        .bind(app_name)
+        .bind(token_hash)
+        .bind(token_prefix)
+        .fetch_one(&self.pool)
+        .await?;
+
+        ApiKeyRecord::from_row(row)
+    }
+
+    /// 吊销 API key。`key` 兼容三种形态：原始 token（按哈希匹配）、列表回显的
+    /// token 前缀、key 的 public_id。返回吊销行数。
+    pub async fn revoke_api_key(&self, key: &str) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            update api_keys
+            set revoked_at = now()
+            where revoked_at is null
+              and (
+                    token_hash = $1
+                 or token_prefix = $2
+                 or public_id = case
+                        when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        then $2::uuid
+                        else null::uuid
+                    end
+              )
+            "#,
+        )
+        .bind(hash_token(key))
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// 列出全部活跃会话（服务器管理员的 `Sessions` 视图 / 远程控制目标列表）。
+    pub async fn list_active_sessions(
+        &self,
+        limit: i64,
+        device_id: Option<&str>,
+    ) -> Result<Vec<SessionInfoRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                s.public_id::text as id,
+                u.public_id::text as user_id,
+                u.username as user_name,
+                d.client_name as client,
+                d.device_id,
+                d.device_name,
+                d.client_version as application_version,
+                true as is_active
+            from sessions s
+            join users u on u.id = s.user_id
+            left join devices d on d.id = s.device_id
+            where s.revoked_at is null
+              and s.expires_at > now()
+              and ($2::text is null or d.device_id = $2)
+              and not exists (
+                  select 1
+                  from devices revoked
+                  where revoked.id = s.device_id
+                    and revoked.revoked_at is not null
+              )
+            order by s.last_seen_at desc nulls last, s.created_at desc, s.id desc
+            limit $1
+            "#,
+        )
+        .bind(limit.clamp(1, 100))
+        .bind(device_id.map(str::trim))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(SessionInfoRecord::from_row).collect()
     }
 
     pub async fn list_active_sessions_for_user(
@@ -357,6 +597,75 @@ impl AuthRepository {
         .await?;
 
         rows.into_iter().map(SessionInfoRecord::from_row).collect()
+    }
+
+    /// 按 access token 解析其对应的活跃会话 public id（websocket 注册用；
+    /// 长期 API key 不绑定会话，返回 None）。
+    pub async fn find_session_public_id_by_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            select s.public_id::text
+            from sessions s
+            where s.access_token_hash = $1
+              and s.revoked_at is null
+              and s.expires_at > now()
+              and not exists (
+                  select 1
+                  from devices d
+                  where d.id = s.device_id
+                    and d.revoked_at is not null
+              )
+            limit 1
+            "#,
+        )
+        .bind(hash_token(token))
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// 按会话 public id 查任意用户的活跃会话（服务器管理员远程控制他人会话用）。
+    pub async fn find_active_session_by_public_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionInfoRecord>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select
+                s.public_id::text as id,
+                u.public_id::text as user_id,
+                u.username as user_name,
+                d.client_name as client,
+                d.device_id,
+                d.device_name,
+                d.client_version as application_version,
+                true as is_active
+            from sessions s
+            join users u on u.id = s.user_id
+            left join devices d on d.id = s.device_id
+            where s.public_id = case
+                  when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+              and s.revoked_at is null
+              and s.expires_at > now()
+              and not exists (
+                  select 1
+                  from devices revoked
+                  where revoked.id = s.device_id
+                    and revoked.revoked_at is not null
+              )
+            limit 1
+            "#,
+        )
+        .bind(session_id.trim())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(SessionInfoRecord::from_row).transpose()
     }
 
     pub async fn find_active_session_for_user(
@@ -448,6 +757,72 @@ impl AuthRepository {
         let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
 
         rows.into_iter().map(DeviceInfoRecord::from_row).collect()
+    }
+
+    /// 列出设备的相机上传历史（客户端据此跳过已上传文件）。
+    pub async fn list_camera_uploads(
+        &self,
+        device_internal_id: i64,
+        limit: i64,
+    ) -> Result<Vec<CameraUploadRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                album,
+                name,
+                upload_id,
+                mime_type,
+                created_at::text as created_at
+            from camera_uploads
+            where device_id = $1
+            order by created_at desc, id desc
+            limit $2
+            "#,
+        )
+        .bind(device_internal_id)
+        .bind(limit.clamp(1, 10_000))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(CameraUploadRecord::from_row).collect()
+    }
+
+    /// 记录一次相机上传；同 (album, name, id) 重传时幂等覆盖为最新文件。
+    pub async fn upsert_camera_upload(
+        &self,
+        input: InsertCameraUploadInput,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            insert into camera_uploads (
+                device_id,
+                album,
+                name,
+                upload_id,
+                mime_type,
+                file_path,
+                size_bytes
+            )
+            values ($1, $2, $3, $4, $5, $6, $7)
+            on conflict (device_id, album, name, upload_id)
+            do update set
+                mime_type = excluded.mime_type,
+                file_path = excluded.file_path,
+                size_bytes = excluded.size_bytes,
+                created_at = now()
+            "#,
+        )
+        .bind(input.device_internal_id)
+        .bind(&input.album)
+        .bind(&input.name)
+        .bind(&input.upload_id)
+        .bind(&input.mime_type)
+        .bind(&input.file_path)
+        .bind(input.size_bytes)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn find_device_info(

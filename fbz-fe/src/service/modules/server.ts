@@ -1,4 +1,4 @@
-import { request } from "@/service/request.ts";
+import { request, getAccessToken, setAccessToken } from "@/service/request.ts";
 
 export interface ServerSession {
   token: string;
@@ -52,27 +52,30 @@ export interface ServerPlayback {
   PlayMethod: string;
 }
 export function readSession(): ServerSession | undefined {
-  try {
-    const session = JSON.parse(
-      sessionStorage.getItem("fbz_session") ?? localStorage.getItem("fbz_session") ?? "null",
-    );
-    if (
-      !session ||
-      ![session.token, session.userId, session.username, session.address].every(
-        (value) => typeof value === "string" && value.length > 0,
-      )
-    )
-      return undefined;
-    return session as ServerSession;
-  } catch {
-    return undefined;
-  }
+  const token = getAccessToken();
+  const userId = localStorage.getItem("fbz_auth_user_id");
+  if (!token || !userId) return undefined;
+  return {
+    token,
+    userId,
+    username: localStorage.getItem("fbz_auth_username") || "",
+    address: window.location.origin,
+  };
 }
+
 export function saveSession(session: ServerSession, remember = false) {
   clearSession();
+  setAccessToken(session.token);
+  if (!remember) {
+    localStorage.removeItem("fbz_access_token");
+    sessionStorage.setItem("fbz_access_token", session.token);
+  }
+  localStorage.setItem("fbz_auth_user_id", session.userId);
+  localStorage.setItem("fbz_auth_username", session.username);
   (remember ? localStorage : sessionStorage).setItem("fbz_session", JSON.stringify(session));
 }
 export function clearSession() {
+  setAccessToken(null);
   sessionStorage.removeItem("fbz_session");
   localStorage.removeItem("fbz_session");
 }
@@ -226,7 +229,7 @@ export async function seriesEpisodes(id: string) {
     items.push(...(await enrich(result.Items.slice(i, i + 100))));
   return { Items: items };
 }
-export async function preparePlayback(item: ServerItem) {
+export async function preparePlayback(item: ServerItem, mediaSourceId?: string) {
   const detail = await itemDetail(item.Id);
   const info = await serverRequest<{
     PlaySessionId: string;
@@ -245,7 +248,9 @@ export async function preparePlayback(item: ServerItem) {
     EnableDirectStream: true,
     EnableTranscoding: false,
   });
-  const source = info.MediaSources[0];
+  const source = mediaSourceId
+    ? info.MediaSources.find((s) => s.Id === mediaSourceId)
+    : info.MediaSources[0];
   if (!source?.DirectStreamUrl) throw new Error("该条目暂无可播放媒体源");
   const uri = new URL(source.DirectStreamUrl, `${serverAddress()}/`);
   if (!["http:", "https:"].includes(uri.protocol)) throw new Error("不支持的媒体地址");

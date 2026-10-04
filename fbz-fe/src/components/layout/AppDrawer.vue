@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useLibraryStore } from "@/stores/library.ts";
+import { libraryRoute } from "@/utils/libraryRoute.ts";
 
 const open = defineModel<boolean>({ default: false });
 
@@ -34,7 +35,7 @@ useEventListener(window, "keydown", (e) => {
         <RouterLink
           v-for="lib in libraries"
           :key="lib.id"
-          :to="`/library/${lib.id}`"
+          :to="libraryRoute(lib)"
           class="link"
           @click="close"
         >

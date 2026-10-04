@@ -1,0 +1,30 @@
+{
+  "id": "dev.fbz.scraper.demo",
+  "name": "Demo Metadata Scraper",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19093/fbz-plugin",
+  "description": "First-party example scraper: answers synchronous metadata.provider.query invocations from a local fixture. Built-in providers (TMDB/TVDB) always win; this plugin fills gaps or acts as the fallback base match when nothing else matched.",
+  "permissions": [
+    {
+      "key": "metadata.read",
+      "reason": "Receive metadata provider queries with the recognition-layer lookup context."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "metadata.provider.query",
+      "handler": "providers.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "fixture_path",
+      "label": "Fixture path",
+      "type": "string",
+      "required": false,
+      "helpText": "Optional path to a JSON fixture mapping normalized titles to metadata."
+    }
+  ]
+}

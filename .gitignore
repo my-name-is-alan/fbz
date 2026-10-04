@@ -44,3 +44,7 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Application route named logs is source code, not runtime logs.
+!fbz-fe/src/views/admin/logs/
+!fbz-fe/src/views/admin/logs/index.vue

@@ -380,7 +380,20 @@ fn current_directory_string() -> Result<String, AppError> {
 }
 
 fn path_to_string(path: impl AsRef<Path>) -> String {
-    path.as_ref().to_string_lossy().into_owned()
+    strip_verbatim_prefix(path.as_ref().to_string_lossy().as_ref())
+}
+
+/// 去掉 Windows 扩展长度路径前缀（verbatim prefix）。`fs::canonicalize` 在 Windows 上会返回
+/// `\\?\C:\Media` 或 `\\?\UNC\server\share` 这类前缀路径，直接回给前端会显示成"乱码"般的
+/// `\\?\`。这里把它还原成用户熟悉的 `C:\Media` / `\\server\share`。非 Windows 或无前缀路径原样返回。
+fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        path.to_owned()
+    }
 }
 
 fn parse_optional_emby_body<T>(headers: &HeaderMap, body: &Bytes) -> Result<T, AppError>
@@ -402,6 +415,18 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn strip_verbatim_prefix_normalizes_windows_extended_paths() {
+        assert_eq!(strip_verbatim_prefix(r"\\?\C:\Media"), r"C:\Media");
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\server\share"),
+            r"\\server\share"
+        );
+        // 无前缀 / 非 Windows 路径原样返回。
+        assert_eq!(strip_verbatim_prefix(r"C:\Media"), r"C:\Media");
+        assert_eq!(strip_verbatim_prefix("/mnt/media"), "/mnt/media");
+    }
 
     #[test]
     fn file_system_entry_serializes_pascal_case_with_official_enum() {

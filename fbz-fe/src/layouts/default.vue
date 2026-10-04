@@ -1,8 +1,19 @@
+<script setup lang="ts">
+const drawerOpen = ref(false);
+</script>
+
 <template>
-  <div class="app-shell"><AppHeader /><RouterView /></div>
+  <div class="app-shell">
+    <AppHeader @open-drawer="drawerOpen = true" />
+    <AppDrawer v-model="drawerOpen" />
+
+    <RouterView />
+    <MusicPlayerBar />
+  </div>
 </template>
+
 <style scoped lang="scss">
 .app-shell {
-  min-height: 100dvh;
+  min-height: 100vh;
 }
 </style>

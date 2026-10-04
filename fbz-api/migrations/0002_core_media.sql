@@ -99,7 +99,7 @@ create table if not exists libraries (
     unique (public_id),
     unique (name),
     check (length(trim(name)) > 0),
-    check (library_type in ('movies', 'tv', 'music', 'mixed'))
+    check (library_type in ('movies', 'tvshows', 'music', 'homevideos', 'mixed', 'livetv'))
 );
 
 create table if not exists library_paths (
@@ -164,7 +164,7 @@ create table if not exists media_items (
     ) stored,
     unique (public_id),
     check (length(trim(title)) > 0),
-    check (item_type in ('folder', 'movie', 'series', 'season', 'episode', 'artist', 'album', 'track', 'collection')),
+    check (item_type in ('folder', 'movie', 'series', 'season', 'episode', 'artist', 'album', 'track', 'collection', 'photo', 'video', 'tvchannel', 'program', 'recording')),
     check (metadata_status in ('pending', 'matched', 'manual', 'failed')),
     check (scan_status in ('pending', 'scanned', 'missing', 'failed')),
     check (runtime_ticks is null or runtime_ticks >= 0)

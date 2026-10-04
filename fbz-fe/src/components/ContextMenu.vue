@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { useUiStore } from "@/stores/ui.ts";
+import { useAuthStore } from "@/stores/auth.ts";
+import { queueItemMetadataRefresh } from "@/service/modules/admin.ts";
+import { setFavorite } from "@/service/modules/userData.ts";
 
 const uiStore = useUiStore();
+const authStore = useAuthStore();
 const { contextMenu } = storeToRefs(uiStore);
 
 const menuRef = ref<HTMLElement>();
 const showDeleteConfirm = ref(false);
+const busyAction = ref<"favorite" | "refresh" | null>(null);
 
 // Close menu if user clicks outside
 onClickOutside(menuRef, () => {
@@ -22,21 +27,41 @@ watch(
   },
 );
 
-function toggleFavorite() {
-  if (!contextMenu.value.item) return;
+async function toggleFavorite() {
+  if (!contextMenu.value.item || busyAction.value) return;
   const item = contextMenu.value.item;
-  item.isFavorite = !item.isFavorite;
-  uiStore.showToast(item.isFavorite ? "已成功添加到收藏夹！" : "已从收藏夹中移除。", "success");
-  uiStore.closeContextMenu();
+  if (!authStore.userId) {
+    uiStore.showToast("请先登录后再修改收藏状态。", "warning");
+    return;
+  }
+
+  const nextFavorite = !item.isFavorite;
+  busyAction.value = "favorite";
+  try {
+    await setFavorite(authStore.userId, item.id, nextFavorite);
+    item.isFavorite = nextFavorite;
+    uiStore.showToast(nextFavorite ? "已成功添加到收藏夹。" : "已从收藏夹中移除。", "success");
+    uiStore.closeContextMenu();
+  } catch {
+    uiStore.showToast("收藏状态更新失败，请检查网络与权限。", "error");
+  } finally {
+    busyAction.value = null;
+  }
 }
 
-function refreshMetadata() {
-  if (!contextMenu.value.item) return;
-  uiStore.showToast(
-    `正在重新连接搜刮源并刷新【${contextMenu.value.item.title}】的元数据...`,
-    "info",
-  );
-  uiStore.closeContextMenu();
+async function refreshMetadata() {
+  if (!contextMenu.value.item || busyAction.value) return;
+  const item = contextMenu.value.item;
+  busyAction.value = "refresh";
+  try {
+    await queueItemMetadataRefresh(item.id, "manual-context-menu");
+    uiStore.showToast(`已将【${item.title}】加入元数据刷新队列。`, "success");
+    uiStore.closeContextMenu();
+  } catch {
+    uiStore.showToast("刷新元数据入队失败，请确认当前账号具备管理权限。", "error");
+  } finally {
+    busyAction.value = null;
+  }
 }
 
 function openEditMetadata() {
@@ -46,10 +71,9 @@ function openEditMetadata() {
 
 function deleteItem() {
   if (!contextMenu.value.item) return;
-  // Simulating removal
   uiStore.showToast(
-    `条目【${contextMenu.value.item.title}】已成功从本地物理磁盘及数据库中删除！`,
-    "success",
+    "后端尚未开放媒体条目删除接口。请先在服务器文件系统移除文件，再扫描媒体库。",
+    "warning",
   );
   uiStore.closeContextMenu();
 }
@@ -77,6 +101,7 @@ useEventListener(window, "keydown", (e) => {
     <ul v-if="!showDeleteConfirm" class="menu-list">
       <li
         class="menu-item"
+        :class="{ disabled: busyAction === 'favorite' }"
         tabindex="0"
         role="menuitem"
         @click="toggleFavorite"
@@ -88,6 +113,7 @@ useEventListener(window, "keydown", (e) => {
       </li>
       <li
         class="menu-item"
+        :class="{ disabled: busyAction === 'refresh' }"
         tabindex="0"
         role="menuitem"
         @click="refreshMetadata"
@@ -95,7 +121,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.space.prevent="refreshMetadata"
       >
         <span class="icon" aria-hidden="true">🔄</span>
-        <span>刷新元数据</span>
+        <span>{{ busyAction === "refresh" ? "正在入队…" : "刷新元数据" }}</span>
       </li>
       <li
         class="menu-item"
@@ -209,6 +235,11 @@ useEventListener(window, "keydown", (e) => {
 
   .icon {
     font-size: 14px;
+  }
+
+  &.disabled {
+    pointer-events: none;
+    opacity: 0.62;
   }
 }
 

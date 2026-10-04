@@ -2,10 +2,7 @@
 export type MediaKind = "movie" | "series" | "anime" | "documentary" | "music";
 
 export interface MediaLibrary {
-  paths?: string[];
   scrapers?: string[];
-  metadataLanguage?: string;
-  preferOriginalPoster?: boolean;
   imageCache?: boolean;
   preloadMetadata?: boolean;
   realtimeMonitor?: boolean;
@@ -15,6 +12,16 @@ export interface MediaLibrary {
   kind: MediaKind;
   /** 该库的条目数 */
   count: number;
+  /** 后端规范库类型（movies / tvshows / music / mixed 等）。 */
+  libraryType?: string;
+  /** 后端物理路径配置；管理弹窗按需填充。 */
+  paths?: string[];
+  metadataLanguage?: string;
+  metadataCountry?: string;
+  imageLanguage?: string;
+  preferOriginalPoster?: boolean;
+  imageFallbackLanguages?: string[];
+  isHidden?: boolean;
 }
 
 /** 媒体条目（电影 / 剧集等的统一展示模型） */
@@ -42,6 +49,8 @@ export interface MediaItem {
   rating?: number;
   /** 入库时间戳（ms），用于按添加时间排序 */
   addedAt?: number;
+  /** 用户收藏状态（来自后端 UserData / 右键菜单更新）。 */
+  isFavorite?: boolean;
 }
 
 /** 单库列表的排序方式 */
@@ -120,6 +129,8 @@ export interface CastMember {
   character: string;
   profile_path: string | null;
   order: number;
+  /** 人物详情路由 key：后端按人物名解析（/person/{name}），缺省回退到数字 id。 */
+  linkId?: string;
 }
 
 /** 导演 / 主创 */
@@ -199,7 +210,7 @@ export interface CollectionDetail {
 
 /** 演员代表作 */
 export interface PersonCredit {
-  id: number;
+  id: string;
   type: "movie" | "tv";
   libraryId: string;
   title: string;

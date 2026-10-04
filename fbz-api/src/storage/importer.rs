@@ -228,7 +228,7 @@ pub async fn import_video(
     let prefetch = options.get::<String, _>("image_cache") == "prefetch";
     // Invalid NFO is a per-item warning; a network error must not advance the checkpoint.
     let mut meta = match if use_nfo {
-        metadata(state, account, &entries, name, library_type == "tv").await
+        metadata(state, account, &entries, name, library_type == "tvshows").await
     } else {
         Ok(nfo::Nfo::default())
     } {
@@ -239,7 +239,7 @@ pub async fn import_video(
         }
         Err(error) => return Err(error),
     };
-    if library_type == "tv" {
+    if library_type == "tvshows" {
         if let Some((season, episode)) = nfo::episode_numbers(name) {
             meta.season = meta.season.or(Some(season));
             meta.episode = meta.episode.or(Some(episode));
@@ -251,7 +251,7 @@ pub async fn import_video(
         meta.title.trim()
     };
     let mut parent_item = None;
-    if library_type == "tv" {
+    if library_type == "tvshows" {
         let mut dir = parent_dir.to_owned();
         let mut series_meta = None;
         let mut series_entries = Vec::new();
@@ -353,7 +353,7 @@ pub async fn import_video(
     let item = if let Some(id) = existing {
         id
     } else {
-        sqlx::query_scalar("insert into media_items(library_id,title,item_type,metadata_status,scan_status) values($1,$2,$3,'manual','scanned') returning id").bind(library).bind(title).bind(if library_type=="tv"{"episode"}else{"movie"}).fetch_one(&mut **tx).await.map_err(sql_error)?
+        sqlx::query_scalar("insert into media_items(library_id,title,item_type,metadata_status,scan_status) values($1,$2,$3,'manual','scanned') returning id").bind(library).bind(title).bind(if library_type=="tvshows"{"episode"}else{"movie"}).fetch_one(&mut **tx).await.map_err(sql_error)?
     };
     let runtime = meta.runtime.map(|v| (v * 60.0 * 10_000_000.0) as i64);
     sqlx::query("update media_items set title=$2,original_title=$3,overview=$4,production_year=$5,runtime_ticks=$6,parent_id=$7,season_number=$8,episode_number=$9,index_number=$9,parent_index_number=$8,metadata_status='manual',scan_status='scanned',is_deleted=false,updated_at=now() where id=$1")

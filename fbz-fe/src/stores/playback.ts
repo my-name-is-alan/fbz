@@ -43,6 +43,7 @@ export interface PlaybackItem {
   backdrop?: string;
   tags?: string[];
   duration?: number;
+  startPositionSeconds?: number;
   source?: PlaybackSource;
   chapters?: PlaybackChapter[];
   audioTracks?: PlaybackTrack[];
@@ -75,9 +76,11 @@ export const usePlaybackStore = defineStore("playback", () => {
     const episode = playlist.value.find((entry) => entry.id === episodeId);
     if (!current || !episode) return;
 
-    if (episode.serverItem) {
+    {
       try {
-        const prepared = await preparePlayback(episode.serverItem);
+        const prepared = await preparePlayback(
+          episode.serverItem ?? { Id: episode.id, Name: episode.title, Type: "Episode" },
+        );
         if (version !== selection || !item.value) return;
         item.value = {
           ...prepared,
@@ -92,16 +95,6 @@ export const usePlaybackStore = defineStore("playback", () => {
       }
       return;
     }
-    item.value = {
-      ...current,
-      type: "episode",
-      id: episode.id,
-      title: episode.title,
-      subtitle: episode.subtitle,
-      poster: episode.poster ?? current.poster,
-      backdrop: episode.backdrop ?? current.backdrop,
-      duration: episode.duration,
-    };
   }
 
   function playPreviousEpisode() {

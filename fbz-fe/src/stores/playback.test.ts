@@ -67,3 +67,20 @@ it("closing the player cancels a pending episode selection", async () => {
   await pending;
   expect(store.isOpen).toBe(false);
 });
+it("loads a remote-route episode that has no legacy serverItem", async () => {
+  const store = usePlaybackStore();
+  const initial = fixture();
+  initial.playlist = initial.playlist!.map(({ serverItem: _, ...episode }) => episode);
+  store.open(initial);
+  mocks.prepare.mockResolvedValue({
+    id: "second",
+    type: "episode",
+    title: "Second",
+    source: { uri: "/stream", proxyUri: "/bytes" },
+    server: { playSessionId: "session", mediaSourceId: "source", startTicks: 100 },
+  });
+  await store.selectEpisode("second");
+  expect(mocks.prepare).toHaveBeenCalledWith({ Id: "second", Name: "Series", Type: "Episode" });
+  expect(store.item?.source?.proxyUri).toBe("/bytes");
+  expect(store.item?.server?.playSessionId).toBe("session");
+});

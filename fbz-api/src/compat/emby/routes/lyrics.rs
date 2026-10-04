@@ -76,18 +76,119 @@ pub async fn remote_lyrics_search(
     uri: Uri,
 ) -> Result<Json<Vec<RemoteLyricInfoDto>>, AppError> {
     let query = remote_lyrics_search_input(query)?;
-    ensure_lyrics_item_visible(
+    let user = ensure_lyrics_item_visible(
         &state,
         &item_id,
         &LyricsQuery {
-            user_id: query.user_id,
+            user_id: query.user_id.clone(),
         },
         &headers,
         &uri,
     )
     .await?;
 
-    Ok(Json(Vec::new()))
+    // Provider 过滤：显式指定且不是 LrcLib → 空（当前只接 LRCLIB，免密钥公共服务）。
+    if let Some(provider) = query.provider_name.as_deref()
+        && !provider.eq_ignore_ascii_case("lrclib")
+    {
+        return Ok(Json(Vec::new()));
+    }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    // 搜索词：客户端 SearchTerm 优先，缺省用曲目标题。
+    let search_term = match query.search_term.clone() {
+        Some(term) => Some(term),
+        None => LibraryRepository::new(database.clone())
+            .find_user_item_by_id(user.id, &item_id)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get lyrics item: {err}")))?
+            .map(|item| item.name),
+    };
+    let Some(search_term) = search_term.filter(|term| !term.trim().is_empty()) else {
+        return Ok(Json(Vec::new()));
+    };
+
+    Ok(Json(search_lrclib_lyrics(&search_term).await?))
+}
+
+/// LRCLIB 公共搜索（无需 API key）。失败降级为空列表（歌词是增值功能，
+/// 外部服务抖动不该打断客户端）。
+async fn search_lrclib_lyrics(search_term: &str) -> Result<Vec<RemoteLyricInfoDto>, AppError> {
+    #[derive(Deserialize)]
+    struct LrclibRecord {
+        id: i64,
+        #[serde(rename = "trackName")]
+        track_name: Option<String>,
+        #[serde(rename = "artistName")]
+        artist_name: Option<String>,
+        #[serde(rename = "albumName")]
+        album_name: Option<String>,
+        #[serde(rename = "syncedLyrics")]
+        synced_lyrics: Option<String>,
+        #[serde(rename = "plainLyrics")]
+        plain_lyrics: Option<String>,
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("FBZ/0.1 (https://github.com/fbz)")
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let response = match client
+        .get("https://lrclib.net/api/search")
+        .query(&[("q", search_term)])
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        _ => return Ok(Vec::new()),
+    };
+    let records: Vec<LrclibRecord> = match response.json().await {
+        Ok(records) => records,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    Ok(records
+        .into_iter()
+        .take(10)
+        .filter_map(|record| {
+            let mut dto = if let Some(synced) = record
+                .synced_lyrics
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                parse_lrc_lyrics(synced)
+            } else if let Some(plain) = record
+                .plain_lyrics
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                parse_plain_text_lyrics(plain)
+            } else {
+                return None;
+            };
+            if dto.metadata.title.is_none() {
+                dto.metadata.title = record.track_name;
+            }
+            if dto.metadata.artist.is_none() {
+                dto.metadata.artist = record.artist_name;
+            }
+            if dto.metadata.album.is_none() {
+                dto.metadata.album = record.album_name;
+            }
+
+            Some(RemoteLyricInfoDto {
+                id: format!("lrclib-{}", record.id),
+                provider_name: "LrcLib".to_owned(),
+                lyrics: Some(dto),
+            })
+        })
+        .collect())
 }
 
 async fn ensure_lyrics_item_visible(

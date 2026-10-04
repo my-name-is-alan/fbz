@@ -211,7 +211,11 @@ async function load(resumeOverride?: number, newReport = true, autoPlay = true) 
     element.volume = volume.value;
     element.muted = muted.value;
     element.playbackRate = Number(speed.value);
-    const position = resumeOverride ?? (props.item.server?.startTicks ?? 0) / 1e7;
+    const position =
+      resumeOverride ??
+      (props.item.server
+        ? props.item.server.startTicks / 1e7
+        : (props.item.startPositionSeconds ?? 0));
     if (position > 0) element.currentTime = position;
     phase.value = "ready";
     update();

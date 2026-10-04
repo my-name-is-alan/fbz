@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 FBZ is a self-hosted, Emby-compatible media server. The repo is a two-package workspace, NOT a unified build:
 
 - `fbz-api/` — Rust modular monolith (axum + tokio + sqlx + PostgreSQL + Redis + wasmtime). Edition 2024. This is the server.
-- `fbz-fe/` — Vue 3 + TypeScript SPA (Vite+ toolchain, pnpm, UnoCSS, Pinia, Shaka Player). This is the web UI + admin console.
+- `fbz-fe/` — Vue 3 + TypeScript SPA (Vite+ toolchain, pnpm, UnoCSS, Pinia, daisyUI, webplayer). This is the web UI + admin console.
 - `docs/`, `demo/`, `canvas/` — design/planning assets only; not built.
 
 **Cross-cutting rule**: backend and frontend are developed independently. Run their commands inside their own directory; nothing at the repo root builds both.
@@ -113,7 +113,7 @@ Vue 3 SPA, Composition API + `<script setup lang="ts">` everywhere. Toolchain is
 Layout (`src/`):
 
 - `main.ts` → `App.vue` → `layouts/default.vue` (public shell) or `layouts/admin.vue` (admin shell). `App.vue` is entry-only — no business logic.
-- `router/index.ts` — manually maintained route table. Routes match folder paths (`/movie/:id` → `views/detail/movie/index.vue`). The admin section currently dispatches every child route to `views/account/index.vue` until the in-progress migration to dedicated admin pages lands; admin components are split out under `components/admin/`.
+- `router/index.ts` — manually maintained route table. Routes match folder paths (`/movie/:id` → `views/detail/movie/index.vue`). Admin child routes each map to a dedicated page under `views/admin/**/index.vue` (e.g. `/admin/users` → `views/admin/users/index.vue`); pages wrap domain components from `components/admin/` in the shared `AdminPageShell` banner shell.
 - `views/` — pages. `components/` — auto-imported components (don't write `import Xxx from …` for in-project components). Base components use a `Base` prefix.
 - `stores/` — Pinia function-style stores (`auth`, `library`, `playback`, `theme`, `ui`).
 - `service/request.ts` — single `axios` instance (`baseURL = import.meta.env.VITE_API_BASE_URL ?? "/api"`); per-domain modules live in `service/modules/`.
@@ -127,7 +127,7 @@ Auto-imports cover Vue / Vue Router / Pinia / `@vueuse/core` and a curated set o
 
 - Strict TypeScript; `import type` for types; no `enum`/`namespace`; `@/*` alias.
 - All SFC styles must be `<style lang="scss">`; never add a `.css` file under `src/`.
-- Single brand color `--fbz-color-brand-500: #1ed760` on a `#0a0a0b` background; no gradients/multicolor decoration. Resolution badges in `tmdb.ts:resolutionColors` are the documented exception.
+- Single brand color `--fbz-color-brand-500: #1ed760` on a layered near-black `#0e0f13` background; no decorative gradients/multicolor. Media cards use token radius 10px / control 8px. Resolution badges may use functional colors; the rest of the UI stays brand-green + grayscale.
 - Use `MediaCard` for all media tiles, `BaseScroller` for all horizontal rows, `BaseSelect` for all dropdowns (never native `<select>`), `MediaPoster` for posters.
 - Responsive breakpoints: desktop ≥1024, tablet 600–1024, phone <600.
 - Detail routes by type: `/movie/:id`, `/tv/:id`, `/person/:id`, `/collection/:id`. `libraryId` (movie/series/anime/documentary) and `detailType` (movie/tv) are decoupled.

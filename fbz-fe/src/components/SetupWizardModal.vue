@@ -1,11 +1,17 @@
 <script setup lang="ts">
+import { isAxiosError } from "axios";
 import { useUiStore } from "@/stores/ui.ts";
 import { useThemeStore } from "@/stores/theme.ts";
 import { useLibraryStore } from "@/stores/library.ts";
+import { useAuthStore } from "@/stores/auth.ts";
+import { submitSetup } from "@/service/modules/setup.ts";
+import { useBodyScrollLock } from "@/composables/useBodyScrollLock.ts";
 
 const uiStore = useUiStore();
 const themeStore = useThemeStore();
 const libraryStore = useLibraryStore();
+const authStore = useAuthStore();
+useBodyScrollLock(() => uiStore.setupWizardOpen);
 
 const currentStep = ref(1);
 
@@ -16,6 +22,9 @@ const agreed = ref(false);
 const username = ref("admin");
 const password = ref("");
 const confirmPassword = ref("");
+/** 后端策略：管理员密码至少 6 位。前端先拦截，避免提交后被 422 退回。 */
+const PASSWORD_MIN_LEN = 6;
+const submitting = ref(false);
 const passwordStrength = computed(() => {
   const pwd = password.value;
   if (!pwd) return { label: "空", class: "empty", width: "0%" };
@@ -35,11 +44,22 @@ const passwordStrength = computed(() => {
 });
 
 const passwordError = computed(() => {
+  if (password.value && password.value.length < PASSWORD_MIN_LEN) {
+    return `密码至少需要 ${PASSWORD_MIN_LEN} 位`;
+  }
   if (confirmPassword.value && password.value !== confirmPassword.value) {
     return "密码与确认密码不一致";
   }
   return "";
 });
+
+/** 第 2 步可否继续：用户名/密码非空、密码达标、两次一致。 */
+const adminStepValid = computed(
+  () =>
+    !!username.value.trim() &&
+    password.value.length >= PASSWORD_MIN_LEN &&
+    password.value === confirmPassword.value,
+);
 
 const route = useRoute();
 const router = useRouter();
@@ -79,23 +99,67 @@ const presetColors = [
   { label: "科技青", value: "#00f5d4" },
 ];
 
+/**
+ * 第 2 步提交：真调 `POST /api/setup` 建首个管理员，成功后用同一凭据自动登录，
+ * 再进入第 3 步。已初始化（409）等错误给文案并停留。
+ */
+async function createAdminAndLogin(): Promise<boolean> {
+  submitting.value = true;
+  try {
+    await submitSetup({ username: username.value.trim(), password: password.value });
+    // 建完管理员后后端无会话，用同一凭据登录拿 token；即便登录失败也已完成初始化。
+    const loggedIn = await authStore.login({
+      username: username.value.trim(),
+      password: password.value,
+    });
+    if (!loggedIn) {
+      uiStore.showToast("管理员已创建，但自动登录失败，请稍后手动登录。", "warning");
+    }
+    return true;
+  } catch (error) {
+    if (isAxiosError(error) && error.response) {
+      const status = error.response.status;
+      if (status === 409) {
+        uiStore.showToast("系统已初始化，无需重复创建管理员。", "warning");
+      } else if (status === 422) {
+        uiStore.showToast("用户名或密码不符合要求（密码至少 6 位）。", "error");
+      } else {
+        uiStore.showToast(`创建管理员失败（服务器返回 ${status}）。`, "error");
+      }
+    } else {
+      uiStore.showToast("无法连接服务器，请检查网络与服务器状态。", "error");
+    }
+    return false;
+  } finally {
+    submitting.value = false;
+  }
+}
+
 // Navigation
-function nextStep() {
+async function nextStep() {
+  if (submitting.value) return;
   if (currentStep.value === 1 && !agreed.value) return;
-  if (currentStep.value === 2 && (passwordError.value || !password.value || !username.value))
+
+  if (currentStep.value === 2) {
+    if (!adminStepValid.value) return;
+    const ok = await createAdminAndLogin();
+    if (!ok) return;
+    currentStep.value = 3;
     return;
+  }
 
   if (currentStep.value < 4) {
     currentStep.value++;
   } else {
-    // Finish initialization
+    // Finish initialization（管理员已在第 2 步建好并登录）。
     uiStore.completeInitialization();
     router.push("/");
   }
 }
 
 function prevStep() {
-  if (currentStep.value > 1) {
+  // 第 2 步之后不允许退回重建管理员（已落库）。
+  if (currentStep.value > 1 && currentStep.value !== 3) {
     currentStep.value--;
   }
 }
@@ -403,7 +467,7 @@ function prevStep() {
           <!-- Modal Footer Actions -->
           <footer class="wizard-footer">
             <button
-              v-if="currentStep > 1"
+              v-if="currentStep > 1 && currentStep !== 3"
               class="wizard-btn secondary"
               type="button"
               @click="prevStep"
@@ -414,13 +478,22 @@ function prevStep() {
             <button
               class="wizard-btn primary"
               :disabled="
+                submitting ||
                 (currentStep === 1 && !agreed) ||
-                (currentStep === 2 && (passwordError || !password || !username))
+                (currentStep === 2 && !adminStepValid)
               "
               type="button"
               @click="nextStep"
             >
-              {{ currentStep === 4 ? "完成初始化" : "下一步" }}
+              {{
+                submitting
+                  ? "创建中…"
+                  : currentStep === 2
+                    ? "创建并继续"
+                    : currentStep === 4
+                      ? "完成初始化"
+                      : "下一步"
+              }}
             </button>
           </footer>
         </section>

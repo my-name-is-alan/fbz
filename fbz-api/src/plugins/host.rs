@@ -370,8 +370,8 @@ const PLUGIN_PERMISSION_CAPABILITIES: &[PluginPermissionCapability] = &[
         key: "metadata.read",
         category: "metadata",
         risk_level: "medium",
-        description: "Reserved for future read-only metadata provider and enrichment APIs.",
-        manifest_features: &[],
+        description: "Read the scrape context and act as a metadata-provider source via the metadata.provider.query hook.",
+        manifest_features: &["metadata.provider.query"],
     },
     PluginPermissionCapability {
         key: "metadata.write",
@@ -693,6 +693,11 @@ impl PersonMetadata for PluginPersonInput {
 
     fn sort_order(&self) -> i32 {
         self.sort_order
+    }
+
+    // 插件 metadata.write 目前不携带人物头像，profile 图仅来自内置 provider（TMDB）。
+    fn profile_image_url(&self) -> Option<&str> {
+        None
     }
 }
 

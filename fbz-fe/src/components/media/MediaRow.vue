@@ -23,11 +23,11 @@ const isLarge = computed(() => props.size === "large");
 const isXLarge = computed(() => props.size === "xlarge");
 
 const colWidth = computed(() => {
-  if (props.layout === "poster") return "132px";
+  if (props.layout === "poster") return "150px";
 
-  if (isXLarge.value) return "252px";
-  if (isLarge.value) return "300px";
-  if (props.layout === "wide") return "248px";
+  if (isXLarge.value) return "272px";
+  if (isLarge.value) return "312px";
+  if (props.layout === "wide") return "260px";
 
   return undefined;
 });
@@ -72,22 +72,28 @@ const colWidth = computed(() => {
     margin: 0;
     font-size: var(--fbz-font-size-lg);
     font-weight: 700;
+    letter-spacing: -0.2px;
   }
 }
 
 .more {
-  font-size: var(--fbz-font-size-md);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 600;
   color: var(--fbz-color-text-muted);
   text-decoration: none;
   transition: color var(--fbz-motion-fast);
 
+  &::after {
+    content: " ›";
+  }
+
   &:hover {
-    color: var(--fbz-color-text);
+    color: var(--fbz-color-brand-500);
   }
 }
 
 // 每列宽度按 layout / 尺寸覆盖 BaseScroller 的 --col（通过 col-width prop）。
 .scroller.is-poster :deep(.track) {
-  --col: 132px;
+  --col: 150px;
 }
 </style>

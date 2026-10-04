@@ -1,0 +1,11 @@
+{
+  "version": "0.5.9",
+  "goBinaryPath": "C:\\Users\\Administrator\\.cursor\\extensions\\local-dev.cursor-continue-0.5.9\\bin\\win32-arm64\\cursor-continue-core.exe",
+  "bridgePort": 47758,
+  "bridgeSecret": "565bc76e3c06bcd992e88bb33cedb4305c673af266f2db10",
+  "keepaliveSeconds": 600,
+  "env": {
+    "CURSOR_CONTINUE_LICENSE_PUBLIC_KEY": "jzTFGodEAt3HtZLtH4PEmeJz-kO1pQBJJAR5Z1UidX0",
+    "CURSOR_CONTINUE_GO_DATA_DIR": "C:\\Users\\Administrator\\AppData\\Roaming\\cursor_continue_go"
+  }
+}

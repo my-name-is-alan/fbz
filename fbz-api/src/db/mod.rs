@@ -8,6 +8,8 @@ use sqlx::{
 
 use crate::config::DatabaseConfig;
 
+mod legacy_storage;
+
 pub type DbPool = PgPool;
 
 pub async fn connect(config: &DatabaseConfig) -> Result<DbPool, sqlx::Error> {
@@ -38,7 +40,9 @@ pub async fn connect(config: &DatabaseConfig) -> Result<DbPool, sqlx::Error> {
 }
 
 pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
+    let migrator = sqlx::migrate!("./migrations");
+    legacy_storage::reconcile(pool, &migrator).await?;
+    migrator.run(pool).await
 }
 
 #[cfg(test)]

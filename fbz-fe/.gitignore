@@ -25,3 +25,7 @@ dist-ssr
 *.sw?
 
 /public/webplayer/
+
+# Keep the admin logs route.
+!src/views/admin/logs/
+!src/views/admin/logs/index.vue

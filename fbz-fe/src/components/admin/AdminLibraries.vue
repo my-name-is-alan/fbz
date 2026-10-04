@@ -1,513 +1,396 @@
 <script setup lang="ts">
+/**
+ * 媒体库管理：已挂载媒体库卡片网格 + 新建入口。
+ * 编辑/新建走全局 LibrarySettingsModal（uiStore.openLibraryEditor）。
+ */
 import { useLibraryStore } from "@/stores/library.ts";
-import { serverRequest, errorMessage, readSession } from "@/service/modules/server.ts";
-import type { ServerJob } from "@/service/modules/server.ts";
-const library = useLibraryStore();
-const creating = ref(false);
-const busy = ref(false);
-const name = ref("");
-const path = ref("");
-const kind = ref("movies");
-interface CloudMount {
-  id: string;
-  name: string;
-  mountPath: string;
-  libraryId: string | null;
-  status: string;
-  refreshMinutes: number;
-  nfoSource: string;
-  imageCache: string;
-  lastError?: string;
-  scanned: number;
-  imported: number;
-  lastRefreshedAt?: string;
-  nextRefreshAt?: string;
-}
-const mounts = ref<CloudMount[]>([]);
-const cloudStatus: Record<string, string> = {
-  idle: "就绪",
-  scanning: "读取目录中",
-  importing: "导入资料中",
-  failed: "等待重试",
-};
-const source = ref("local");
-const mountId = ref("");
-const nfoSource = ref("cloud");
-const imageCache = ref("on_demand");
-const refreshMinutes = ref(60);
-const editing = ref<CloudMount>();
-const mountOptions = computed(() =>
-  mounts.value
-    .filter((m) => !m.libraryId)
-    .map((m) => ({ label: `${m.mountPath} · ${m.name}`, value: m.id })),
+import { useUiStore } from "@/stores/ui.ts";
+
+const libraryStore = useLibraryStore();
+const cloudLibraryIds = ref<string[]>([]);
+const localLibraries = computed(() =>
+  libraryStore.libraries.filter((l) => !cloudLibraryIds.value.includes(l.id)),
 );
-watch(mountId, (id) => {
-  const mount = mounts.value.find((m) => m.id === id);
-  if (mount) refreshMinutes.value = mount.refreshMinutes;
-});
-watch(source, (value) => {
-  if (value === "cloud" && kind.value === "music") kind.value = "movies";
-});
-function editSettings(mount: CloudMount) {
-  editing.value = mount;
-  nfoSource.value = mount.nfoSource;
-  imageCache.value = mount.imageCache;
-  refreshMinutes.value = mount.refreshMinutes;
-}
-function newLibrary() {
-  creating.value = true;
-  source.value = "local";
-  mountId.value = "";
-  nfoSource.value = "cloud";
-  imageCache.value = "on_demand";
-  refreshMinutes.value = 60;
-}
-async function saveSettings() {
-  if (!editing.value) return;
-  busy.value = true;
-  error.value = "";
-  try {
-    await serverRequest(`/api/admin/storage/mounts/${editing.value.id}/settings`, {
-      nfoSource: nfoSource.value,
-      imageCache: imageCache.value,
-      refreshMinutes: refreshMinutes.value,
-    });
-    editing.value = undefined;
-    await refresh();
-  } catch (e) {
-    error.value = errorMessage(e);
-  } finally {
-    busy.value = false;
-  }
-}
-async function scanCloud(mount: CloudMount) {
-  busy.value = true;
-  error.value = "";
-  try {
-    await serverRequest(`/api/admin/storage/mounts/${mount.id}/scan`, {});
-    message.value = "云端扫描已排队";
-    await refresh();
-  } catch (e) {
-    error.value = errorMessage(e);
-  } finally {
-    busy.value = false;
-  }
+const uiStore = useUiStore();
+
+const libraryTypeOptions = [
+  { label: "电影 (Movie)", value: "movie" },
+  { label: "电视剧 (TV Series)", value: "series" },
+  { label: "动漫 (Anime)", value: "anime" },
+  { label: "纪录片 (Documentary)", value: "documentary" },
+  { label: "音乐 (Music)", value: "music" },
+];
+
+/** Library type → icon SVG path data and accent color */
+const libTypeVisuals: Record<string, { icon: string; accent: string }> = {
+  movie: {
+    icon: "M2 2h20v20H2z M7 2v20 M17 2v20 M2 12h20 M2 7h5 M2 17h5 M17 17h5 M17 7h5",
+    accent: "#0ea5e9",
+  },
+  series: {
+    icon: "M2 7h20v15H2z M17 2l-5 5-5-5",
+    accent: "#8b5cf6",
+  },
+  anime: {
+    icon: "M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.77 5.82 21 7 14.14l-5-4.87 6.91-1.01L12 2z",
+    accent: "#f43f5e",
+  },
+  documentary: {
+    icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z M2 12h20 M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z",
+    accent: "#10b981",
+  },
+  music: {
+    icon: "M9 18V5l12-2v13 M6 18a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M18 16a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+    accent: "#f59e0b",
+  },
+};
+
+function getLibTypeName(kind: string) {
+  return libraryTypeOptions.find((o) => o.value === kind)?.label.split(" ")[0] ?? "未知";
 }
 
-const message = ref("");
-const error = ref("");
-const jobs = ref<ServerJob[]>([]);
-const kinds = [
-  { label: "电影", value: "movies" },
-  { label: "剧集", value: "tv" },
-  { label: "音乐", value: "music" },
-];
-async function refresh() {
-  await library.refresh();
-  if (!readSession()) return;
-  try {
-    mounts.value = (await serverRequest<{ mounts: CloudMount[] }>("/api/admin/storage")).mounts;
-    jobs.value = await serverRequest<ServerJob[]>("/api/admin/jobs?limit=20");
-  } catch (err) {
-    error.value = errorMessage(err);
-  }
+function getLibVisuals(kind: string) {
+  return libTypeVisuals[kind] ?? libTypeVisuals.movie;
 }
-async function create() {
-  if (
-    busy.value ||
-    !name.value.trim() ||
-    (source.value === "local" ? !path.value.trim() : !mountId.value)
-  )
-    return;
-  busy.value = true;
-  error.value = "";
-  message.value = "";
-  try {
-    if (source.value === "cloud") {
-      await serverRequest(`/api/admin/storage/mounts/${mountId.value}/library`, {
-        name: name.value.trim(),
-        libraryType: kind.value,
-        nfoSource: nfoSource.value,
-        imageCache: imageCache.value,
-        refreshMinutes: refreshMinutes.value,
-      });
-    } else
-      await serverRequest("/api/admin/libraries", {
-        name: name.value.trim(),
-        libraryType: kind.value,
-        paths: path.value
-          .split("\n")
-          .map((p) => p.trim())
-          .filter(Boolean),
-      });
-    creating.value = false;
-    name.value = "";
-    path.value = "";
-    message.value = "媒体库已创建。点击扫描开始索引文件。";
-    await refresh();
-  } catch (err) {
-    error.value = errorMessage(err);
-  } finally {
-    busy.value = false;
-  }
+
+function handleEditLibrary(lib: { id: string }) {
+  uiStore.openLibraryEditor(lib.id);
 }
-async function scan(id: string) {
-  busy.value = true;
-  error.value = "";
-  message.value = "";
-  try {
-    const job = await serverRequest<ServerJob>(`/api/admin/libraries/${id}/scan`, {
-      reason: "web_manual",
-    });
-    message.value = `扫描已排队 · ${job.id.slice(0, 8)}`;
-    await refresh();
-  } catch (err) {
-    error.value = errorMessage(err);
-  } finally {
-    busy.value = false;
-  }
+
+function handleAddLibrary() {
+  uiStore.openLibraryEditor(null);
 }
-const jobNames: Record<string, string> = {
-  "library.scan": "媒体库扫描",
-  "media.probe": "媒体信息探测",
-  "metadata.refresh": "元数据刷新",
-};
-const status: Record<string, string> = {
-  queued: "排队中",
-  running: "扫描中",
-  completed: "已完成",
-  succeeded: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
-onMounted(refresh);
-useIntervalFn(() => {
-  if (!busy.value && readSession()) void refresh();
-}, 5000);
+
+onMounted(() => {
+  if (!libraryStore.loaded) {
+    void libraryStore.loadFromBackend();
+  }
+});
 </script>
 
 <template>
-  <section class="server-libraries">
-    <div class="section-toolbar">
-      <span>{{ library.libraries.length }} 个媒体库</span
-      ><button class="du-btn du-btn-sm du-btn-primary primary" @click="newLibrary">
-        <BaseIcon name="plus" :size="16" /> 添加媒体库
+  <div class="lib-manager-view">
+    <CloudLibraries @linked="cloudLibraryIds = $event" />
+    <div class="section-label">
+      <span class="label-text">本地媒体库</span>
+      <span class="label-count">{{ localLibraries.length }}</span>
+    </div>
+
+    <div class="lib-cards-grid">
+      <!-- Library cards -->
+      <div
+        v-for="lib in localLibraries"
+        :key="lib.id"
+        class="lib-preview-card"
+        @click="handleEditLibrary(lib)"
+        @contextmenu.prevent="
+          uiStore.openLibraryContextMenu($event.clientX, $event.clientY, {
+            id: lib.id,
+            name: lib.name,
+          })
+        "
+      >
+        <div class="card-accent-bar" :style="{ background: getLibVisuals(lib.kind).accent }" />
+        <div class="card-content">
+          <div class="card-top">
+            <span
+              class="lib-icon-container"
+              :style="{ '--icon-accent': getLibVisuals(lib.kind).accent }"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path :d="getLibVisuals(lib.kind).icon" />
+              </svg>
+            </span>
+            <div class="card-title-area">
+              <span class="lib-name">{{ lib.name }}</span>
+              <span class="lib-badge">{{ getLibTypeName(lib.kind) }}</span>
+            </div>
+            <div class="item-stat">
+              <span class="num">{{ lib.count }}</span>
+              <span class="lbl">条目</span>
+            </div>
+          </div>
+          <div class="card-bottom">
+            <svg
+              viewBox="0 0 24 24"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="path-icon"
+            >
+              <path
+                d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+              />
+            </svg>
+            <span class="path-val">{{ lib.paths?.[0] || "未配置路径" }}</span>
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="edit-icon"
+            >
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z" />
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add Library placeholder card -->
+      <button class="add-lib-card" type="button" @click="handleAddLibrary">
+        <svg
+          viewBox="0 0 24 24"
+          width="24"
+          height="24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        <span>添加媒体库</span>
       </button>
     </div>
-    <p v-if="!readSession()" class="notice">
-      连接服务器后，即可添加和扫描媒体库。<RouterLink to="/user/login">连接服务器 →</RouterLink>
-    </p>
-    <BaseModal
-      :open="creating"
-      title="添加媒体库"
-      description="选择内容类型与服务器上的媒体目录。"
-      @close="creating = false"
-      ><p v-if="error" class="du-alert du-alert-error">{{ error }}</p>
-      <form class="create-library" @submit.prevent="create">
-        <div class="form-columns">
-          <label
-            >名称<input class="du-input" v-model="name" required placeholder="例如：电影" /></label
-          ><label
-            >内容类型<BaseSelect
-              v-model="kind"
-              :options="source === 'cloud' ? kinds.filter((k) => k.value !== 'music') : kinds"
-          /></label>
-        </div>
-        <label
-          >媒体来源<BaseSelect
-            v-model="source"
-            :options="[
-              { label: '本地目录', value: 'local' },
-              { label: '插件挂载目录', value: 'cloud' },
-            ]"
-        /></label>
-        <template v-if="source === 'cloud'">
-          <label
-            >挂载地址<BaseSelect
-              v-model="mountId"
-              :options="[{ label: '选择未关联的挂载目录', value: '' }, ...mountOptions]"
-          /></label>
-          <p v-if="!mountOptions.length" class="muted">
-            没有可用挂载，请先在<RouterLink to="/admin/plugins">光鸭插件</RouterLink>中添加目录。
-          </p>
-          <CloudLibraryPolicy
-            v-model:nfo-source="nfoSource"
-            v-model:image-cache="imageCache"
-            v-model:refresh-minutes="refreshMinutes"
-          />
-        </template>
-        <label v-else
-          >服务器上的媒体目录<textarea
-            class="du-textarea"
-            v-model="path"
-            required
-            rows="3"
-            placeholder="每行一个完整路径，例如 D:\Media\Movies 或 /media/movies"
-          />
-        </label>
-        <p v-if="source === 'local'" class="muted">
-          填写运行 FBZ 服务的机器可访问的目录。创建后再启动扫描。
-        </p>
-        <button class="du-btn du-btn-sm du-btn-primary primary" :disabled="busy || !readSession()">
-          {{ busy ? "正在创建…" : "创建媒体库" }}
-        </button>
-      </form></BaseModal
-    >
-    <BaseModal :open="!!editing" title="媒体库来源与扫描策略" @close="editing = undefined"
-      ><p v-if="error" class="du-alert du-alert-error">{{ error }}</p>
-      <form class="create-library" @submit.prevent="saveSettings">
-        <p class="muted">{{ editing?.mountPath }}</p>
-        <CloudLibraryPolicy
-          v-model:nfo-source="nfoSource"
-          v-model:image-cache="imageCache"
-          v-model:refresh-minutes="refreshMinutes"
-        />
-        <p class="muted">修改资料策略后，下次完整扫描生效；已有缓存不会删除。</p>
-        <button class="du-btn du-btn-primary" :disabled="busy">保存设置</button>
-      </form></BaseModal
-    >
-    <p v-if="error || library.error" class="error" role="alert">{{ error || library.error }}</p>
-    <p v-if="message" role="status" class="notice">{{ message }}</p>
-    <div class="library-list">
-      <article v-for="lib in library.libraries" :key="lib.id" class="library-line">
-        <span class="folder-icon"
-          ><svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.4"
-          >
-            <path d="M3 6h7l2 3h9v11H3z" /></svg
-        ></span>
-        <div class="library-description">
-          <h3>{{ lib.name }}</h3>
-          <p v-for="entry in lib.paths" :key="entry">{{ entry }}</p>
-          <template v-for="mount in mounts.filter((m) => m.libraryId === lib.id)" :key="mount.id"
-            ><p>{{ mount.mountPath }}</p>
-            <p>
-              {{ mount.refreshMinutes ? `每 ${mount.refreshMinutes} 分钟刷新` : "手动刷新" }} ·
-              {{ cloudStatus[mount.status] ?? mount.status }} · 已导入 {{ mount.imported }} 个视频
-            </p>
-            <p v-if="mount.lastRefreshedAt">
-              最近刷新：{{ new Date(mount.lastRefreshedAt).toLocaleString() }}
-            </p>
-            <p v-if="mount.refreshMinutes && mount.nextRefreshAt">
-              下次检查：{{ new Date(mount.nextRefreshAt).toLocaleString() }}
-            </p>
-            <p v-if="mount.lastError" class="error">{{ mount.lastError }}</p></template
-          >
-        </div>
-        <RouterLink :to="`/library/${lib.id}`">浏览</RouterLink
-        ><button
-          class="du-btn du-btn-sm"
-          v-if="lib.paths?.length"
-          :disabled="busy"
-          @click="scan(lib.id)"
-        >
-          扫描媒体库
-        </button>
-        <template v-else-if="mounts.find((m) => m.libraryId === lib.id)">
-          <button
-            class="du-btn du-btn-sm"
-            :disabled="busy"
-            @click="editSettings(mounts.find((m) => m.libraryId === lib.id)!)"
-          >
-            设置
-          </button>
-          <button
-            class="du-btn du-btn-sm"
-            :disabled="
-              busy ||
-              ['scanning', 'importing'].includes(mounts.find((m) => m.libraryId === lib.id)!.status)
-            "
-            @click="scanCloud(mounts.find((m) => m.libraryId === lib.id)!)"
-          >
-            扫描媒体库
-          </button>
-        </template>
-      </article>
-      <p v-if="readSession() && !library.loading && !library.libraries.length" class="empty">
-        还没有媒体库。添加一个目录，开始整理你的收藏。
-      </p>
-    </div>
-    <div class="section-heading">
-      <h2>扫描与入库任务</h2>
-      <span class="muted">每 5 秒更新 · 最近 20 项</span>
-    </div>
-    <p v-if="!jobs.length" class="empty">暂无任务记录</p>
-    <article v-for="job in jobs" :key="job.id" class="job-line">
-      <div>
-        <strong>{{ jobNames[job.jobType] ?? "后台任务" }}</strong>
-        <p class="muted">
-          {{ job.id.slice(0, 8) }} · {{ new Date(job.updatedAt).toLocaleString() }}
-        </p>
-        <p v-if="job.lastError" class="error">{{ job.lastError }}</p>
-      </div>
-      <span :class="{ error: job.status === 'failed' }">{{
-        status[job.status] ?? job.status
-      }}</span>
-    </article>
-  </section>
+  </div>
 </template>
 
 <style scoped lang="scss">
-.server-libraries {
-  max-width: 1100px;
-}
-.section-toolbar,
-.section-heading,
-.library-line,
-.job-line {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-}
-.section-toolbar {
-  margin-bottom: 28px;
-  color: var(--fbz-color-text-soft);
-}
-button,
-input,
-textarea {
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 6px;
-  background: var(--fbz-color-panel);
-  color: var(--fbz-color-text);
-  padding: 10px 14px;
-  font: inherit;
-}
-button {
-  cursor: pointer;
-  white-space: nowrap;
-}
-button:hover {
-  border-color: var(--fbz-color-text-muted);
-}
-button:disabled {
-  opacity: 0.5;
-  cursor: wait;
-}
-.primary {
-  background: var(--fbz-color-brand-500);
-  color: #07120a;
-  border-color: transparent;
-  font-weight: 600;
-}
-label {
+.lib-manager-view {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  font-size: 13px;
+  gap: var(--fbz-space-5);
 }
-textarea {
-  resize: vertical;
-}
-.create-library {
-  padding: 0;
-  background: transparent;
-  margin-bottom: 24px;
-  border-radius: 8px;
-  display: grid;
-  gap: 20px;
-}
-.create-library button {
-  justify-self: start;
-}
-.form-columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-}
-h2 {
-  font-size: 19px;
-  margin: 0;
-  font-weight: 600;
-}
-h3 {
-  margin: 0 0 6px;
-  font-size: 15px;
-}
-p {
-  margin: 0;
-  line-height: 1.7;
-}
-.library-line {
-  padding: 24px 0;
-  border-bottom: 1px solid var(--fbz-color-line-soft);
-}
-.library-description {
-  flex: 1;
-  min-width: 0;
-}
-.library-description p {
-  color: var(--fbz-color-text-muted);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-.folder-icon {
-  color: var(--fbz-color-brand-500);
-  padding: 14px;
-  background: var(--fbz-color-panel);
-  border-radius: 8px;
-}
-.section-heading {
-  margin: 48px 0 16px;
-}
-.job-line {
-  padding: 18px 0;
-  border-bottom: 1px solid var(--fbz-color-line-soft);
-  font-size: 13px;
-}
-.muted,
-.empty {
-  color: var(--fbz-color-text-muted);
-  font-size: 12px;
-}
-.empty {
-  padding: 32px 0;
-}
-.notice {
-  margin: 16px 0;
-  font-size: 13px;
-}
-.notice a {
-  margin-left: 12px;
-}
-.error {
-  color: var(--fbz-color-danger-500);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-a {
-  color: var(--fbz-color-text-soft);
-  text-decoration: none;
-  font-size: 13px;
-}
-a:hover {
-  color: var(--fbz-color-brand-500);
-}
-:is(button, input, textarea, a):focus-visible {
-  outline: 2px solid var(--fbz-color-brand-500);
-  outline-offset: 4px;
-}
-@media (max-width: 600px) {
-  .form-columns {
-    grid-template-columns: 1fr;
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .label-text {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--fbz-color-text-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
-  .library-line {
-    flex-wrap: wrap;
+
+  .label-count {
+    font-family: var(--fbz-font-display);
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--fbz-color-text-muted);
+    background: var(--fbz-color-panel-strong);
+    border: 1px solid var(--fbz-color-line-soft);
+    padding: 1px 8px;
+    border-radius: var(--fbz-radius-round);
+  }
+}
+
+.lib-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--fbz-space-3);
+}
+
+.lib-preview-card {
+  border: 1px solid var(--fbz-color-line-soft);
+  background: var(--fbz-color-panel-strong);
+  border-radius: var(--fbz-radius-card);
+  cursor: pointer;
+  transition: all var(--fbz-motion-base);
+  overflow: hidden;
+  position: relative;
+  height: 160px;
+
+  .card-accent-bar {
+    height: 3px;
+    width: 100%;
+    opacity: 0.6;
+    transition: opacity var(--fbz-motion-fast);
+  }
+
+  &:hover {
+    border-color: var(--fbz-color-brand-500);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    transform: translateY(-1px);
+
+    .card-accent-bar {
+      opacity: 1;
+    }
+
+    .edit-icon {
+      opacity: 1;
+      color: var(--fbz-color-brand-500);
+    }
+  }
+
+  .card-content {
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+    z-index: 2;
+    height: 100%;
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
     gap: 12px;
   }
-  .library-description {
-    flex-basis: 65%;
+
+  .lib-icon-container {
+    width: 38px;
+    height: 38px;
+    background: var(--fbz-color-panel);
+    border: 1px solid var(--fbz-color-line-soft);
+    border-radius: var(--fbz-radius-control);
+    display: grid;
+    place-content: center;
+    color: var(--icon-accent, var(--fbz-color-text-soft));
+    flex-shrink: 0;
+    transition: all var(--fbz-motion-fast);
   }
-  .section-heading {
-    align-items: flex-start;
+
+  .card-title-area {
+    flex: 1;
+    min-width: 0;
+    display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 3px;
+
+    .lib-name {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--fbz-color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .lib-badge {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--fbz-color-text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+  }
+
+  .item-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    flex-shrink: 0;
+
+    .num {
+      font-family: var(--fbz-font-display);
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--fbz-color-text);
+      line-height: 1;
+    }
+
+    .lbl {
+      font-size: 9px;
+      color: var(--fbz-color-text-muted);
+      font-weight: 700;
+      margin-top: 2px;
+    }
+  }
+
+  .card-bottom {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-top: 10px;
+    border-top: 1px solid var(--fbz-color-line-soft);
+
+    .path-icon {
+      color: var(--fbz-color-text-muted);
+      flex-shrink: 0;
+      opacity: 0.6;
+    }
+
+    .path-val {
+      flex: 1;
+      font-size: 11px;
+      color: var(--fbz-color-text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .edit-icon {
+      flex-shrink: 0;
+      color: var(--fbz-color-text-muted);
+      opacity: 0;
+      transition: all var(--fbz-motion-fast);
+    }
+  }
+}
+
+/* Add Library placeholder card */
+.add-lib-card {
+  border: 1px dashed var(--fbz-color-line-bright);
+  background: transparent;
+  border-radius: var(--fbz-radius-card);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 160px;
+  color: var(--fbz-color-text-muted);
+  cursor: pointer;
+  transition: all var(--fbz-motion-base);
+
+  svg {
+    opacity: 0.5;
+    transition: all var(--fbz-motion-fast);
+  }
+
+  span {
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  &:hover {
+    border-color: var(--fbz-color-brand-500);
+    color: var(--fbz-color-brand-500);
+    background: color-mix(in srgb, var(--fbz-color-brand-500) 3%, transparent);
+
+    svg {
+      opacity: 1;
+    }
+  }
+}
+
+@media (max-width: 768px) {
+  .lib-cards-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

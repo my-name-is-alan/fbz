@@ -112,8 +112,9 @@ function scrollStep(dir: 1 | -1) {
   grid-auto-columns: var(--col);
   gap: var(--gap);
   overflow-x: auto;
-  // 顶部留白：卡片 hover 上移时不被 overflow 裁掉
-  padding: 6px 0;
+  // 上下 + 左右留白：卡片 hover 上移/放大时边框与阴影不被 overflow 裁掉，
+  // 同时让首/尾卡片不贴容器边（横向 padding 在滚动网格里首尾都生效）。
+  padding: 6px 14px;
   scroll-behavior: smooth;
   // 隐藏横向滚动条
   scrollbar-width: none;

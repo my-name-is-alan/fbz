@@ -59,6 +59,7 @@ pub struct Config {
     pub scheduler: SchedulerWorkerConfig,
     pub transcode_worker: TranscodeWorkerConfig,
     pub probe_worker: ProbeWorkerConfig,
+    pub photo_worker: PhotoWorkerConfig,
     pub metadata_worker: MetadataWorkerConfig,
     pub plugin_worker: PluginWorkerConfig,
     pub notification_worker: NotificationWorkerConfig,
@@ -157,6 +158,11 @@ pub struct MetadataConfig {
     pub tvdb_api_base_url: String,
     pub fanart_api_key: Option<String>,
     pub fanart_api_base_url: String,
+    /// Spotify Web API client credentials (默认音乐查询 provider). 缺省时 spotify provider 跳过。
+    pub spotify_client_id: Option<String>,
+    pub spotify_client_secret: Option<String>,
+    pub spotify_api_base_url: String,
+    pub spotify_auth_url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +196,8 @@ pub struct StorageConfig {
     pub transcode_cache_dir: PathBuf,
     pub artwork_cache_dir: PathBuf,
     pub scan_event_retention_days: u16,
+    /// 相机上传落盘目录（`Devices/CameraUploads`），按设备分子目录。
+    pub camera_upload_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +272,14 @@ pub struct PluginConfig {
     pub host_api_max_calls_per_run: u32,
     pub secret_key: Option<String>,
     pub http_allowed_hosts: Vec<String>,
+    /// 同步调用（provider 查询）单次总预算，含并发排队等待。
+    pub sync_timeout_ms: u64,
+    /// 单插件同步调用并发预算。
+    pub sync_max_concurrency_per_plugin: u16,
+    /// 连续失败达到该阈值后打开熔断。
+    pub sync_circuit_failure_threshold: u32,
+    /// 熔断打开后的冷却窗口。
+    pub sync_circuit_cooldown_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,6 +323,12 @@ pub struct ProbeWorkerConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhotoWorkerConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MetadataWorkerConfig {
     pub enabled: bool,
     pub interval_seconds: u64,
@@ -329,6 +351,15 @@ pub struct NotificationWorkerConfig {
 pub struct BootstrapAdminConfig {
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+/// 管理员密码最小长度（位）。env bootstrap、HTTP `POST /api/setup`、`POST /api/admin/users`
+/// 三条建管理员/用户通道共用此策略，避免规则漂移。
+pub const ADMIN_PASSWORD_MIN_LEN: usize = 6;
+
+/// 管理员/用户密码是否满足强度策略（当前仅长度下限）。
+pub fn admin_password_meets_policy(password: &str) -> bool {
+    password.len() >= ADMIN_PASSWORD_MIN_LEN
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -495,6 +526,18 @@ impl Config {
                     "https://webservice.fanart.tv/v3",
                     &source,
                 ),
+                spotify_client_id: optional("SPOTIFY_CLIENT_ID", &source),
+                spotify_client_secret: optional("SPOTIFY_CLIENT_SECRET", &source),
+                spotify_api_base_url: get_or(
+                    "SPOTIFY_API_BASE_URL",
+                    "https://api.spotify.com/v1",
+                    &source,
+                ),
+                spotify_auth_url: get_or(
+                    "SPOTIFY_AUTH_URL",
+                    "https://accounts.spotify.com/api/token",
+                    &source,
+                ),
             },
             proxy: ProxyConfig {
                 http_proxy: optional("HTTP_PROXY", &source),
@@ -524,6 +567,7 @@ impl Config {
                 transcode_cache_dir: path_or("TRANSCODE_CACHE_DIR", "./var/transcode", &source),
                 artwork_cache_dir: path_or("ARTWORK_CACHE_DIR", "./var/artwork", &source),
                 scan_event_retention_days: parse_or("SCAN_EVENT_RETENTION_DAYS", 90_u16, &source)?,
+                camera_upload_dir: path_or("CAMERA_UPLOAD_DIR", "./var/camera-uploads", &source),
             },
             secrets: SecretConfig {
                 key: optional("FBZ_SECRET_KEY", &source),
@@ -592,6 +636,22 @@ impl Config {
                     "127.0.0.1,localhost,::1,host.docker.internal",
                     &source,
                 ),
+                sync_timeout_ms: parse_or("PLUGIN_SYNC_TIMEOUT_MS", 10_000_u64, &source)?,
+                sync_max_concurrency_per_plugin: parse_or(
+                    "PLUGIN_SYNC_MAX_CONCURRENCY_PER_PLUGIN",
+                    4_u16,
+                    &source,
+                )?,
+                sync_circuit_failure_threshold: parse_or(
+                    "PLUGIN_SYNC_CIRCUIT_FAILURE_THRESHOLD",
+                    5_u32,
+                    &source,
+                )?,
+                sync_circuit_cooldown_seconds: parse_or(
+                    "PLUGIN_SYNC_CIRCUIT_COOLDOWN_SECONDS",
+                    60_u64,
+                    &source,
+                )?,
             },
             schedules: ScheduleConfig {
                 incremental_scan: get_or("SCHEDULE_INCREMENTAL_SCAN", "15m", &source),
@@ -620,6 +680,10 @@ impl Config {
             probe_worker: ProbeWorkerConfig {
                 enabled: bool_or("FBZ_PROBE_WORKER_ENABLED", false, &source)?,
                 interval_seconds: parse_or("FBZ_PROBE_WORKER_INTERVAL_SECONDS", 10_u64, &source)?,
+            },
+            photo_worker: PhotoWorkerConfig {
+                enabled: bool_or("FBZ_PHOTO_WORKER_ENABLED", false, &source)?,
+                interval_seconds: parse_or("FBZ_PHOTO_WORKER_INTERVAL_SECONDS", 10_u64, &source)?,
             },
             metadata_worker: MetadataWorkerConfig {
                 enabled: bool_or("FBZ_METADATA_WORKER_ENABLED", false, &source)?,
@@ -866,6 +930,27 @@ impl Config {
             ));
         }
 
+        if self.plugins.sync_timeout_ms == 0 {
+            return Err(ConfigError::new(
+                "PLUGIN_SYNC_TIMEOUT_MS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.plugins.sync_max_concurrency_per_plugin == 0 {
+            return Err(ConfigError::new(
+                "PLUGIN_SYNC_MAX_CONCURRENCY_PER_PLUGIN",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.plugins.sync_circuit_failure_threshold == 0 {
+            return Err(ConfigError::new(
+                "PLUGIN_SYNC_CIRCUIT_FAILURE_THRESHOLD",
+                "must be greater than zero",
+            ));
+        }
+
         if self.plugins.tmp_max_age_seconds == 0 {
             return Err(ConfigError::new(
                 "PLUGIN_TMP_MAX_AGE_SECONDS",
@@ -987,6 +1072,13 @@ impl Config {
             ));
         }
 
+        if self.photo_worker.interval_seconds == 0 {
+            return Err(ConfigError::new(
+                "FBZ_PHOTO_WORKER_INTERVAL_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+
         if self.metadata_worker.interval_seconds == 0 {
             return Err(ConfigError::new(
                 "FBZ_METADATA_WORKER_INTERVAL_SECONDS",
@@ -1040,10 +1132,10 @@ impl Config {
                     ));
                 }
 
-                if password.len() < 12 {
+                if !admin_password_meets_policy(password) {
                     return Err(ConfigError::new(
                         "FBZ_BOOTSTRAP_ADMIN_PASSWORD",
-                        "must be at least 12 characters",
+                        "must be at least 6 characters",
                     ));
                 }
             }

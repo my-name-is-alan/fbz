@@ -5,14 +5,21 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::{compat::emby::payload::parse_emby_body, error::AppError, state::AppState};
+use crate::{
+    auth::service::AuthenticatedUser, compat::emby::payload::parse_emby_body, error::AppError,
+    settings::repository::SettingsRepository, state::AppState,
+};
 
 use super::access::authenticate_request_user;
 
 const DEFAULT_DLNA_PROFILE_ID: &str = "fbz-default";
 const MAX_DLNA_PROFILE_ID_LEN: usize = 128;
 const MAX_DLNA_PROFILE_TEXT_LEN: usize = 256;
+/// 自定义 DLNA profile（JSON 数组）在 server_settings 中的键。
+const DLNA_PROFILES_SETTING_KEY: &str = "emby.dlna.profiles";
+const MAX_CUSTOM_DLNA_PROFILES: usize = 64;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "PascalCase")]
@@ -350,10 +357,16 @@ pub async fn profile_infos(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<Vec<DlnaProfileDto>>, AppError> {
+) -> Result<Json<Vec<Value>>, AppError> {
     authenticate_admin_compatible(&state, &headers, &uri).await?;
 
-    Ok(Json(vec![default_dlna_profile()]))
+    let mut profiles = vec![
+        serde_json::to_value(default_dlna_profile())
+            .map_err(|err| AppError::internal(format!("failed to serialize profile: {err}")))?,
+    ];
+    profiles.extend(load_custom_profiles(&state).await?);
+
+    Ok(Json(profiles))
 }
 
 pub async fn default_profile(
@@ -371,14 +384,21 @@ pub async fn profile_by_id(
     Path(profile_id): Path<String>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<DlnaProfileDto>, AppError> {
+) -> Result<Json<Value>, AppError> {
     authenticate_admin_compatible(&state, &headers, &uri).await?;
     let profile_id = normalize_profile_id(&profile_id)?;
     if profile_id == DEFAULT_DLNA_PROFILE_ID {
-        return Ok(Json(default_dlna_profile()));
+        return Ok(Json(serde_json::to_value(default_dlna_profile()).map_err(
+            |err| AppError::internal(format!("failed to serialize profile: {err}")),
+        )?));
     }
 
-    Err(AppError::not_found("DLNA profile not found"))
+    let profiles = load_custom_profiles(&state).await?;
+    profiles
+        .into_iter()
+        .find(|profile| stored_profile_id(profile) == Some(profile_id.as_str()))
+        .map(Json)
+        .ok_or_else(|| AppError::not_found("DLNA profile not found"))
 }
 
 pub async fn create_profile(
@@ -387,11 +407,30 @@ pub async fn create_profile(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_compatible(&state, &headers, &uri).await?;
+    let user = authenticate_admin_compatible(&state, &headers, &uri).await?;
     let profile: DlnaProfileDto = parse_emby_body(&headers, &body)?;
     validate_profile_payload(&profile)?;
+    let mut raw: Value = parse_emby_body(&headers, &body)?;
 
-    Err(dlna_profile_write_disabled_error())
+    let mut profiles = load_custom_profiles(&state).await?;
+    if profiles.len() >= MAX_CUSTOM_DLNA_PROFILES {
+        return Err(AppError::unprocessable("too many custom DLNA profiles"));
+    }
+
+    // 生成稳定自定义 id；客户端提供的 Id 一律覆盖（防与默认/既有冲突）。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let profile_id = format!("custom-{nanos}");
+    if let Value::Object(object) = &mut raw {
+        object.insert("Id".to_owned(), Value::String(profile_id));
+        object.insert("Type".to_owned(), Value::String("User".to_owned()));
+    }
+    profiles.push(raw);
+    store_custom_profiles(&state, profiles, &user).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn update_profile(
@@ -401,7 +440,7 @@ pub async fn update_profile(
     uri: Uri,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_compatible(&state, &headers, &uri).await?;
+    let user = authenticate_admin_compatible(&state, &headers, &uri).await?;
     let profile_id = normalize_profile_id(&profile_id)?;
     let profile: DlnaProfileDto = parse_emby_body(&headers, &body)?;
     validate_profile_payload(&profile)?;
@@ -410,8 +449,24 @@ pub async fn update_profile(
             "profile Id does not match route Id",
         ));
     }
+    if profile_id == DEFAULT_DLNA_PROFILE_ID {
+        return Err(AppError::conflict(
+            "the built-in DLNA profile cannot be modified",
+        ));
+    }
+    let raw: Value = parse_emby_body(&headers, &body)?;
 
-    Err(dlna_profile_write_disabled_error())
+    let mut profiles = load_custom_profiles(&state).await?;
+    let Some(slot) = profiles
+        .iter_mut()
+        .find(|stored| stored_profile_id(stored) == Some(profile_id.as_str()))
+    else {
+        return Err(AppError::not_found("DLNA profile not found"));
+    };
+    *slot = raw;
+    store_custom_profiles(&state, profiles, &user).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn delete_profile(
@@ -420,23 +475,75 @@ pub async fn delete_profile(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
-    authenticate_admin_compatible(&state, &headers, &uri).await?;
-    let _profile_id = normalize_profile_id(&profile_id)?;
+    let user = authenticate_admin_compatible(&state, &headers, &uri).await?;
+    let profile_id = normalize_profile_id(&profile_id)?;
+    if profile_id == DEFAULT_DLNA_PROFILE_ID {
+        return Err(AppError::conflict(
+            "the built-in DLNA profile cannot be deleted",
+        ));
+    }
 
-    Err(dlna_profile_write_disabled_error())
+    let mut profiles = load_custom_profiles(&state).await?;
+    let before = profiles.len();
+    profiles.retain(|stored| stored_profile_id(stored) != Some(profile_id.as_str()));
+    if profiles.len() == before {
+        return Err(AppError::not_found("DLNA profile not found"));
+    }
+    store_custom_profiles(&state, profiles, &user).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn stored_profile_id(profile: &Value) -> Option<&str> {
+    profile.get("Id").and_then(Value::as_str)
+}
+
+async fn load_custom_profiles(state: &AppState) -> Result<Vec<Value>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    Ok(SettingsRepository::new(database.clone())
+        .get(DLNA_PROFILES_SETTING_KEY)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load DLNA profiles: {err}")))?
+        .and_then(|setting| setting.value.as_array().cloned())
+        .unwrap_or_default())
+}
+
+async fn store_custom_profiles(
+    state: &AppState,
+    profiles: Vec<Value>,
+    user: &AuthenticatedUser,
+) -> Result<(), AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    SettingsRepository::new(database.clone())
+        .update_admin_setting(
+            DLNA_PROFILES_SETTING_KEY,
+            Value::Array(profiles),
+            &user.username,
+            Some("emby dlna profile update"),
+        )
+        .await
+        .map_err(|err| AppError::internal(format!("failed to store DLNA profiles: {err}")))?;
+
+    Ok(())
 }
 
 async fn authenticate_admin_compatible(
     state: &AppState,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<(), AppError> {
+) -> Result<AuthenticatedUser, AppError> {
     let user = authenticate_request_user(state, headers, uri).await?;
     if !user.can_manage_server() {
         return Err(AppError::forbidden("server management permission required"));
     }
 
-    Ok(())
+    Ok(user)
 }
 
 fn default_dlna_profile() -> DlnaProfileDto {
@@ -606,10 +713,6 @@ fn validate_optional_profile_text(
         normalize_profile_text(value, field)?;
     }
     Ok(())
-}
-
-fn dlna_profile_write_disabled_error() -> AppError {
-    AppError::conflict("Emby DLNA profile writes are disabled; use FBZ server configuration APIs")
 }
 
 #[cfg(test)]

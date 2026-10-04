@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import type { CastMember } from "@/types/media.ts";
-import { imageUrl } from "@/service/modules/tmdb.ts";
 
 interface Props {
   cast: CastMember[];
@@ -16,14 +15,14 @@ const props = defineProps<Props>();
     <BaseScroller class="scroller" col-width="var(--cast-col)" gap="var(--cast-gap)">
       <RouterLink
         v-for="member in props.cast"
-        :key="member.id"
-        :to="`/person/${member.id}`"
+        :key="member.linkId ?? member.id"
+        :to="`/person/${encodeURIComponent(member.linkId ?? String(member.id))}`"
         class="cast-card"
       >
         <div class="avatar">
           <img
-            v-if="imageUrl(member.profile_path, 'w200')"
-            :src="imageUrl(member.profile_path, 'w200')"
+            v-if="member.profile_path"
+            :src="member.profile_path"
             :alt="member.name"
             loading="lazy"
           />

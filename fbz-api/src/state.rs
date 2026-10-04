@@ -7,6 +7,7 @@ use crate::{
     cache::RedisConnection,
     config::{Config, NodeRole},
     db::DbPool,
+    realtime::SessionMessageHub,
 };
 
 #[derive(Clone)]
@@ -14,6 +15,10 @@ pub struct AppState {
     config: Arc<Config>,
     database: Option<DbPool>,
     redis: Option<RedisConnection>,
+    session_hub: Arc<SessionMessageHub>,
+    /// 管理端优雅退出触发器（Emby `System/Restart` / `System/Shutdown` 桥接）；
+    /// 发送后 axum 优雅停机、workers 收尾，进程退出交给部署侧监管策略。
+    shutdown_trigger: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
 const READINESS_QUEUE_SUMMARY_SQL: &str = r#"
@@ -693,7 +698,27 @@ impl AppState {
             config: Arc::new(config),
             database: Some(database),
             redis: Some(redis),
+            session_hub: Arc::new(SessionMessageHub::default()),
+            shutdown_trigger: None,
         }
+    }
+
+    /// 挂上进程优雅退出触发器（main 在构建 router 前调用）。
+    pub fn with_shutdown_trigger(mut self, trigger: tokio::sync::broadcast::Sender<()>) -> Self {
+        self.shutdown_trigger = Some(trigger);
+        self
+    }
+
+    /// 请求进程优雅退出。返回是否成功触发（未接线或通道关闭返回 false）。
+    pub fn trigger_shutdown(&self) -> bool {
+        self.shutdown_trigger
+            .as_ref()
+            .is_some_and(|trigger| trigger.send(()).is_ok())
+    }
+
+    /// 进程内会话实时通道（Emby websocket 远程控制指令分发）。
+    pub fn session_hub(&self) -> &SessionMessageHub {
+        &self.session_hub
     }
 
     pub fn config(&self) -> &Config {
@@ -964,6 +989,8 @@ impl AppState {
             config: Arc::new(config),
             database: None,
             redis: None,
+            session_hub: Arc::new(SessionMessageHub::default()),
+            shutdown_trigger: None,
         }
     }
 }

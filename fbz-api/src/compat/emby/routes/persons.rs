@@ -9,7 +9,8 @@ use crate::{
     compat::emby::dto::{BaseItemDto, BaseItemSource, QueryResultDto},
     error::AppError,
     library::repository::{
-        LibraryRepository, PersonListInput, PersonRecord, PersonRoleFilter, SortDirection,
+        LibraryRepository, PersonDetailRecord, PersonListInput, PersonRecord, PersonRoleFilter,
+        SortDirection,
     },
     state::AppState,
 };
@@ -110,14 +111,14 @@ pub async fn person_by_name(
     };
 
     let Some(record) = LibraryRepository::new(database.clone())
-        .find_user_person_by_name(user.id, &name)
+        .find_user_person_detail_by_name(user.id, &name)
         .await
         .map_err(|err| AppError::internal(format!("failed to get person: {err}")))?
     else {
         return Err(AppError::not_found("person not found"));
     };
 
-    Ok(Json(person_to_base_item(record)))
+    Ok(Json(person_detail_to_base_item(record)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +207,30 @@ fn person_to_base_item(record: PersonRecord) -> BaseItemDto {
         run_time_ticks: None,
         production_year: None,
     })
+}
+
+/// 人物详情 → BaseItemDto：在基础形状上补传记、生卒、头像。
+/// Emby 约定：人物生卒用 `PremiereDate`（出生）/`EndDate`（去世）承载，`Overview` 是传记；
+/// 有头像时给 `ImageTags.Primary`（占位标记，客户端据此请求 `/Persons/{name}/Images/Primary`）。
+fn person_detail_to_base_item(record: PersonDetailRecord) -> BaseItemDto {
+    let mut dto = BaseItemDto::from(BaseItemSource {
+        id: record.id,
+        name: record.name,
+        item_type: "Person".to_owned(),
+        media_type: None,
+        parent_id: None,
+        is_folder: false,
+        run_time_ticks: None,
+        production_year: None,
+    });
+    dto.overview = record.overview;
+    dto.premiere_date = record.birth_date;
+    dto.end_date = record.death_date;
+    if record.has_image {
+        dto.image_tags
+            .insert("Primary".to_owned(), "primary".to_owned());
+    }
+    dto
 }
 
 #[cfg(test)]
@@ -321,5 +346,42 @@ mod tests {
         assert_eq!(item.item_type, "Person");
         assert_eq!(item.media_type, None);
         assert!(!item.is_folder);
+    }
+
+    #[test]
+    fn person_detail_maps_bio_dates_and_image() {
+        let item = person_detail_to_base_item(PersonDetailRecord {
+            id: "person-1".to_owned(),
+            name: "Tom Hanks".to_owned(),
+            overview: Some("演员、制片人。".to_owned()),
+            birth_date: Some("1956-07-09".to_owned()),
+            death_date: None,
+            has_image: true,
+        });
+
+        assert_eq!(item.item_type, "Person");
+        assert_eq!(item.overview.as_deref(), Some("演员、制片人。"));
+        assert_eq!(item.premiere_date.as_deref(), Some("1956-07-09"));
+        assert_eq!(item.end_date, None);
+        assert_eq!(
+            item.image_tags.get("Primary").map(String::as_str),
+            Some("primary")
+        );
+    }
+
+    #[test]
+    fn person_detail_without_image_omits_primary_tag() {
+        let item = person_detail_to_base_item(PersonDetailRecord {
+            id: "person-2".to_owned(),
+            name: "无照演员".to_owned(),
+            overview: None,
+            birth_date: None,
+            death_date: None,
+            has_image: false,
+        });
+
+        assert!(item.image_tags.is_empty());
+        assert_eq!(item.overview, None);
+        assert_eq!(item.premiere_date, None);
     }
 }

@@ -1,85 +1,136 @@
 <script setup lang="ts">
 import { useUiStore } from "@/stores/ui.ts";
 import { useLibraryStore } from "@/stores/library.ts";
+import {
+  addLibraryPath,
+  createLibrary,
+  deleteLibrary,
+  listLibraries,
+  listLibraryPaths,
+  queueLibraryMetadataRefresh,
+  queueLibraryScan,
+  removeLibraryPath,
+  updateLibrarySettings,
+} from "@/service/modules/admin.ts";
+import {
+  LIBRARY_TYPE_OPTIONS,
+  type AdminLibraryType,
+  type LibrarySettings,
+} from "@/types/admin.ts";
+import { useBodyScrollLock } from "@/composables/useBodyScrollLock.ts";
 
 const uiStore = useUiStore();
 const { libraryEditor } = storeToRefs(uiStore);
 const libraryStore = useLibraryStore();
+useBodyScrollLock(() => libraryEditor.value.open);
 
 interface LibSettings {
   id: string;
   name: string;
-  kind: "movie" | "series" | "anime" | "documentary" | "music";
+  libraryType: AdminLibraryType;
   paths: string[];
-  scrapers: string[];
   metadataLanguage: string;
+  imageLanguage: string;
   preferOriginalPoster: boolean;
-  imageCache: boolean;
-  preloadMetadata: boolean;
-  realtimeMonitor: boolean;
-  pushNotification: boolean;
+  isHidden: boolean;
 }
 
 const selectedLib = ref<LibSettings | null>(null);
 const showDeleteConfirm = ref(false);
 const isNewLibrary = ref(false);
-
-const libraryTypeOptions = [
-  { label: "电影 (Movie)", value: "movie" },
-  { label: "电视剧 (TV Series)", value: "series" },
-  { label: "动漫 (Anime)", value: "anime" },
-  { label: "纪录片 (Documentary)", value: "documentary" },
-  { label: "音乐 (Music)", value: "music" },
-];
+const saving = ref(false);
+const loadingDetails = ref(false);
 
 const languageOptions = [
   { label: "继承系统全局语言", value: "system" },
-  { label: "简体中文 (zh-CN)", value: "zh" },
-  { label: "英语 (en-US)", value: "en" },
+  { label: "简体中文 (zh-CN)", value: "zh-CN" },
+  { label: "英语 (en-US)", value: "en-US" },
+  { label: "日语 (ja-JP)", value: "ja-JP" },
 ];
+
+const imageLanguageOptions = [
+  { label: "继承系统图片语言", value: "system" },
+  { label: "中文海报优先", value: "zh" },
+  { label: "英文海报优先", value: "en" },
+  { label: "无字图优先", value: "none" },
+];
+
+function toNullable(value: string): string | null {
+  return value === "system" || value.trim() === "" ? null : value;
+}
+
+function fromNullable(value: string | null | undefined): string {
+  return value ?? "system";
+}
+
+function settingsToForm(lib: LibrarySettings, paths: string[]): LibSettings {
+  return {
+    id: lib.id,
+    name: lib.name,
+    libraryType: lib.libraryType as AdminLibraryType,
+    paths: paths.length ? paths : [""],
+    metadataLanguage: fromNullable(lib.preferredMetadataLanguage),
+    imageLanguage: fromNullable(lib.preferredImageLanguage),
+    preferOriginalPoster: lib.preferredImagePreferOriginal ?? true,
+    isHidden: lib.isHidden,
+  };
+}
+
+async function refreshLibraryStore() {
+  const page = await listLibraries({ limit: 500 });
+  libraryStore.replaceFromSettings(page.items);
+  return page.items;
+}
 
 watch(
   () => libraryEditor.value.open,
-  (open) => {
+  async (open) => {
     if (open) {
       showDeleteConfirm.value = false;
       const libId = libraryEditor.value.libraryId;
       if (libId) {
         isNewLibrary.value = false;
-        const lib = libraryStore.getById(libId);
-        if (lib) {
-          selectedLib.value = {
-            id: lib.id,
-            name: lib.name,
-            kind: lib.kind,
-            paths: lib.paths || ["/media/nas/" + (lib.kind === "series" ? "电视剧" : lib.name)],
-            scrapers: lib.scrapers || ["tmdb", "local"],
-            metadataLanguage: lib.metadataLanguage || "system",
-            preferOriginalPoster: lib.preferOriginalPoster ?? true,
-            imageCache: lib.imageCache ?? true,
-            preloadMetadata: lib.preloadMetadata ?? true,
-            realtimeMonitor: lib.realtimeMonitor ?? true,
-            pushNotification: lib.pushNotification ?? false,
-          };
+        loadingDetails.value = true;
+        selectedLib.value = null;
+        try {
+          const [librariesPage, paths] = await Promise.all([
+            listLibraries({ limit: 500 }),
+            listLibraryPaths(libId),
+          ]);
+          const lib = librariesPage.items.find((item) => item.id === libId);
+          if (!lib) {
+            uiStore.showToast("媒体库不存在或已被删除。", "error");
+            uiStore.closeLibraryEditor();
+            return;
+          }
+          libraryStore.replaceFromSettings(librariesPage.items);
+          selectedLib.value = settingsToForm(
+            lib,
+            paths.filter((path) => path.isEnabled).map((path) => path.path),
+          );
+        } catch {
+          uiStore.showToast("加载媒体库配置失败，请检查网络与权限。", "error");
+          uiStore.closeLibraryEditor();
+        } finally {
+          loadingDetails.value = false;
         }
       } else {
         isNewLibrary.value = true;
         selectedLib.value = {
-          id: `lib-${Date.now()}`,
+          id: "",
           name: "",
-          kind: "movie",
-          paths: ["/media/nas/电影"],
-          scrapers: ["tmdb"],
+          libraryType: "movies",
+          paths: [""],
           metadataLanguage: "system",
+          imageLanguage: "system",
           preferOriginalPoster: true,
-          imageCache: true,
-          preloadMetadata: true,
-          realtimeMonitor: true,
-          pushNotification: false,
+          isHidden: false,
         };
       }
     } else {
       selectedLib.value = null;
+      saving.value = false;
+      loadingDetails.value = false;
     }
   },
 );
@@ -98,7 +149,7 @@ async function handleBrowsePath(index: number) {
 
 function addPathField() {
   if (!selectedLib.value) return;
-  selectedLib.value.paths.push("/media/nas");
+  selectedLib.value.paths.push("");
 }
 
 function removePathField(index: number) {
@@ -108,76 +159,86 @@ function removePathField(index: number) {
   }
 }
 
-function toggleScraper(scraper: string) {
-  if (!selectedLib.value) return;
-  const scrapers = selectedLib.value.scrapers;
-  const idx = scrapers.indexOf(scraper);
-  if (idx > -1) {
-    if (scrapers.length > 1) scrapers.splice(idx, 1);
-  } else {
-    scrapers.push(scraper);
-  }
-}
-
-function handleSaveLibrary() {
+async function handleSaveLibrary() {
   if (!selectedLib.value) return;
   if (!selectedLib.value.name.trim()) {
     uiStore.showToast("请输入媒体库标题！", "warning");
     return;
   }
-
-  const store = libraryStore;
-  if (isNewLibrary.value) {
-    store.libraries.push({
-      id: selectedLib.value.id,
-      name: selectedLib.value.name,
-      kind: selectedLib.value.kind,
-      count: 0,
-      paths: selectedLib.value.paths,
-      scrapers: selectedLib.value.scrapers,
-      metadataLanguage: selectedLib.value.metadataLanguage,
-      preferOriginalPoster: selectedLib.value.preferOriginalPoster,
-      imageCache: selectedLib.value.imageCache,
-      preloadMetadata: selectedLib.value.preloadMetadata,
-      realtimeMonitor: selectedLib.value.realtimeMonitor,
-      pushNotification: selectedLib.value.pushNotification,
-    } as any);
-    uiStore.showToast("媒体库创建成功！已开始扫描物理路径，匹配 TMDB 元数据中。", "success");
-  } else {
-    const existing = store.libraries.find((l) => l.id === selectedLib.value?.id);
-    if (existing) {
-      Object.assign(existing, {
-        name: selectedLib.value.name,
-        kind: selectedLib.value.kind,
-        paths: selectedLib.value.paths,
-        scrapers: selectedLib.value.scrapers,
-        metadataLanguage: selectedLib.value.metadataLanguage,
-        preferOriginalPoster: selectedLib.value.preferOriginalPoster,
-        imageCache: selectedLib.value.imageCache,
-        preloadMetadata: selectedLib.value.preloadMetadata,
-        realtimeMonitor: selectedLib.value.realtimeMonitor,
-        pushNotification: selectedLib.value.pushNotification,
-      });
-      uiStore.showToast("媒体库配置已保存，系统正在自动重构相关索引并清理图片缓存。", "success");
-    }
+  const paths = selectedLib.value.paths.map((path) => path.trim()).filter(Boolean);
+  if (!paths.length) {
+    uiStore.showToast("请至少填写一个服务器物理路径。", "warning");
+    return;
   }
 
-  uiStore.closeLibraryEditor();
+  saving.value = true;
+  try {
+    if (isNewLibrary.value) {
+      const created = await createLibrary({
+        name: selectedLib.value.name.trim(),
+        libraryType: selectedLib.value.libraryType,
+        paths,
+        preferredMetadataLanguage: toNullable(selectedLib.value.metadataLanguage),
+        preferredImageLanguage: toNullable(selectedLib.value.imageLanguage),
+        preferredImagePreferOriginal: selectedLib.value.preferOriginalPoster,
+      });
+      await queueLibraryScan(created.id, "library-created");
+      await refreshLibraryStore();
+      uiStore.showToast("媒体库创建成功，已加入扫描队列。", "success");
+    } else {
+      await updateLibrarySettings(selectedLib.value.id, {
+        isHidden: selectedLib.value.isHidden,
+        preferredMetadataLanguage: toNullable(selectedLib.value.metadataLanguage),
+        preferredImageLanguage: toNullable(selectedLib.value.imageLanguage),
+        preferredImagePreferOriginal: selectedLib.value.preferOriginalPoster,
+        preferredImageFallbackLanguages: [],
+      });
+
+      const existingPaths = await listLibraryPaths(selectedLib.value.id);
+      const existingPathSet = new Set(existingPaths.map((path) => path.path));
+      const nextPathSet = new Set(paths);
+      await Promise.all(
+        existingPaths
+          .filter((path) => !nextPathSet.has(path.path))
+          .map((path) => removeLibraryPath(selectedLib.value!.id, path.id)),
+      );
+      await Promise.all(
+        paths
+          .filter((path) => !existingPathSet.has(path))
+          .map((path) => addLibraryPath(selectedLib.value!.id, path)),
+      );
+      await queueLibraryScan(selectedLib.value.id, "library-settings-updated");
+      await queueLibraryMetadataRefresh(selectedLib.value.id, {
+        reason: "library-settings-updated",
+      });
+      await refreshLibraryStore();
+      uiStore.showToast("媒体库配置已保存，扫描与元数据刷新已入队。", "success");
+    }
+    uiStore.closeLibraryEditor();
+  } catch {
+    uiStore.showToast("保存媒体库配置失败，请检查输入、权限和服务器状态。", "error");
+  } finally {
+    saving.value = false;
+  }
 }
 
-function handleDeleteLibrary() {
+async function handleDeleteLibrary() {
   if (!selectedLib.value) return;
-  const store = libraryStore;
-  const idx = store.libraries.findIndex((l) => l.id === selectedLib.value?.id);
-  if (idx > -1) {
-    store.libraries.splice(idx, 1);
+  saving.value = true;
+  try {
+    await deleteLibrary(selectedLib.value.id);
+    await refreshLibraryStore();
     uiStore.showToast(
-      `媒体库【${selectedLib.value.name}】已成功从系统卸载。物理文件未受损。`,
+      `媒体库【${selectedLib.value.name}】已从系统卸载。物理文件未被删除。`,
       "success",
     );
+    uiStore.closeLibraryEditor();
+    showDeleteConfirm.value = false;
+  } catch {
+    uiStore.showToast("删除媒体库失败，请检查权限和服务器状态。", "error");
+  } finally {
+    saving.value = false;
   }
-  uiStore.closeLibraryEditor();
-  showDeleteConfirm.value = false;
 }
 
 useEventListener(window, "keydown", (e) => {
@@ -201,6 +262,7 @@ useEventListener(window, "keydown", (e) => {
         aria-labelledby="modal-title"
         @click.stop
       >
+        <div v-if="loadingDetails" class="modal-loading">正在加载媒体库配置...</div>
         <header class="modal-title-bar">
           <div class="title-left">
             <svg
@@ -268,9 +330,9 @@ useEventListener(window, "keydown", (e) => {
                 <div class="form-group">
                   <label id="lib-kind-label">媒体类型</label>
                   <BaseSelect
-                    v-model="selectedLib.kind"
+                    v-model="selectedLib.libraryType"
                     ariaLabel="选择媒体类型"
-                    :options="libraryTypeOptions"
+                    :options="LIBRARY_TYPE_OPTIONS"
                     class="w-full"
                   />
                 </div>
@@ -368,58 +430,21 @@ useEventListener(window, "keydown", (e) => {
 
               <div class="card-body">
                 <div class="form-group">
-                  <label id="scrapers-group-label">元数据搜刮源</label>
-                  <div class="scrapers-grid" role="group" aria-labelledby="scrapers-group-label">
-                    <label
-                      class="scraper-item-card"
-                      :class="{ active: selectedLib.scrapers.includes('tmdb') }"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="selectedLib.scrapers.includes('tmdb')"
-                        aria-label="启用 TMDB 搜刮器"
-                        @change="toggleScraper('tmdb')"
-                      />
-                      <span class="scraper-logo tmdb-logo">TMDB</span>
-                      <span class="scraper-name">The Movie DB</span>
-                    </label>
-
-                    <label
-                      class="scraper-item-card"
-                      :class="{ active: selectedLib.scrapers.includes('imdb') }"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="selectedLib.scrapers.includes('imdb')"
-                        aria-label="启用 IMDb 搜刮器"
-                        @change="toggleScraper('imdb')"
-                      />
-                      <span class="scraper-logo imdb-logo">IMDb</span>
-                      <span class="scraper-name">Internet Movie DB</span>
-                    </label>
-
-                    <label
-                      class="scraper-item-card"
-                      :class="{ active: selectedLib.scrapers.includes('local') }"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="selectedLib.scrapers.includes('local')"
-                        aria-label="启用本地 NFO 搜刮器"
-                        @change="toggleScraper('local')"
-                      />
-                      <span class="scraper-logo nfo-logo">NFO</span>
-                      <span class="scraper-name">本地 NFO 配置文件</span>
-                    </label>
-                  </div>
-                </div>
-
-                <div class="form-group">
                   <label id="lib-lang-label">搜刮元数据语言偏好</label>
                   <BaseSelect
                     v-model="selectedLib.metadataLanguage"
                     ariaLabel="选择搜刮元数据语言偏好"
                     :options="languageOptions"
+                    class="w-full"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label id="lib-image-lang-label">图片语言偏好</label>
+                  <BaseSelect
+                    v-model="selectedLib.imageLanguage"
+                    ariaLabel="选择图片语言偏好"
+                    :options="imageLanguageOptions"
                     class="w-full"
                   />
                 </div>
@@ -445,16 +470,10 @@ useEventListener(window, "keydown", (e) => {
                   <div class="toggle-row-item">
                     <div class="toggle-text">
                       <span class="title">图片本地物理缓存</span>
-                      <span class="desc"
-                        >开启时，搜刮的海报和剧照将自动缓存在本地服务器中，显著缩短前台渲染响应时间。</span
-                      >
+                      <span class="desc">后端元数据刷新会自动缓存海报和剧照到本地服务器。</span>
                     </div>
                     <label class="glow-switch">
-                      <input
-                        v-model="selectedLib.imageCache"
-                        type="checkbox"
-                        aria-label="图片本地物理缓存"
-                      />
+                      <input checked disabled type="checkbox" aria-label="图片本地物理缓存" />
                       <span class="switch-slide-thumb" />
                     </label>
                   </div>
@@ -479,11 +498,7 @@ useEventListener(window, "keydown", (e) => {
                       >
                     </div>
                     <label class="glow-switch">
-                      <input
-                        v-model="selectedLib.preloadMetadata"
-                        type="checkbox"
-                        aria-label="预加载媒体信息"
-                      />
+                      <input disabled type="checkbox" aria-label="预加载媒体信息" />
                       <span class="switch-slide-thumb" />
                     </label>
                   </div>
@@ -497,11 +512,7 @@ useEventListener(window, "keydown", (e) => {
                       >
                     </div>
                     <label class="glow-switch">
-                      <input
-                        v-model="selectedLib.realtimeMonitor"
-                        type="checkbox"
-                        aria-label="开启实时文件系统监控"
-                      />
+                      <input disabled type="checkbox" aria-label="开启实时文件系统监控" />
                       <span class="switch-slide-thumb" />
                     </label>
                   </div>
@@ -514,11 +525,7 @@ useEventListener(window, "keydown", (e) => {
                       >
                     </div>
                     <label class="glow-switch">
-                      <input
-                        v-model="selectedLib.pushNotification"
-                        type="checkbox"
-                        aria-label="消息推送通知"
-                      />
+                      <input disabled type="checkbox" aria-label="消息推送通知" />
                       <span class="switch-slide-thumb" />
                     </label>
                   </div>
@@ -560,8 +567,13 @@ useEventListener(window, "keydown", (e) => {
           <button class="action-btn-secondary" type="button" @click="uiStore.closeLibraryEditor">
             取消
           </button>
-          <button class="action-btn-primary" type="button" @click="handleSaveLibrary">
-            保存修改
+          <button
+            class="action-btn-primary"
+            type="button"
+            :disabled="saving"
+            @click="handleSaveLibrary"
+          >
+            {{ saving ? "保存中..." : "保存修改" }}
           </button>
         </footer>
 
@@ -637,6 +649,14 @@ useEventListener(window, "keydown", (e) => {
   overflow: hidden;
   color: var(--fbz-color-text);
   font-family: var(--fbz-font-sans);
+}
+
+.modal-loading {
+  padding: var(--fbz-space-4) var(--fbz-space-5);
+  border-bottom: 1px solid var(--fbz-color-line-soft);
+  background: var(--fbz-color-panel-strong);
+  color: var(--fbz-color-text-muted);
+  font-size: var(--fbz-font-size-sm);
 }
 
 .modal-title-bar {

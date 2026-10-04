@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::service::AuthenticatedUser,
     compat::emby::dto::{
-        BaseItemDto, BaseItemSource, DeleteInfoDto, ItemCountsDto, MediaSourceDto, QueryResultDto,
-        RecommendationDto, UserItemDataDto,
+        BaseItemDto, BaseItemPersonDto, BaseItemSource, DeleteInfoDto, ItemCountsDto,
+        MediaSourceDto, QueryResultDto, RecommendationDto, UserItemDataDto,
     },
     db::DbPool,
     error::AppError,
@@ -21,6 +21,7 @@ use crate::{
         SimilarItemsInput, SortDirection, StringListFilter, UserItemAncestorRecord,
         UserLibraryViewRecord,
     },
+    media::repository::MediaRepository,
     state::AppState,
 };
 
@@ -849,7 +850,6 @@ pub(super) async fn list_items_for_authenticated_user(
         let result = repository
             .list_user_playlists(PlaylistListInput {
                 user_id: authenticated_user.id,
-                parent_id: normalized_parent_id(query.parent_id),
                 start_index: window.start_index,
                 limit: window.limit,
                 search_term: normalized_text_filter(query.search_term.as_deref()),
@@ -882,11 +882,17 @@ pub(super) async fn list_items_for_authenticated_user(
     let association_filter = association_filter_from_query(&query);
     let parent_id = normalized_parent_id(query.parent_id);
     let recursive = query.recursive.unwrap_or(false);
+    // 带 SearchTerm 且客户端未显式指定排序时按相关度排序（命中质量优先于字典序）。
+    let default_sort = if scalar_filter.search_term.is_some() {
+        ItemSortField::Relevance
+    } else {
+        ItemSortField::SortName
+    };
     let options = item_query_options_with_filters(
         query.include_item_types.as_deref(),
         query.sort_by.as_deref(),
         query.sort_order.as_deref(),
-        ItemSortField::SortName,
+        default_sort,
         SortDirection::Asc,
         scalar_filter,
         user_data_filter,
@@ -1068,8 +1074,6 @@ fn search_hints_items_query(query: SearchHintsQuery) -> ItemsQuery {
         include_item_types: query.include_item_types,
         search_term: query.search_term,
         media_types: query.media_types,
-        sort_by: Some("SortName".to_owned()),
-        sort_order: Some("Ascending".to_owned()),
         ..ItemsQuery::default()
     }
 }
@@ -1463,11 +1467,20 @@ pub async fn delete_video_alternate_sources(
 ) -> Result<StatusCode, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_server_admin(&user)?;
-    let _item_id = video_version_item_id(&item_id)?;
+    let item_id = video_version_item_id(&item_id)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict(
-        "video alternate source deletion is not configured",
-    ))
+    let split = MediaRepository::new(database.clone())
+        .split_video_alternate_sources(&item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to split alternate sources: {err}")))?;
+    if split.is_none() {
+        return Err(AppError::not_found("item not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn merge_video_versions(
@@ -1478,11 +1491,22 @@ pub async fn merge_video_versions(
 ) -> Result<StatusCode, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     ensure_server_admin(&user)?;
-    let _input = merge_versions_input(&query)?;
+    let input = merge_versions_input(&query)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
 
-    Err(AppError::conflict(
-        "video version merging is not configured",
-    ))
+    let merged = MediaRepository::new(database.clone())
+        .merge_video_versions(&input.ids)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to merge video versions: {err}")))?;
+    if merged.is_none() {
+        return Err(AppError::unprocessable(
+            "at least two existing items are required to merge",
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn item_delete_info(
@@ -1828,7 +1852,66 @@ async fn item_by_id_for_user(
         return Err(AppError::not_found("item not found"));
     };
 
-    Ok(Json(media_item_to_base_item(item)))
+    // 浏览记录不含 overview 列（列表接口不需要），单条详情按 id 单查补上，
+    // 让详情页能展示简介而不是只有海报 + 标题。
+    let mut base_item = media_item_to_base_item(item);
+    let overviews = repository
+        .fetch_item_overviews(std::slice::from_ref(&base_item.id))
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get item overview: {err}")))?;
+    if let Some(overview) = overviews.get(&base_item.id) {
+        base_item.overview = Some(overview.clone());
+    }
+
+    // 关联人物（演员/导演/编剧…）：TMDB credits 写进了 people/media_item_people 表，
+    // 单条详情按 id 单查，让详情页能展示演职员与导演，而不是空列表。
+    let people = repository
+        .fetch_item_people(&base_item.id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get item people: {err}")))?;
+    base_item.people = people.into_iter().map(item_person_to_dto).collect();
+
+    // 详情增强字段：原名/分级/首播日期/题材（列表接口不带，详情单查回填）。
+    if let Some(extras) = repository
+        .fetch_item_detail_extras(&base_item.id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get item extras: {err}")))?
+    {
+        base_item.genres = extras.genres;
+        base_item.original_title = extras
+            .original_title
+            .filter(|value| !value.trim().is_empty() && *value != base_item.name);
+        base_item.official_rating = extras.official_rating;
+        if base_item.premiere_date.is_none() {
+            base_item.premiere_date = extras.premiere_date;
+        }
+    }
+
+    Ok(Json(base_item))
+}
+
+/// people 表 role_type → Emby Person Type（PascalCase）。
+fn emby_person_type(role_type: &str) -> &'static str {
+    match role_type {
+        "director" => "Director",
+        "writer" => "Writer",
+        "producer" => "Producer",
+        "composer" => "Composer",
+        "artist" => "Artist",
+        "guest_star" => "GuestStar",
+        _ => "Actor",
+    }
+}
+
+fn item_person_to_dto(record: crate::library::repository::ItemPersonRecord) -> BaseItemPersonDto {
+    BaseItemPersonDto {
+        id: record.id,
+        name: record.name,
+        role: record.role_name,
+        person_type: emby_person_type(&record.role_type).to_owned(),
+        primary_image_tag: record.has_image.then(|| "primary".to_owned()),
+        sort_order: record.sort_order,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2539,6 +2622,11 @@ fn emby_filter_item_type(item_type: &str) -> Option<&'static str> {
         "musicalbum" | "album" => Some("album"),
         "musicartist" | "artist" => Some("artist"),
         "boxset" | "collection" => Some("collection"),
+        "photo" => Some("photo"),
+        "video" => Some("video"),
+        "tvchannel" => Some("tvchannel"),
+        "program" => Some("program"),
+        "recording" => Some("recording"),
         "folder" | "collectionfolder" => Some("folder"),
         _ => None,
     }
@@ -2771,7 +2859,11 @@ fn library_view_to_base_item(record: UserLibraryViewRecord) -> BaseItemDto {
         run_time_ticks: None,
         production_year: None,
     });
-    item.collection_type = Some(record.library_type);
+    item.collection_type = Some(
+        crate::media_types::LibraryType::parse(&record.library_type)
+            .map(|kind| kind.collection_type().to_owned())
+            .unwrap_or(record.library_type),
+    );
     item
 }
 
@@ -2832,12 +2924,39 @@ fn media_item_to_base_item_with_images(
         production_year: record.production_year,
     });
     item.user_data = Some(user_data);
+    item.index_number = record.index_number;
+    item.parent_index_number = record.parent_index_number;
+    item.premiere_date = record.premiere_date.clone();
     item.size = record.media_file_size;
     item.container = record.media_file_container.clone();
     item.bitrate = record.media_file_bitrate;
+    item.playlist_item_id = record.playlist_item_id.clone();
     item.media_sources = media_source.into_iter().collect();
     apply_requested_image_tags(&mut item, &record.image_tags, requested_images);
+    synthesize_photo_primary_tag(&mut item, &record.item_type, requested_images);
     item
+}
+
+/// 照片缩略图不在 artwork 表（在 photo-thumbnails/{id}.jpg，由 photo worker 生成），
+/// 所以浏览 SQL 聚合不出 image_tags。这里为 photo 条目合成一个 Primary tag（用 item id
+/// 作 Emby 缓存键），让客户端去请求 `Items/{id}/Images/Primary` —— 命中缩略图回退服务。
+/// 仅当请求了图片、且 artwork 未提供 Primary 时合成，不覆盖真实 artwork。
+fn synthesize_photo_primary_tag(
+    item: &mut BaseItemDto,
+    item_type: &str,
+    requested_images: &RequestedItemImages,
+) {
+    if item_type != "photo" || !requested_images.enabled || requested_images.limit == 0 {
+        return;
+    }
+    let primary_requested = requested_images
+        .image_types
+        .iter()
+        .any(|image_type| image_type.output_key == "Primary");
+    if primary_requested && !item.image_tags.contains_key("Primary") {
+        item.image_tags
+            .insert("Primary".to_owned(), item.id.clone());
+    }
 }
 
 fn apply_requested_image_tags(
@@ -2938,14 +3057,21 @@ fn emby_item_type(item_type: &str) -> &'static str {
         "album" => "MusicAlbum",
         "track" => "Audio",
         "collection" => "BoxSet",
+        "photo" => "Photo",
+        "video" => "Video",
+        "tvchannel" => "TvChannel",
+        "program" => "Program",
+        "recording" => "Recording",
         _ => "Folder",
     }
 }
 
 fn media_type(item_type: &str) -> Option<&'static str> {
     match item_type {
-        "movie" | "series" | "season" | "episode" => Some("Video"),
+        "movie" | "series" | "season" | "episode" | "video" | "tvchannel" | "program"
+        | "recording" => Some("Video"),
         "artist" | "album" | "track" => Some("Audio"),
+        "photo" => Some("Photo"),
         _ => None,
     }
 }
@@ -3097,6 +3223,29 @@ mod tests {
             options.type_filter.item_types,
             ["movie", "episode", "track"]
         );
+    }
+
+    #[test]
+    fn photo_and_video_item_types_map_to_emby_in_both_directions() {
+        // 正向：内部 item_type → Emby Type / MediaType。
+        assert_eq!(emby_item_type("photo"), "Photo");
+        assert_eq!(media_type("photo"), Some("Photo"));
+        assert_eq!(emby_item_type("video"), "Video");
+        assert_eq!(media_type("video"), Some("Video"));
+        // 既不是文件夹也不会被误当 Folder（回归 _ => "Folder" 的旧行为）。
+        assert!(!is_folder("photo"));
+        assert!(!is_folder("video"));
+
+        // 反向：Emby IncludeItemTypes=Photo/Video → 内部 item_type。
+        let options = item_query_options(
+            Some("Photo,Video"),
+            None,
+            None,
+            ItemSortField::SortName,
+            SortDirection::Asc,
+        );
+        assert!(options.type_filter.enabled);
+        assert_eq!(options.type_filter.item_types, ["photo", "video"]);
     }
 
     #[test]
@@ -4683,11 +4832,15 @@ mod tests {
             media_file_is_strm: Some(false),
             supports_transcoding: true,
             production_year: Some(2026),
+            index_number: None,
+            parent_index_number: None,
+            premiere_date: None,
             playback_position_ticks: 100,
             play_count: 2,
             is_favorite: true,
             rating: Some(8.5),
             played: true,
+            playlist_item_id: None,
             image_tags: Vec::new(),
             total_record_count: 1,
         });
@@ -4749,11 +4902,15 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: None,
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
                 playback_position_ticks: 0,
                 play_count: 0,
                 is_favorite: false,
                 rating: None,
                 played: false,
+                playlist_item_id: None,
                 image_tags: vec![
                     "poster=poster-tag".to_owned(),
                     "primary=primary-tag".to_owned(),
@@ -4776,6 +4933,97 @@ mod tests {
             Some("logo-tag")
         );
         assert_eq!(item.backdrop_image_tags, ["backdrop-1", "backdrop-2"]);
+    }
+
+    #[test]
+    fn photo_item_synthesizes_primary_image_tag_for_thumbnail() {
+        let requested = requested_item_images(&ItemsQuery {
+            enable_images: Some(true),
+            image_type_limit: Some(1),
+            enable_image_types: Some("Primary".to_owned()),
+            ..ItemsQuery::default()
+        });
+        let item = media_item_to_base_item_with_images(
+            MediaItemBrowseRecord {
+                id: "photo-uuid-1".to_owned(),
+                name: "IMG_0001".to_owned(),
+                item_type: "photo".to_owned(),
+                parent_id: None,
+                run_time_ticks: None,
+                media_file_id: None,
+                media_file_size: None,
+                media_file_container: None,
+                media_file_bitrate: None,
+                media_file_is_strm: None,
+                supports_transcoding: false,
+                production_year: None,
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
+                playback_position_ticks: 0,
+                play_count: 0,
+                is_favorite: false,
+                rating: None,
+                played: false,
+                playlist_item_id: None,
+                // 照片缩略图不在 artwork 表，浏览聚合不出 image_tags。
+                image_tags: Vec::new(),
+                total_record_count: 1,
+            },
+            &requested,
+        );
+
+        // 合成 Primary tag（值=item id），客户端据此请求缩略图。
+        assert_eq!(
+            item.image_tags.get("Primary").map(String::as_str),
+            Some("photo-uuid-1"),
+            "photo must get a synthesized Primary tag so clients fetch the thumbnail"
+        );
+        assert_eq!(item.item_type, "Photo");
+    }
+
+    #[test]
+    fn non_photo_without_artwork_has_no_synthesized_tag() {
+        let requested = requested_item_images(&ItemsQuery {
+            enable_images: Some(true),
+            image_type_limit: Some(1),
+            enable_image_types: Some("Primary".to_owned()),
+            ..ItemsQuery::default()
+        });
+        let item = media_item_to_base_item_with_images(
+            MediaItemBrowseRecord {
+                id: "movie-uuid-1".to_owned(),
+                name: "Movie".to_owned(),
+                item_type: "movie".to_owned(),
+                parent_id: None,
+                run_time_ticks: None,
+                media_file_id: None,
+                media_file_size: None,
+                media_file_container: None,
+                media_file_bitrate: None,
+                media_file_is_strm: None,
+                supports_transcoding: false,
+                production_year: None,
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
+                playback_position_ticks: 0,
+                play_count: 0,
+                is_favorite: false,
+                rating: None,
+                played: false,
+                playlist_item_id: None,
+                image_tags: Vec::new(),
+                total_record_count: 1,
+            },
+            &requested,
+        );
+
+        // 非照片条目无 artwork 时不合成 tag（合成只针对照片缩略图回退）。
+        assert!(
+            !item.image_tags.contains_key("Primary"),
+            "non-photo items must not get a synthesized Primary tag"
+        );
     }
 
     #[test]
@@ -4814,11 +5062,15 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: Some(2026),
+                index_number: None,
+                parent_index_number: None,
+                premiere_date: None,
                 playback_position_ticks: 0,
                 play_count: 0,
                 is_favorite: false,
                 rating: None,
                 played: false,
+                playlist_item_id: None,
                 image_tags: Vec::new(),
                 total_record_count: 1,
             }));

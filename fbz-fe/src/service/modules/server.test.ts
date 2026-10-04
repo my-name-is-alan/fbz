@@ -2,7 +2,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authenticate, listItems, preparePlayback, readSession, saveSession } from "./server.ts";
 const mocks = vi.hoisted(() => ({ request: vi.fn(), post: vi.fn() }));
-vi.mock("@/service/request.ts", () => ({ request: mocks }));
+vi.mock("@/service/request.ts", () => ({
+  request: mocks,
+  getAccessToken: () =>
+    sessionStorage.getItem("fbz_access_token") ?? localStorage.getItem("fbz_access_token"),
+  setAccessToken: (token: string | null) =>
+    token
+      ? localStorage.setItem("fbz_access_token", token)
+      : localStorage.removeItem("fbz_access_token"),
+}));
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
@@ -37,7 +45,7 @@ describe("server integration", () => {
     await listItems("library-1", 60, "test title");
     expect(mocks.request).toHaveBeenCalledWith(
       expect.objectContaining({
-        baseURL: "http://localhost:8080",
+        baseURL: window.location.origin,
         url: expect.stringContaining("/emby/Users/u1/Items?"),
       }),
     );
@@ -65,7 +73,7 @@ describe("server integration", () => {
         },
       });
     const result = await preparePlayback({ Id: "m1", Name: "Test", Type: "Movie" });
-    expect(result.source.uri).toBe("http://localhost:8080/emby/Videos/m1/stream");
+    expect(result.source.uri).toBe(`${window.location.origin}/emby/Videos/m1/stream`);
     expect(result.server.startTicks).toBe(250000000);
     expect(result.duration).toBe(120);
   });
