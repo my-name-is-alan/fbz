@@ -43,7 +43,7 @@ function moveDown(index: number) {
           >
             <div class="item-left">
               <span class="drag-handle" aria-hidden="true">☰</span>
-              <span class="lib-icon">📁</span>
+              <BaseIcon name="folder" :size="19" />
               <div class="lib-info">
                 <span class="name">{{ lib.name }}</span>
                 <span class="kind">
@@ -64,7 +64,7 @@ function moveDown(index: number) {
             </div>
             <div class="item-actions">
               <button
-                class="sort-btn"
+                class="du-btn du-btn-sm sort-btn"
                 type="button"
                 :disabled="idx === 0"
                 :aria-label="`向上移动 ${lib.name}`"
@@ -73,7 +73,7 @@ function moveDown(index: number) {
                 ▲ 上移
               </button>
               <button
-                class="sort-btn"
+                class="du-btn du-btn-sm sort-btn"
                 type="button"
                 :disabled="idx === libraryStore.libraries.length - 1"
                 :aria-label="`向下移动 ${lib.name}`"

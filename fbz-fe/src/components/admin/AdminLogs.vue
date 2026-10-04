@@ -211,7 +211,7 @@ function copyLogs() {
         <div class="filter-group">
           <button
             type="button"
-            class="tb-btn"
+            class="du-btn du-btn-sm tb-btn"
             :class="{ active: currentLevelFilter === 'all' }"
             @click="currentLevelFilter = 'all'"
           >
@@ -219,7 +219,7 @@ function copyLogs() {
           </button>
           <button
             type="button"
-            class="tb-btn level-info"
+            class="du-btn du-btn-sm tb-btn level-info"
             :class="{ active: currentLevelFilter === 'info' }"
             @click="currentLevelFilter = 'info'"
           >
@@ -227,7 +227,7 @@ function copyLogs() {
           </button>
           <button
             type="button"
-            class="tb-btn level-success"
+            class="du-btn du-btn-sm tb-btn level-success"
             :class="{ active: currentLevelFilter === 'success' }"
             @click="currentLevelFilter = 'success'"
           >
@@ -235,7 +235,7 @@ function copyLogs() {
           </button>
           <button
             type="button"
-            class="tb-btn level-warning"
+            class="du-btn du-btn-sm tb-btn level-warning"
             :class="{ active: currentLevelFilter === 'warning' }"
             @click="currentLevelFilter = 'warning'"
           >
@@ -243,7 +243,7 @@ function copyLogs() {
           </button>
           <button
             type="button"
-            class="tb-btn level-error"
+            class="du-btn du-btn-sm tb-btn level-error"
             :class="{ active: currentLevelFilter === 'error' }"
             @click="currentLevelFilter = 'error'"
           >
@@ -257,15 +257,15 @@ function copyLogs() {
               type="text"
               v-model="searchQuery"
               placeholder="搜索日志关键字..."
-              class="terminal-search-input"
+              class="du-input terminal-search-input"
               aria-label="检索日志内容"
             />
-            <span class="search-icon">⌕</span>
+            <BaseIcon class="search-icon" name="search" :size="17" />
           </div>
 
           <button
             type="button"
-            class="action-icon-btn"
+            class="du-btn du-btn-sm action-icon-btn"
             title="复制日志"
             aria-label="复制当前过滤日志"
             @click="copyLogs"
@@ -275,7 +275,7 @@ function copyLogs() {
 
           <button
             type="button"
-            class="action-icon-btn"
+            class="du-btn du-btn-sm action-icon-btn"
             title="清空面板"
             aria-label="清空当前日志面板"
             @click="clearLogs"

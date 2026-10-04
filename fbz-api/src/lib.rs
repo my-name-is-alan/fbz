@@ -20,3 +20,8 @@ pub mod state;
 pub mod telemetry;
 pub mod transcode;
 pub mod users;
+
+pub mod storage;
+
+pub mod media_bytes;
+pub mod presentation;

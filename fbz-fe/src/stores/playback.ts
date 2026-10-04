@@ -1,3 +1,5 @@
+import { preparePlayback } from "@/service/modules/server.ts";
+import { useUiStore } from "@/stores/ui.ts";
 export interface PlaybackTrack {
   id: string;
   label: string;
@@ -13,11 +15,14 @@ export interface PlaybackChapter {
 }
 
 export interface PlaybackSource {
+  proxyUri?: string;
+  size?: number;
   uri?: string;
   mimeType?: string;
 }
 
 export interface PlaybackEpisode {
+  serverItem?: import("@/service/modules/server.ts").ServerItem;
   id: string;
   title: string;
   subtitle?: string;
@@ -29,6 +34,7 @@ export interface PlaybackEpisode {
 }
 
 export interface PlaybackItem {
+  server?: { playSessionId: string; mediaSourceId: string; startTicks: number };
   type: "movie" | "tv" | "episode";
   id: string;
   title: string;
@@ -46,6 +52,7 @@ export interface PlaybackItem {
 
 export const usePlaybackStore = defineStore("playback", () => {
   const item = shallowRef<PlaybackItem>();
+  let selection = 0;
   const isOpen = computed(() => item.value != null);
   const playlist = computed(() => item.value?.playlist ?? []);
   const currentEpisodeIndex = computed(() => {
@@ -58,14 +65,33 @@ export const usePlaybackStore = defineStore("playback", () => {
   );
 
   function open(nextItem: PlaybackItem) {
+    selection++;
     item.value = nextItem;
   }
 
-  function selectEpisode(episodeId: string) {
+  async function selectEpisode(episodeId: string) {
+    const version = ++selection;
     const current = item.value;
     const episode = playlist.value.find((entry) => entry.id === episodeId);
     if (!current || !episode) return;
 
+    if (episode.serverItem) {
+      try {
+        const prepared = await preparePlayback(episode.serverItem);
+        if (version !== selection || !item.value) return;
+        item.value = {
+          ...prepared,
+          title: episode.title,
+          subtitle: episode.subtitle,
+          backdrop: episode.backdrop,
+          playlist: current.playlist,
+        };
+      } catch {
+        if (version !== selection) return;
+        useUiStore().showToast("无法加载分集，请稍后重试", "error");
+      }
+      return;
+    }
     item.value = {
       ...current,
       type: "episode",
@@ -80,15 +106,16 @@ export const usePlaybackStore = defineStore("playback", () => {
 
   function playPreviousEpisode() {
     if (!hasPreviousEpisode.value) return;
-    selectEpisode(playlist.value[currentEpisodeIndex.value - 1]!.id);
+    void selectEpisode(playlist.value[currentEpisodeIndex.value - 1]!.id);
   }
 
   function playNextEpisode() {
     if (!hasNextEpisode.value) return;
-    selectEpisode(playlist.value[currentEpisodeIndex.value + 1]!.id);
+    void selectEpisode(playlist.value[currentEpisodeIndex.value + 1]!.id);
   }
 
   function close() {
+    selection++;
     item.value = undefined;
   }
 

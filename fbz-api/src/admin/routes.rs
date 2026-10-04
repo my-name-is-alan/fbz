@@ -76,6 +76,7 @@ const MAX_TRANSCODE_HARDWARE_ACCELERATION_LEN: usize = 64;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/libraries", post(create_library))
+        .route("/api/admin/playback", get(active_playback))
         .route("/api/admin/libraries/{library_id}/paths", post(add_path))
         .route("/api/admin/libraries/{library_id}/scan", post(queue_scan))
         .route(
@@ -826,6 +827,33 @@ pub struct TranscodeSessionQueryDto {
     pub limit: Option<i64>,
 }
 
+/// Recent, unclosed playback reports; login sessions alone are not active playback.
+pub async fn active_playback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<Value>>, AppError> {
+    authenticate_admin(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let records: Vec<(String, String, String, i64, i64, bool, String)> = sqlx::query_as(
+        "select mi.public_id::text, mi.title, u.username, ps.position_ticks, \
+         coalesce(mi.runtime_ticks, mf.duration_ticks, 0), ps.is_paused, ps.play_method \
+         from playback_sessions ps join media_items mi on mi.id = ps.media_item_id \
+         join users u on u.id = ps.user_id left join media_files mf on mf.id = ps.media_file_id \
+         where ps.stopped_at is null and ps.last_progress_at > now() - interval '90 seconds' \
+         order by ps.last_progress_at desc limit 50",
+    )
+    .fetch_all(database)
+    .await
+    .map_err(|err| AppError::internal(format!("failed to list playback: {err}")))?;
+    Ok(Json(records.into_iter().map(|(id, name, user, position, runtime, paused, method)| {
+        serde_json::json!({ "Id": id, "Name": name, "UserName": user, "PositionTicks": position,
+            "RunTimeTicks": runtime, "IsPaused": paused, "PlayMethod": method })
+    }).collect()))
+}
+
 pub async fn create_library(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -896,6 +924,11 @@ pub async fn queue_scan(
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
+    let cloud: bool = sqlx::query_scalar("select exists(select 1 from storage_mounts m join libraries l on l.id=m.library_id where l.public_id::text=$1)")
+        .bind(&library_id).fetch_one(database).await.map_err(crate::storage::sql_error)?;
+    if cloud {
+        return Err(AppError::conflict("云端媒体库请在云盘挂载页面扫描"));
+    }
     let Some(job) = AdminRepository::new(database.clone())
         .queue_library_scan(QueueLibraryScanInput {
             library_id,

@@ -2,6 +2,14 @@
 export type MediaKind = "movie" | "series" | "anime" | "documentary" | "music";
 
 export interface MediaLibrary {
+  paths?: string[];
+  scrapers?: string[];
+  metadataLanguage?: string;
+  preferOriginalPoster?: boolean;
+  imageCache?: boolean;
+  preloadMetadata?: boolean;
+  realtimeMonitor?: boolean;
+  pushNotification?: boolean;
   id: string;
   name: string;
   kind: MediaKind;
@@ -11,6 +19,7 @@ export interface MediaLibrary {
 
 /** 媒体条目（电影 / 剧集等的统一展示模型） */
 export interface MediaItem {
+  serverItem?: import("@/service/modules/server.ts").ServerItem;
   id: string;
   libraryId: string;
   title: string;

@@ -1,23 +1,41 @@
-import type { MediaLibrary } from "@/types/media.ts";
-import { libraries as mockLibraries } from "@/service/modules/media.ts";
-import { libraryCounts } from "@/service/modules/tmdb.ts";
+import type { MediaLibrary, MediaKind } from "@/types/media.ts";
+import { readSession, serverRequest, errorMessage } from "@/service/modules/server.ts";
+import type { ServerLibrary } from "@/service/modules/server.ts";
 
-/**
- * 媒体库 store —— header 下拉、移动端抽屉、媒体库总览页共享同一份库列表。
- * 库的元信息（名称/类型）来自 mock，条目数用 TMDB 真实目录统计覆盖。
- * 真实接入后端后，把这两处换成 service 请求即可，消费方不变。
- */
 export const useLibraryStore = defineStore("library", () => {
-  const counts = libraryCounts();
-  const libraries = ref<MediaLibrary[]>(
-    mockLibraries.map((lib) => ({ ...lib, count: counts[lib.id] ?? lib.count })),
-  );
-
+  const libraries = ref<MediaLibrary[]>([]);
+  const loading = ref(false);
+  const error = ref("");
   const totalCount = computed(() => libraries.value.reduce((sum, lib) => sum + lib.count, 0));
-
   function getById(id: string) {
     return libraries.value.find((lib) => lib.id === id);
   }
-
-  return { libraries, totalCount, getById };
+  async function refresh() {
+    if (!readSession()) {
+      libraries.value = [];
+      return;
+    }
+    loading.value = true;
+    error.value = "";
+    try {
+      const rows = await serverRequest<ServerLibrary[]>("/emby/Library/VirtualFolders");
+      const totals = await serverRequest<{ Id: string; Count: number }[]>(
+        "/api/media/library-counts",
+      );
+      libraries.value = rows.map((lib) => ({
+        id: lib.ItemId || lib.Id,
+        name: lib.Name,
+        kind: ({ movies: "movie", tvshows: "series", tv: "series", music: "music" }[
+          lib.CollectionType
+        ] ?? "movie") as MediaKind,
+        count: totals.find((t) => t.Id === (lib.ItemId || lib.Id))?.Count ?? 0,
+        paths: lib.Locations,
+      }));
+    } catch (err) {
+      error.value = errorMessage(err);
+    } finally {
+      loading.value = false;
+    }
+  }
+  return { libraries, totalCount, getById, refresh, loading, error };
 });

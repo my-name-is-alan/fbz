@@ -108,11 +108,11 @@ function handleSave() {
                 id="meta-tmdb-token"
                 v-model="tmdbToken"
                 :type="showToken ? 'text' : 'password'"
-                class="control-input"
+                class="du-input control-input"
                 placeholder="输入 TMDB 官方 API 令牌"
               />
               <button
-                class="action-btn"
+                class="du-btn du-btn-sm action-btn"
                 type="button"
                 :aria-label="showToken ? '隐藏令牌' : '显示令牌'"
                 @click="showToken = !showToken"
@@ -148,7 +148,12 @@ function handleSave() {
 
       <!-- Actions Footer -->
       <footer class="actions-footer">
-        <button class="btn-primary" type="button" :disabled="saving" @click="handleSave">
+        <button
+          class="du-btn du-btn-sm du-btn-primary btn-primary"
+          type="button"
+          :disabled="saving"
+          @click="handleSave"
+        >
           <span class="spinner" v-if="saving" />
           <span>{{ saving ? "正在保存..." : "保存元数据设置" }}</span>
         </button>

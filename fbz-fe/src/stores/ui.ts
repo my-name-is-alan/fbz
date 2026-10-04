@@ -33,7 +33,8 @@ export interface ToastMessage {
 
 export const useUiStore = defineStore("ui", () => {
   const isInitialized = ref(localStorage.getItem("fbz_initialized") === "true");
-  const setupWizardOpen = ref(!isInitialized.value);
+  // Server accounts are bootstrapped by fbz-api; the legacy local wizard is not a login flow.
+  const setupWizardOpen = ref(false);
   const guidedTourActive = ref(false);
 
   // Context Menu state

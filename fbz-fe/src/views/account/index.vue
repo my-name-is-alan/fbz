@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { useThemeStore } from "@/stores/theme.ts";
-import { useLibraryStore } from "@/stores/library.ts";
 import { useUiStore } from "@/stores/ui.ts";
-import { libraryCovers } from "@/service/modules/tmdb.ts";
 
 const route = useRoute();
 const themeStore = useThemeStore();
-const libraryStore = useLibraryStore();
 const uiStore = useUiStore();
 
 const pageMap: Record<string, { title: string; desc: string }> = {
+  "admin-storage": {
+    title: "云盘挂载",
+    desc: "连接光鸭账号，直接读取已刮削目录。视频按需从云端播放。",
+  },
   "admin-dashboard": {
     title: "控制面板",
     desc: "媒体库状态总览、系统资源监控和最近入库动态。",
@@ -32,7 +33,7 @@ const pageMap: Record<string, { title: string; desc: string }> = {
   },
   "admin-libraries": {
     title: "媒体库管理",
-    desc: "配置搜刮引擎、配置磁盘文件路径，或调整自动扫码与入库通知任务。",
+    desc: "添加服务器媒体目录，启动扫描并查看入库进度。",
   },
   "admin-transcode": {
     title: "转码设置",
@@ -82,182 +83,20 @@ const presetColors = [
   { label: "优雅紫", value: "#8b5cf6" },
   { label: "科技青", value: "#00f5d4" },
 ];
-
-/* ---------- Admin: Library Settings Section ---------- */
-const libraryTypeOptions = [
-  { label: "电影 (Movie)", value: "movie" },
-  { label: "电视剧 (TV Series)", value: "series" },
-  { label: "动漫 (Anime)", value: "anime" },
-  { label: "纪录片 (Documentary)", value: "documentary" },
-  { label: "音乐 (Music)", value: "music" },
-];
-
-/** Library type → icon SVG path data and accent color */
-const libTypeVisuals: Record<string, { icon: string; accent: string }> = {
-  movie: {
-    icon: "M2 2h20v20H2z M7 2v20 M17 2v20 M2 12h20 M2 7h5 M2 17h5 M17 17h5 M17 7h5",
-    accent: "#0ea5e9",
-  },
-  series: {
-    icon: "M2 7h20v15H2z M17 2l-5 5-5-5",
-    accent: "#8b5cf6",
-  },
-  anime: {
-    icon: "M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.77 5.82 21 7 14.14l-5-4.87 6.91-1.01L12 2z",
-    accent: "#f43f5e",
-  },
-  documentary: {
-    icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z M2 12h20 M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z",
-    accent: "#10b981",
-  },
-  music: {
-    icon: "M9 18V5l12-2v13 M6 18a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M18 16a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
-    accent: "#f59e0b",
-  },
-};
-
-function getLibTypeName(kind: string) {
-  return libraryTypeOptions.find((o) => o.value === kind)?.label.split(" ")[0] ?? "未知";
-}
-
-function getLibVisuals(kind: string) {
-  return libTypeVisuals[kind] ?? libTypeVisuals.movie;
-}
-
-/** 各库封面剧照（取最新入库的前 4 张 backdrop） */
-const coverMap = computed(() => libraryCovers());
-
-function getLibCover(libId: string): string | undefined {
-  return coverMap.value[libId]?.[0];
-}
-
-function handleEditLibrary(lib: any) {
-  uiStore.openLibraryEditor(lib.id);
-}
-
-function handleAddLibrary() {
-  uiStore.openLibraryEditor(null);
-}
 </script>
 
 <template>
   <main class="account-view">
     <!-- Header Banner -->
-    <div class="panel-header-banner">
+    <div v-if="route.name !== 'admin-dashboard'" class="panel-header-banner">
       <h1 class="page-heading">{{ page.title }}</h1>
       <p class="description-text">{{ page.desc }}</p>
     </div>
     <!-- 控制面板 -->
     <AdminDashboard v-if="route.name === 'admin-dashboard'" />
 
-    <!-- 媒体库管理 -->
-    <div v-else-if="route.name === 'admin-libraries'" class="admin-section">
-      <div class="lib-manager-view">
-        <div class="section-label">
-          <span class="label-text">已挂载影视媒体库</span>
-          <span class="label-count">{{ libraryStore.libraries.length }}</span>
-        </div>
-
-        <div class="lib-cards-grid">
-          <!-- Library cards -->
-          <div
-            v-for="lib in libraryStore.libraries"
-            :key="lib.id"
-            class="lib-preview-card"
-            :class="{ 'has-cover': getLibCover(lib.id) }"
-            @click="handleEditLibrary(lib)"
-          >
-            <!-- Cover backdrop strip -->
-            <div class="card-cover" v-if="getLibCover(lib.id)">
-              <img :src="getLibCover(lib.id)" alt="" class="cover-img" loading="lazy" />
-              <div class="cover-gradient" />
-            </div>
-            <div class="card-accent-bar" :style="{ background: getLibVisuals(lib.kind).accent }" />
-            <div class="card-content">
-              <div class="card-top">
-                <span
-                  class="lib-icon-container"
-                  :style="{ '--icon-accent': getLibVisuals(lib.kind).accent }"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    width="18"
-                    height="18"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path :d="getLibVisuals(lib.kind).icon" />
-                  </svg>
-                </span>
-                <div class="card-title-area">
-                  <span class="lib-name">{{ lib.name }}</span>
-                  <span class="lib-badge">{{ getLibTypeName(lib.kind) }}</span>
-                </div>
-                <div class="item-stat">
-                  <span class="num">{{ lib.count }}</span>
-                  <span class="lbl">条目</span>
-                </div>
-              </div>
-              <div class="card-bottom">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="12"
-                  height="12"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  class="path-icon"
-                >
-                  <path
-                    d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-                  />
-                </svg>
-                <span class="path-val">{{
-                  (lib as any).paths?.[0] || `/media/nas/${lib.name}`
-                }}</span>
-                <svg
-                  viewBox="0 0 24 24"
-                  width="14"
-                  height="14"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  class="edit-icon"
-                >
-                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                  <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z" />
-                </svg>
-              </div>
-            </div>
-          </div>
-
-          <!-- Add Library placeholder card -->
-          <button class="add-lib-card" type="button" @click="handleAddLibrary">
-            <svg
-              viewBox="0 0 24 24"
-              width="24"
-              height="24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            <span>添加媒体库</span>
-          </button>
-        </div>
-      </div>
-    </div>
+    <AdminStorage v-else-if="route.name === 'admin-storage'" />
+    <AdminLibraries v-else-if="route.name === 'admin-libraries'" />
 
     <!-- 个人信息 -->
     <AdminProfile v-else-if="route.name === 'admin-profile'" />
@@ -275,7 +114,7 @@ function handleAddLibrary() {
             <p class="settings-hint">选择您偏好的视觉背景模式。</p>
             <div class="theme-options-grid">
               <button
-                class="theme-card dark-opt"
+                class="du-btn du-btn-sm theme-card dark-opt"
                 :class="{ active: themeStore.themeMode === 'dark' }"
                 type="button"
                 @click="themeStore.setThemeMode('dark')"
@@ -288,7 +127,7 @@ function handleAddLibrary() {
               </button>
 
               <button
-                class="theme-card light-opt"
+                class="du-btn du-btn-sm theme-card light-opt"
                 :class="{ active: themeStore.themeMode === 'light' }"
                 type="button"
                 @click="themeStore.setThemeMode('light')"
@@ -315,7 +154,7 @@ function handleAddLibrary() {
               <button
                 v-for="color in presetColors"
                 :key="color.value"
-                class="brand-color-dot"
+                class="du-btn du-btn-sm brand-color-dot"
                 :class="{ active: themeStore.brandColor === color.value }"
                 :style="{ '--color-val': color.value }"
                 type="button"
@@ -366,7 +205,11 @@ function handleAddLibrary() {
             <p class="settings-hint">
               您可以清空本地缓存，重新激活首次进入向导流程以测试配置效果。
             </p>
-            <button class="relaunch-wizard-btn" type="button" @click="uiStore.resetInitialization">
+            <button
+              class="du-btn du-btn-sm relaunch-wizard-btn"
+              type="button"
+              @click="uiStore.resetInitialization"
+            >
               <svg
                 viewBox="0 0 24 24"
                 width="14"

@@ -5,7 +5,7 @@ use axum::{
 
 use crate::state::AppState;
 
-mod access;
+pub(crate) mod access;
 mod activity_log;
 mod artists;
 mod bif;

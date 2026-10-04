@@ -1085,7 +1085,11 @@ fn media_source_to_dto(
         source_type: "Default".to_owned(),
         name: source.media_file_id.to_string(),
         item_id: Some(source.item_id.clone()),
-        path: Some(media_source_path(&source)),
+        path: Some(if source.path.starts_with("fbz-storage://") {
+            direct_stream_url(source, access_token)
+        } else {
+            media_source_path(source)
+        }),
         protocol: protocol.to_owned(),
         is_remote: protocol == "Http",
         requires_opening: false,
@@ -1180,6 +1184,9 @@ fn media_source_path(source: &PlaybackMediaSourceRecord) -> String {
 }
 
 fn media_source_protocol(source: &PlaybackMediaSourceRecord) -> &'static str {
+    if source.path.starts_with("fbz-storage://") {
+        return "Http";
+    }
     if source.is_strm
         && source
             .strm_target
@@ -1992,6 +1999,20 @@ mod tests {
     fn audio_stream_file_name_ignores_unsafe_container() {
         assert_eq!(audio_stream_file_name(Some("../mp3")), "stream");
         assert_eq!(audio_stream_file_name(Some("flac")), "stream.flac");
+    }
+
+    #[test]
+    fn cloud_media_source_exposes_authenticated_http_stream() {
+        let source = PlaybackMediaSourceRecord {
+            path: "fbz-storage://mount/file".to_owned(),
+            supports_transcoding: false,
+            ..test_source()
+        };
+        let dto = media_source_to_dto(&source, None, "test-token");
+        assert_eq!(dto.protocol, "Http");
+        assert!(dto.is_remote);
+        assert_eq!(dto.path, dto.direct_stream_url);
+        assert!(!dto.supports_transcoding);
     }
 
     fn test_source() -> PlaybackMediaSourceRecord {

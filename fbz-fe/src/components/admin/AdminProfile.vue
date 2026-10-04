@@ -90,7 +90,7 @@ function handlePasswordChange() {
                 v-model="formNickname"
                 type="text"
                 placeholder="请输入您的昵称"
-                class="control-input"
+                class="du-input control-input"
               />
             </div>
 
@@ -101,7 +101,7 @@ function handlePasswordChange() {
                 v-model="formUsername"
                 type="text"
                 placeholder="请输入登录用户名"
-                class="control-input"
+                class="du-input control-input"
               />
             </div>
 
@@ -112,7 +112,7 @@ function handlePasswordChange() {
                 v-model="formEmail"
                 type="email"
                 placeholder="请输入电子邮箱"
-                class="control-input"
+                class="du-input control-input"
               />
             </div>
           </div>
@@ -163,7 +163,7 @@ function handlePasswordChange() {
       </section>
 
       <div class="actions-footer">
-        <button type="button" class="save-profile-btn" @click="handleSaveProfile">
+        <button type="button" class="du-btn du-btn-sm save-profile-btn" @click="handleSaveProfile">
           保存所有修改
         </button>
       </div>
@@ -184,7 +184,7 @@ function handlePasswordChange() {
                 v-model="currentPassword"
                 type="password"
                 placeholder="请输入当前正在使用的密码"
-                class="control-input"
+                class="du-input control-input"
               />
             </div>
 
@@ -195,7 +195,7 @@ function handlePasswordChange() {
                 v-model="newPassword"
                 type="password"
                 placeholder="新密码最少 6 位"
-                class="control-input"
+                class="du-input control-input"
               />
             </div>
 
@@ -206,13 +206,17 @@ function handlePasswordChange() {
                 v-model="confirmPassword"
                 type="password"
                 placeholder="请再次输入新密码"
-                class="control-input"
+                class="du-input control-input"
               />
             </div>
           </div>
         </div>
         <div class="card-actions-row">
-          <button type="button" class="change-password-btn" @click="handlePasswordChange">
+          <button
+            type="button"
+            class="du-btn du-btn-sm change-password-btn"
+            @click="handlePasswordChange"
+          >
             更改登录密码
           </button>
         </div>

@@ -193,7 +193,7 @@ impl MediaRepository {
                 mf.container,
                 coalesce(mi.runtime_ticks, mf.duration_ticks) as runtime_ticks,
                 mf.bitrate,
-                (u.allow_transcode and lp.can_transcode) as supports_transcoding
+                (u.allow_transcode and lp.can_transcode and mf.path not like 'fbz-storage://%') as supports_transcoding
             from media_items mi
             join libraries l on l.id = mi.library_id
             join library_permissions lp on lp.library_id = mi.library_id
@@ -770,7 +770,7 @@ impl MediaRepository {
             join libraries l on l.id = mi.library_id
             join library_permissions lp on lp.library_id = mi.library_id
             left join lateral (
-                select id
+                select id, duration_ticks
                 from media_files mf
                 where mf.media_item_id = mi.id
                   and ($3::bigint is null or mf.id = $3)

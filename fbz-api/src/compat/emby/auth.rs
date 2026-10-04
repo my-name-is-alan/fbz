@@ -122,7 +122,10 @@ pub fn parse_auth_context(
 fn parse_authorization_header(
     headers: &HeaderMap,
 ) -> Result<Option<BTreeMap<String, String>>, EmbyAuthError> {
-    let Some(value) = headers.get(header::AUTHORIZATION) else {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .or_else(|| headers.get("x-emby-authorization"))
+    else {
         return Ok(None);
     };
 
@@ -139,7 +142,7 @@ fn parse_authorization_header(
         .split_once(char::is_whitespace)
         .ok_or(EmbyAuthError::InvalidAuthorizationHeader)?;
 
-    if !scheme.eq_ignore_ascii_case("Emby") {
+    if !scheme.eq_ignore_ascii_case("Emby") && !scheme.eq_ignore_ascii_case("MediaBrowser") {
         return Err(EmbyAuthError::UnsupportedAuthorizationScheme(
             scheme.to_owned(),
         ));
@@ -277,6 +280,46 @@ mod tests {
     use axum::http::HeaderValue;
 
     use super::*;
+
+    #[test]
+    fn accepts_mediabrowser_and_alternate_authorization_header() {
+        for header_name in ["authorization", "x-emby-authorization"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header_name,
+                HeaderValue::from_static(
+                    r#"MediaBrowser Client="FBZ Web", DeviceId="browser-1", Token="test-token""#,
+                ),
+            );
+            let context = parse_auth_context(&headers, None).unwrap();
+            assert_eq!(context.client.device_id.as_deref(), Some("browser-1"));
+            assert_eq!(
+                context.credential,
+                Some(EmbyCredential::AccessToken("test-token".to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn standard_authorization_takes_precedence_over_alias() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static(r#"Emby DeviceId="primary""#),
+        );
+        headers.insert(
+            "x-emby-authorization",
+            HeaderValue::from_static(r#"MediaBrowser DeviceId="secondary""#),
+        );
+        assert_eq!(
+            parse_auth_context(&headers, None)
+                .unwrap()
+                .client
+                .device_id
+                .as_deref(),
+            Some("primary")
+        );
+    }
 
     #[test]
     fn parses_emby_authorization_header() {

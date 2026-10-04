@@ -1,0 +1,13 @@
+services:
+  guangya-storage:
+    build: .
+    environment:
+      FBZ_STORAGE_PLUGIN_KEY: ${FBZ_STORAGE_PLUGIN_KEY:?Set a private plugin communication key}
+    ports:
+      - "127.0.0.1:8098:8098"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

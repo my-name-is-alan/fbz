@@ -56,6 +56,7 @@ export const routes = [
       { path: "theme", name: "admin-theme", component: adminPage },
       { path: "lib-sort", name: "admin-lib-sort", component: adminPage },
       // 媒体设置
+      { path: "storage", name: "admin-storage", component: adminPage },
       { path: "metadata", name: "admin-metadata", component: adminPage },
       { path: "libraries", name: "admin-libraries", component: adminPage },
       { path: "transcode", name: "admin-transcode", component: adminPage },

@@ -142,7 +142,12 @@ function handleSave() {
 
       <!-- Actions Footer -->
       <footer class="actions-footer">
-        <button class="btn-primary" type="button" :disabled="saving" @click="handleSave">
+        <button
+          class="du-btn du-btn-sm du-btn-primary btn-primary"
+          type="button"
+          :disabled="saving"
+          @click="handleSave"
+        >
           <span class="spinner" v-if="saving" />
           <span>{{ saving ? "正在保存..." : "保存转码配置" }}</span>
         </button>

@@ -211,6 +211,11 @@ pub async fn item_download(
         .map_err(|err| AppError::internal(format!("failed to get download source: {err}")))?
         .ok_or_else(|| AppError::not_found("download source not found"))?;
 
+    if source.path.starts_with("fbz-storage://") {
+        return crate::storage::stream(&state, source.media_file_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("云端媒体来源不存在"));
+    }
     if source.is_strm {
         let response = strm_redirect_response(&state.config().media, &source)?;
         dispatch_download_hook(database, &user, &source, "strm_redirect").await;
@@ -255,6 +260,11 @@ async fn stream_source_response(
     source: &PlaybackMediaSourceRecord,
     range_header: Option<&HeaderValue>,
 ) -> Result<Response, AppError> {
+    if source.path.starts_with("fbz-storage://") {
+        return crate::storage::stream(state, source.media_file_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("云端媒体来源不存在"));
+    }
     if source.is_strm {
         return strm_redirect_response(&state.config().media, &source);
     }
@@ -934,7 +944,9 @@ fn is_unicast_link_local_ipv6(ip: Ipv6Addr) -> bool {
 
 fn stream_content_type(container: Option<&str>, path: &Path) -> &'static str {
     let extension = container
-        .filter(|value| !value.trim().is_empty())
+        // ffprobe format_name may be a demuxer alias list (mov,mp4,m4a,...).
+        // Use the real file suffix in that case instead of sending octet-stream.
+        .filter(|value| !value.trim().is_empty() && !value.contains(','))
         .or_else(|| path.extension().and_then(|value| value.to_str()))
         .unwrap_or_default()
         .trim()
@@ -943,14 +955,15 @@ fn stream_content_type(container: Option<&str>, path: &Path) -> &'static str {
 
     match extension.as_str() {
         "mp4" | "m4v" => "video/mp4",
-        "mkv" => "video/x-matroska",
+        "mkv" | "matroska" => "video/x-matroska",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
         "avi" => "video/x-msvideo",
         "ts" => "video/mp2t",
         "mp3" => "audio/mpeg",
         "flac" => "audio/flac",
-        "m4a" | "aac" => "audio/aac",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
         _ => "application/octet-stream",
     }
 }
@@ -979,6 +992,23 @@ mod tests {
     use crate::config::MediaConfig;
 
     use super::*;
+
+    #[test]
+    fn probe_alias_list_uses_file_extension_for_stream_content_type() {
+        let aliases = Some("mov,mp4,m4a,3gp,3g2,mj2");
+        assert_eq!(
+            stream_content_type(aliases, Path::new("movie.mp4")),
+            "video/mp4"
+        );
+        assert_eq!(
+            stream_content_type(aliases, Path::new("music.m4a")),
+            "audio/mp4"
+        );
+        assert_eq!(
+            stream_content_type(Some("matroska,webm"), Path::new("movie.webm")),
+            "video/webm"
+        );
+    }
 
     #[test]
     fn strm_allows_private_ips_only_when_enabled() {

@@ -310,6 +310,23 @@ async fn subtitle_stream_response(
         .map_err(|err| AppError::internal(format!("failed to get subtitle stream: {err}")))?
         .ok_or_else(|| AppError::not_found("subtitle stream not found"))?;
 
+    if subtitle.media_path.starts_with("fbz-storage://") {
+        let key: Option<String> = sqlx::query_scalar(
+            "select storage_key from storage_subtitles where media_file_id=$1 and stream_index=$2",
+        )
+        .bind(subtitle.media_file_id)
+        .bind(stream_index)
+        .fetch_optional(database)
+        .await
+        .map_err(crate::storage::sql_error)?;
+        let key = key.ok_or_else(|| AppError::not_found("云端字幕缓存不存在"))?;
+        if !key.starts_with("storage/") || key.contains("..") || key.contains('\\') {
+            return Err(AppError::forbidden("字幕路径无效"));
+        }
+        let path = state.config().storage.artwork_cache_dir.join(key);
+        ensure_subtitle_format_is_streamable(&subtitle, &path, format)?;
+        return local_subtitle_response(&path, format).await;
+    }
     let Some(path) = external_subtitle_path(&subtitle)? else {
         return Err(AppError::not_found(
             "subtitle stream is not an external subtitle file",

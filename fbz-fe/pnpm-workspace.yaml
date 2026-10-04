@@ -1,10 +1,9 @@
 allowBuilds:
-  "@parcel/watcher": false
-  vue-demi: true
+  esbuild,lfa-ponyfill: true
 catalog:
-  vite: npm:@voidzero-dev/vite-plus-core@latest
+  vite: npm:@voidzero-dev/vite-plus-core@0.2.1
   vitest: npm:@voidzero-dev/vite-plus-test@^0.1.24
-  vite-plus: latest
+  vite-plus: 0.2.1
 overrides:
   vite: "catalog:"
   vitest: "catalog:"

@@ -105,7 +105,7 @@ function uninstallPlugin(plugin: any) {
   <div class="admin-plugins-view">
     <nav class="sub-tabs-bar" role="tablist" aria-label="插件管理标签">
       <button
-        class="sub-tab-btn"
+        class="du-btn du-btn-sm sub-tab-btn"
         :class="{ active: activeSubTab === 'installed' }"
         type="button"
         role="tab"
@@ -115,7 +115,7 @@ function uninstallPlugin(plugin: any) {
         已安装插件 ({{ installedPlugins.length }})
       </button>
       <button
-        class="sub-tab-btn"
+        class="du-btn du-btn-sm sub-tab-btn"
         :class="{ active: activeSubTab === 'store' }"
         type="button"
         role="tab"
@@ -150,10 +150,18 @@ function uninstallPlugin(plugin: any) {
             <p class="plugin-desc">{{ p.desc }}</p>
           </div>
           <div class="plugin-actions">
-            <button class="plugin-btn secondary" type="button" @click="togglePluginActive(p)">
+            <button
+              class="du-btn du-btn-sm plugin-btn secondary"
+              type="button"
+              @click="togglePluginActive(p)"
+            >
               {{ p.active ? "停用" : "启用" }}
             </button>
-            <button class="plugin-btn danger" type="button" @click="uninstallPlugin(p)">
+            <button
+              class="du-btn du-btn-sm plugin-btn danger"
+              type="button"
+              @click="uninstallPlugin(p)"
+            >
               卸载
             </button>
           </div>
@@ -174,7 +182,7 @@ function uninstallPlugin(plugin: any) {
           </div>
           <div class="plugin-actions">
             <button
-              class="plugin-btn primary"
+              class="du-btn du-btn-sm du-btn-primary plugin-btn primary"
               type="button"
               :disabled="loadingPluginId === p.id"
               @click="installPlugin(p)"

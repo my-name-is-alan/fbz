@@ -79,6 +79,7 @@ const SCAN_LOAD_LIBRARY_TARGET_SQL: &str = r#"
                 else null::uuid
             end
               and is_hidden = false
+              and not exists (select 1 from storage_mounts sm where sm.library_id = libraries.id)
             "#;
 
 #[derive(Clone)]

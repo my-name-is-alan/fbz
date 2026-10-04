@@ -17,7 +17,9 @@ function openEditUser(userId: string) {
   <div class="admin-users-view">
     <div class="users-header">
       <p class="settings-hint">管理自托管系统的访问账号及媒体库浏览权限。</p>
-      <button class="add-user-btn" type="button" @click="openCreateUser">➕ 添加系统用户</button>
+      <button class="du-btn du-btn-sm add-user-btn" type="button" @click="openCreateUser">
+        ➕ 添加系统用户
+      </button>
     </div>
 
     <div class="users-list-grid">
@@ -48,18 +50,22 @@ function openEditUser(userId: string) {
         </div>
         <div class="user-card-footer">
           <button
-            class="action-btn text-btn"
+            class="du-btn du-btn-sm action-btn text-btn"
             type="button"
             @click="authStore.toggleUserStatus(user.id)"
           >
             {{ user.active ? "禁用账号" : "启用账号" }}
           </button>
-          <button class="action-btn text-btn" type="button" @click="openEditUser(user.id)">
+          <button
+            class="du-btn du-btn-sm action-btn text-btn"
+            type="button"
+            @click="openEditUser(user.id)"
+          >
             编辑权限
           </button>
           <div class="spacer" />
           <button
-            class="action-btn danger-btn"
+            class="du-btn du-btn-sm action-btn danger-btn"
             type="button"
             :disabled="user.username === 'admin'"
             @click="authStore.deleteUser(user.id)"

@@ -57,12 +57,12 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 ## 应用架构
 
 - `App.vue` 只保留应用入口级结构，不写页面布局、业务逻辑或临时样式；布局放在 `src/layouts/`。
-- 全局壳层布局是 `src/layouts/default.vue`：`AppHeader` + `AppDrawer` + `RouterView`，不做卡片跨路由飞渡或页面切换动画，保证媒体网格进入详情时足够轻量。`App.vue` 只渲染该布局。
+- 全局壳层布局是 `src/layouts/default.vue`：`AppHeader` + `RouterView`（手机导航由 AppHeader 提供），不做卡片跨路由飞渡或页面切换动画，保证媒体网格进入详情时足够轻量。`App.vue` 渲染 RouterView、GlobalUiContainer 和唯一的 PlaybackOverlay，播放器跨路由保留。
 - 媒体卡片统一用 `MediaCard`：卡片主体进入详情，海报上的播放按钮打开全屏播放覆盖层，不走播放路由。`MediaItem.detailType`（movie/tv）决定详情与播放类型，与 libraryId 解耦（动漫=tv、纪录片=movie）。
 - 路由必须与文件目录对应，例如 `/user/login` 对应 `src/views/user/login/index.vue`；动态路由如 `/library/:id` 放在 `src/views/library/detail/index.vue`（不使用 `[id].vue` 文件名约定，路由表在 `src/router/index.ts` 手动维护）。
 - 详情页按类型分路径：`/movie/:id`、`/tv/:id`、`/person/:id`、`/collection/:id`，分别对应 `src/views/detail/{movie,tv,person,collection}/index.vue`。系列（collection）是一等概念，影片详情会链接到其所属系列。详情区块组件在 `src/components/detail/`：`DetailHero`（poster+fanart 头部 + 多版本下拉）、`CastRow`（演职员，左右箭头滚动）、`SeasonEpisodes`（季/集，默认定位到「继续观看」的季集）、`SimilarRow`（相似推荐）。
-- 网络请求统一走 `src/service/request.ts` 导出的 `request` 单例；新增接口模块放在 `src/service/modules/`。无 TMDB 数据的库（如音乐）的占位数据在 `media.ts`，接后端后原地替换为请求即可。
-- TMDB 真实数据：`scripts/fetch-tmdb.mjs` 一次性抓取（discover 多页 + 详情/相似/季 + 系列 + 高频演员），烤成两个文件：`tmdb-catalog.json`（轻量目录，约数百条，随包加载，用于首页/媒体库网格）与 `tmdb-details.json`（完整详情，体积大，**在 `tmdb.ts` 里用动态 `import()` 懒加载**，只在详情页下载一次）。`tmdb.ts` 提供 `imageUrl()`、`catalogItems`、`itemsByLibrary()`、`getXxxDetail()` 异步取详情、`versionsFor()`（合成播放版本/规格/字幕，TMDB 不提供）等。libraryId（movie/series/anime/documentary）= 归属库，type（movie/tv）= 详情路由类型，二者解耦。**token 只在抓取脚本里用（读 `.env` 的 `api_token`，注意值有行尾中文注释，解析只取引号内），绝不进前端构建包**；图片走公开 CDN `image.tmdb.org`（无需 token）。重新抓取改脚本里的 discover 页数/题材后跑 `node scripts/fetch-tmdb.mjs`。接后端后把 `tmdb.ts` 的函数换成对 fbz-api 的请求即可，页面消费方不变。
+- 网络请求统一走 `src/service/request.ts` 导出的 `request` 单例；新增接口模块放在 `src/service/modules/`。真实登录、媒体库、条目、PlaybackInfo 与进度回传由 `service/modules/server.ts` 和 `playback-reporter.ts` 提供，禁止在失败后退回模拟成功。
+- 历史 TMDB 设计数据（仅供旧详情页及登录装饰引用，首页与真实媒体库不得使用）：`scripts/fetch-tmdb.mjs` 一次性抓取（discover 多页 + 详情/相似/季 + 系列 + 高频演员），烤成两个文件：`tmdb-catalog.json`（轻量目录，约数百条，随包加载，用于首页/媒体库网格）与 `tmdb-details.json`（完整详情，体积大，**在 `tmdb.ts` 里用动态 `import()` 懒加载**，只在详情页下载一次）。`tmdb.ts` 提供 `imageUrl()`、`catalogItems`、`itemsByLibrary()`、`getXxxDetail()` 异步取详情、`versionsFor()`（合成播放版本/规格/字幕，TMDB 不提供）等。libraryId（movie/series/anime/documentary）= 归属库，type（movie/tv）= 详情路由类型，二者解耦。**token 只在抓取脚本里用（读 `.env` 的 `api_token`，注意值有行尾中文注释，解析只取引号内），绝不进前端构建包**；图片走公开 CDN `image.tmdb.org`（无需 token）。重新抓取改脚本里的 discover 页数/题材后跑 `node scripts/fetch-tmdb.mjs`。接后端后把 `tmdb.ts` 的函数换成对 fbz-api 的请求即可，页面消费方不变。
 - Pinia store 使用函数式 `defineStore("id", () => {})`，状态优先使用 `ref` / `computed`。
 - 组件中解构 store 优先使用 `storeToRefs()`。
 - 安装 Pinia 使用官网写法：`const pinia = createPinia(); app.use(pinia)`；如果路由守卫会读取 store，插件安装顺序保持 `Pinia` 先于 `Router`。
@@ -83,17 +83,17 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 
 ## 样式与设计
 
-- UnoCSS 是首选原子化样式层，优先使用主题 token，不要随意写散落的原始值。
+- 基础交互组件统一使用用户指定的 daisyUI（du- 前缀），图标统一用 @lucide/vue 的 BaseIcon。UnoCSS 暂保留给旧页面工具类；禁止新增另一套按钮、输入框、弹窗体系。
 - 项目源码样式强制使用 `SCSS`：全局样式使用 `.scss`，SFC 样式块必须写 `<style lang="scss">` 或 `<style scoped lang="scss">`。
-- 不要新增项目内 `.css` 文件；第三方库如确实只有官方 CSS 入口，可按库要求引入。
+- 业务样式继续使用 SCSS。用户指定 daisyUI/Tailwind 后，允许唯一的构建入口 `src/styles/daisy.css` 使用原生 CSS 的 @import/@plugin；reset 放在 base 层，避免压过组件层。
 - `src/styles/theme/` 是主题 token 主目录。
 - `src/styles/theme/tokens.scss` 必须通过 `vite.config.ts` 的 `css.preprocessorOptions.scss.additionalData` 注入到每个 SCSS 文件顶部，不要在业务样式文件里逐个手动 `@use` / `@import` token。
 - `uno.config.ts` 中的主题 token 必须与 `src/styles/theme/tokens.scss` 保持同步，优先引用 token 暴露的 CSS 变量，例如 `var(--fbz-color-brand-500)`。
 - 全局基础样式集中在 `src/style.scss`（含 `--header-h` 头部高度变量，桌面 60px / 手机 56px，布局与各页面顶部留白统一引用它）。
-- 字体：正文用 `--fbz-font-sans`（系统优先现代字栈 `ui-sans-serif, system-ui, PingFang SC, MiSans…`），品牌字号/数字展示用 `--fbz-font-display`（Orbitron，`index.html` 里走 Google Fonts，已在 `tokens.scss` 定义 token）。新增展示型数字/Logo 用 display 字体，正文不要硬写字栈。
+- 字体：正文用 `--fbz-font-sans`（系统优先现代字栈 `ui-sans-serif, system-ui, PingFang SC, MiSans…`），品牌和数字展示与正文使用同一字栈，数字使用 tabular-nums，`--fbz-font-display` 与 sans 保持一致。新增展示型数字/Logo 用 display 字体，正文不要硬写字栈。
 - 设计基调：纯黑底（`--fbz-color-bg: #0a0a0b`）+ 单一主题色 `--fbz-color-brand-500: #1ed760`（Spotify 绿）。主题绿只用于强调态（导航激活、主按钮、进度条、卡片 hover 边框），其余一律白/灰阶；禁止多彩混用、装饰性渐变、滥用大圆角（卡片 4px / 控件 6px）。**例外**：媒体卡片的清晰度徽章用 `tmdb.ts` 的 `resolutionColors`（4K 绿 / 2K 黄绿 / 1080P 蓝 / 720P 橙，借鉴 ），这是功能性色标不算多彩装饰。
 - 横向滚动行一律用 `src/components/BaseScroller.vue`：隐藏原生横向滚动条（不要再出现裸露的横向滚动条），用 vueuse（`useEventListener`+`useResizeObserver`）按需在行首/行尾浮出**半透明渐变遮罩 + 居中 SVG 箭头**，仅在该方向还有内容可滚时显示，触摸设备隐藏。每列宽度由使用方通过 `:deep(.track) { --col: … }` 覆盖。`MediaRow`/`SimilarRow`/`CastRow` 均基于它。
-- 下拉选择一律用 `src/components/BaseSelect.vue`（自定义下拉，**不要用原生 `<select>`**）：`v-model` 绑值，`options` 为 `{ label, value }[]`，自带面板样式/选中态/键盘与点击外部关闭。版本选择、季选择、题材筛选均已用它。
+- 下拉选择统一用 `src/components/BaseSelect.vue`（包装 daisyUI select，使用原生 select 的键盘与可访问性行为）：`v-model` 绑值，`options` 为 `{ label, value }[]`，自带面板样式/选中态/键盘与点击外部关闭。版本选择、季选择、题材筛选均已用它。
 - 媒体卡片统一用 `src/components/media/MediaCard.vue`（纯 props 驱动：`item`/`layout`/`variant`/`port`），新增展示需求改这一个文件即可。其海报占位与圆角在 `MediaPoster.vue`。`CastRow` 演员头像列宽 64px（手机 56px），不要再放大。
 - 响应式三档：桌面 ≥1024、平板 600–1024、手机 <600；手机端 `AppHeader` 收起为汉堡，导航走 `AppDrawer` 抽屉。
 - 媒体海报/剧照统一用 `MediaPoster` 组件：有 `src` 显示真实图，无 `src` 渲染纯色占位块；设计阶段默认走占位，接后端后填地址即可。
@@ -150,3 +150,32 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 - `vitest`
 - `@vue/test-utils`
 - `@types/lodash-es`
+
+## 真实媒体闭环与管理台（2026-10-04）
+
+- `/admin` 使用黑底、灰阶导航、横向统计、播放会话与任务列表；布局参考 Lux 公开截图，代码独立实现，不引入其源码或素材。只用服务端返回的统计，不模拟 CPU、内存、播放记录。
+- `/admin/libraries` 使用 `AdminLibraries`，真实创建库、扫描排队、轮询任务；路径必须是后端机器上的实际路径。扫描需要启用后端 scan worker，探测需要 probe worker。
+- 首页与单库页使用 `ServerMediaBrowser`，从用户限定的 Emby Items / Resume 入口读取媒体，支持搜索、分页和直放。旧详情页设计尚未迁移，不能将 TMDB ID 当服务端条目 ID。
+- 登录通过 `AuthenticateByName`；未勾选记住设备时会话仅保存在 sessionStorage，勾选后在 localStorage；不保存密码。开发服务器代理 `/api`、`/emby` 和 `/health` 到本机 8080。
+- 开始、暂停、播放中每 5 秒、暂停时每 15 秒、关闭和结束均上报真实进度。关闭报告串行排在此前报告之后；错误单独提示，不切换到演示播放。
+- 旧本地初始化向导不再自动弹出；管理员在后端通过 bootstrap 环境变量创建。
+- 当前 `vp test` 的包别名缺少 bin 入口时，先执行 `vp env doctor`，可用 `vp exec node node_modules/vitest/vitest.mjs run` 执行同一已安装测试引擎，不手改依赖和 lockfile。
+- 仓库说明引用的 `ai-skills/antfu/` 当前未随仓库提供；恢复资料前不要假称已读取其中规范。
+
+## 光鸭云盘媒体源（2026-10-04）
+
+- `/admin/storage` 使用 `AdminStorage`，二维码由 `qrcode` 本地生成，不使用第三方二维码服务；账号凭据只保存在后端加密存储。
+- 新依赖 `qrcode`、`@types/qrcode` 通过 vp 安装。Vite+ 和 core 的 catalog 锁定已验证的 0.2.1，避免新增依赖时 latest 隐式升级造成原生模块/类型不兼容，仍保持 catalog 引用。
+- Storage 管理请求允许 65 秒超时，扫码遵守服务端 interval/slow_down，页面卸载取消本地轮询。
+- 云端目录 ID 是挂载身份，路径只显示；未成功读完分页不得解释为文件删除。扫描失败界面保留断点，用户可继续。
+- 详细部署、已实现范围与验证边界见 `../docs/GUANGYA_STORAGE_PLUGIN_DESIGN.md` 和 `../fbz-api/plugins/guangya-storage/README.md`。
+
+## daisyUI 与 webplayer 统一改版（2026-10-04）
+
+- 使用 `du-btn`、`du-input`、`du-select`、`du-modal`、`du-tabs`、`du-menu`、`du-alert`、`du-skeleton` 等实际 daisyUI 组件类；共享 `BaseModal` / `BaseSelect` / `BaseEmptyState` / `BaseIcon`。模态弹窗用原生 dialog 管理焦点，手机显示底部面板。
+- C 端首页、媒体库及继续观看统一复用 `MediaCard` / `MediaPoster`，真实条目带 serverItem；电影/剧集详情改用 `ServerMediaDetail`，不再把真实 UUID 转为 TMDB 数字 ID。无数据、无搜索结果和加载失败使用不同状态。
+- 列表按 Movie/Series 展示；集号、剧名、简介、题材及父级图片由受权限保护的 presentation 接口批量补齐。媒体库计数用专用真实计数，分页下限显示 +，不伪装成精确总页数。
+- 播放核心使用 vendored webplayer（MIT 源码，具体上游提交与各 WASM 依赖许可见 vendor/webplayer/NOTICE.md），取代 Shaka。Vite buildStart 自动生成 public/webplayer，产物不提交；vendor 原始代码排除统一格式化和 lint，避免改写上游。
+- 播放优先直接读取，CORS 阻止重封装时尝试鉴权同源 Range 入口，最后才用原生兼容路径；同源入口仅支持注册云盘媒体，逐跳检查并固定公网 DNS、限制 32 MiB Range 和 8 路并发、使用背压流，不缓存完整视频。
+- 音轨/内嵌字幕选择、倍速、音量、全屏、续播和进度回传沿用同一个播放覆盖层。没有真实轨道时不能展示虚假的音轨选项或假章节。
+- UI 图标不使用 emoji；字距、字号、控件圆角均从同一主题体系派生。深浅色共享组件结构，播放器保持适合视频观看的深色覆盖层。

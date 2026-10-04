@@ -54,6 +54,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .merge(admin::routes::router())
+        .merge(crate::storage::router())
+        .merge(crate::presentation::router())
+        .merge(crate::media_bytes::router())
         .merge(plugins::routes::router())
         .merge(plugins::host::router())
         .merge(emby::routes::router())
@@ -72,7 +75,7 @@ fn http_trace_layer(router: Router, slow_log_threshold_ms: u64) -> Router {
                     info_span!(
                         "http.request",
                         method = %request.method(),
-                        uri = %request.uri(),
+                        uri = %request.uri().path(),
                         version = ?request.version(),
                     )
                 })

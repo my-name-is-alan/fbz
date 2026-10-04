@@ -1,3 +1,10 @@
+import {
+  authenticate,
+  readSession,
+  clearSession,
+  serverRequest,
+  errorMessage,
+} from "@/service/modules/server.ts";
 import { ref } from "vue";
 import { defineStore } from "pinia";
 import { useUiStore } from "@/stores/ui.ts";
@@ -24,17 +31,23 @@ export interface SystemUser {
 export const useAuthStore = defineStore("auth", () => {
   const uiStore = useUiStore();
 
-  const username = ref<string>(localStorage.getItem("fbz_auth_username") ?? "admin");
+  const username = ref<string>(
+    readSession()?.username ?? localStorage.getItem("fbz_auth_username") ?? "admin",
+  );
   const email = ref<string>(localStorage.getItem("fbz_auth_email") ?? "admin@fbz.com");
-  const nickname = ref<string>(localStorage.getItem("fbz_auth_nickname") ?? "Admin");
+  const nickname = ref<string>(
+    readSession()?.username ?? localStorage.getItem("fbz_auth_nickname") ?? "Admin",
+  );
 
   const language = ref<string>(localStorage.getItem("fbz_pref_language") ?? "zh-CN");
   const autoSubtitles = ref<boolean>(localStorage.getItem("fbz_pref_autosub") !== "false");
   const audioPreference = ref<string>(localStorage.getItem("fbz_pref_audiopref") ?? "zh");
 
   // 登录态（设计阶段为本地 mock，接后端后替换为真实会话）
-  const serverAddress = ref<string>(localStorage.getItem("fbz_server_address") ?? "");
-  const isAuthenticated = ref<boolean>(localStorage.getItem("fbz_authenticated") === "true");
+  const serverAddress = ref<string>(
+    readSession()?.address ?? localStorage.getItem("fbz_server_address") ?? "",
+  );
+  const isAuthenticated = ref<boolean>(Boolean(readSession()?.token));
 
   // System Users List
   const savedUsers = localStorage.getItem("fbz_system_users");
@@ -120,37 +133,36 @@ export const useAuthStore = defineStore("auth", () => {
     remember?: boolean;
   }
 
-  function login(payload: LoginPayload) {
-    if (!payload.username.trim()) {
-      uiStore.showToast("请输入用户名！", "warning");
-      return false;
-    }
-    if (!payload.password) {
-      uiStore.showToast("请输入登录密码！", "warning");
-      return false;
-    }
-
-    username.value = payload.username.trim();
-    if (payload.serverAddress !== undefined) {
-      serverAddress.value = payload.serverAddress.trim();
+  async function login(payload: LoginPayload) {
+    try {
+      const user = await authenticate(
+        payload.serverAddress ?? "",
+        payload.username.trim(),
+        payload.password,
+        payload.remember,
+      );
+      username.value = user.Name;
+      nickname.value = user.Name;
+      serverAddress.value = readSession()?.address ?? "";
+      isAuthenticated.value = true;
       localStorage.setItem("fbz_server_address", serverAddress.value);
+      localStorage.setItem("fbz_auth_username", user.Name);
+      uiStore.showToast("已连接媒体服务器", "success");
+      return true;
+    } catch (error) {
+      uiStore.showToast(errorMessage(error), "error");
+      return false;
     }
-
-    isAuthenticated.value = true;
-    localStorage.setItem("fbz_auth_username", username.value);
-    if (payload.remember) {
-      localStorage.setItem("fbz_authenticated", "true");
-    } else {
-      localStorage.removeItem("fbz_authenticated");
-    }
-
-    uiStore.showToast(`欢迎回来，${nickname.value || username.value}！`, "success");
-    return true;
   }
 
-  function logout() {
-    isAuthenticated.value = false;
-    localStorage.removeItem("fbz_authenticated");
+  async function logout() {
+    try {
+      await serverRequest("/emby/Sessions/Logout", {});
+    } finally {
+      clearSession();
+      isAuthenticated.value = false;
+      localStorage.removeItem("fbz_authenticated");
+    }
   }
 
   function changePassword(currentPass: string, newPass: string) {

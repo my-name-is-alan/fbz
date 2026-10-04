@@ -1,5 +1,7 @@
+import { execFileSync } from "node:child_process";
 /// <reference types="vitest/config" />
 
+import tailwindcss from "@tailwindcss/vite";
 import vue from "@vitejs/plugin-vue";
 import vueJsx from "@vitejs/plugin-vue-jsx";
 import { loadEnv } from "vite";
@@ -12,7 +14,24 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "");
 
   return {
+    server: {
+      proxy: {
+        "/api": "http://127.0.0.1:8080",
+        "/emby": "http://127.0.0.1:8080",
+        "/health": "http://127.0.0.1:8080",
+      },
+    },
     plugins: [
+      {
+        name: "fbz-webplayer-assets",
+        buildStart() {
+          execFileSync(process.execPath, ["scripts/build-webplayer.mjs"], {
+            stdio: "inherit",
+            windowsHide: true,
+          });
+        },
+      },
+      tailwindcss(),
       UnoCSS(),
       vue(),
       vueJsx(),
@@ -67,8 +86,16 @@ export default defineConfig(({ mode }) => {
       exclude: ["**/node_modules/**", "**/dist/**", "**/dist-ssr/**", "**/.tmp/**"],
     },
     fmt: {
-      ignorePatterns: ["src/auto-imports.d.ts", "src/components.d.ts"],
+      ignorePatterns: [
+        "src/auto-imports.d.ts",
+        "src/components.d.ts",
+        "vendor/**",
+        "public/webplayer/**",
+      ],
     },
-    lint: { options: { typeAware: true, typeCheck: true } },
+    lint: {
+      ignorePatterns: ["vendor/**", "public/webplayer/**"],
+      options: { typeAware: true, typeCheck: true },
+    },
   };
 });

@@ -9,10 +9,6 @@ const { item, isOpen, playlist, currentEpisodeIndex, hasPreviousEpisode, hasNext
   storeToRefs(playback);
 
 useBodyScrollLock(isOpen);
-
-useEventListener(window, "keydown", (event) => {
-  if (event.key === "Escape" && isOpen.value) playback.close();
-});
 </script>
 
 <template>

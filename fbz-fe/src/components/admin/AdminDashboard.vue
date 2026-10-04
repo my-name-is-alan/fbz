@@ -1,565 +1,503 @@
 <script setup lang="ts">
 import { useLibraryStore } from "@/stores/library.ts";
-
-const libraryStore = useLibraryStore();
-
-// System stats mock data
-const cpuUsage = ref(34);
-const memUsed = ref(2.4);
-const memTotal = ref(8.0);
-const diskUsed = ref(1.2);
-const diskTotal = ref(4.0);
-
-// Active transcoding streams mock data
-const activeStreams = ref([
-  {
-    id: "stream-1",
-    user: "Alan",
-    title: "流浪地球3 (2026)",
-    quality: "1080P - Direct Play",
-    progress: 42,
-    player: "Chrome / WebPlayer",
-    bitrate: "15.4 Mbps",
-  },
-]);
-
-// System activities logs
-const recentActivities = ref([
-  { id: 1, time: "10:24", type: "success", msg: "《阿凡达：水之道》元数据搜刮及海报下载成功" },
-  { id: 2, time: "09:42", type: "info", msg: "用户 Alan 登录系统控制台 (192.168.1.10)" },
-  { id: 3, time: "08:15", type: "warning", msg: "物理目录 /media/backup 扫描中：跳过只读文件" },
-  { id: 4, time: "07:00", type: "success", msg: "系统数据库日常备份成功 (45.2 MB)" },
-]);
-
-const totalMovies = computed(() => {
-  return libraryStore.libraries
-    .filter((l) => l.kind === "movie" || l.kind === "documentary")
-    .reduce((sum, l) => sum + l.count, 0);
-});
-
-const totalSeries = computed(() => {
-  return libraryStore.libraries
-    .filter((l) => l.kind === "series" || l.kind === "anime")
-    .reduce((sum, l) => sum + l.count, 0);
-});
-
-// Simulate live CPU / Mem / Disk changes slightly
-let interval: any;
-onMounted(() => {
-  interval = setInterval(() => {
-    cpuUsage.value = Math.max(
-      12,
-      Math.min(95, cpuUsage.value + Math.floor(Math.random() * 11) - 5),
-    );
-    const memOffset = Math.random() * 0.2 - 0.1;
-    memUsed.value = Math.max(
-      1.8,
-      Math.min(6.5, parseFloat((memUsed.value + memOffset).toFixed(1))),
-    );
-  }, 3000);
-});
-
-onBeforeUnmount(() => {
-  clearInterval(interval);
-});
+import {
+  readSession,
+  serverRequest,
+  errorMessage,
+  serverAddress,
+} from "@/service/modules/server.ts";
+import type { ServerJob, ServerPlayback } from "@/service/modules/server.ts";
+const library = useLibraryStore();
+const loading = ref(false);
+const error = ref("");
+const online = ref(false);
+const version = ref("—");
+const sessions = ref<ServerPlayback[]>([]);
+const jobs = ref<ServerJob[]>([]);
+const counts = ref({ MovieCount: 0, EpisodeCount: 0, SeriesCount: 0 });
+const updated = ref("");
+async function refresh() {
+  if (loading.value || !readSession()) return;
+  loading.value = true;
+  error.value = "";
+  try {
+    const [info, totals, playing, tasks] = await Promise.all([
+      serverRequest<{ Version: string }>("/emby/System/Info"),
+      serverRequest<typeof counts.value>("/emby/Items/Counts"),
+      serverRequest<ServerPlayback[]>("/api/admin/playback"),
+      serverRequest<ServerJob[]>("/api/admin/jobs?limit=8"),
+    ]);
+    version.value = info.Version;
+    counts.value = totals;
+    sessions.value = playing;
+    jobs.value = tasks;
+    online.value = true;
+    updated.value = new Date().toLocaleTimeString();
+    await library.refresh();
+  } catch (err) {
+    error.value = errorMessage(err);
+    online.value = false;
+  } finally {
+    loading.value = false;
+  }
+}
+const jobNames: Record<string, string> = {
+  "library.scan": "媒体库扫描",
+  "media.probe": "媒体信息探测",
+  "metadata.refresh": "元数据刷新",
+};
+const status: Record<string, string> = {
+  queued: "排队中",
+  running: "执行中",
+  completed: "已完成",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+function time(ticks: number) {
+  const seconds = Math.floor(ticks / 1e7);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+onMounted(refresh);
+useIntervalFn(refresh, 5000);
 </script>
 
 <template>
-  <div class="admin-dashboard-view">
-    <!-- Row 1: System Hardware Metrics -->
-    <div class="metrics-grid">
-      <!-- CPU Usage -->
-      <div class="metric-card">
-        <div class="card-title">CPU 使用率</div>
-        <div class="progress-container">
-          <div class="progress-circle-wrap">
-            <svg class="progress-ring" width="80" height="80">
-              <circle
-                class="progress-ring-bg"
-                stroke="var(--fbz-color-line)"
-                stroke-width="6"
-                fill="transparent"
-                r="34"
-                cx="40"
-                cy="40"
-              />
-              <circle
-                class="progress-ring-bar"
-                stroke="var(--fbz-color-brand-500)"
-                stroke-width="6"
-                fill="transparent"
-                r="34"
-                cx="40"
-                cy="40"
-                :style="{
-                  strokeDasharray: `${2 * Math.PI * 34}`,
-                  strokeDashoffset: `${2 * Math.PI * 34 * (1 - cpuUsage / 100)}`,
-                }"
-              />
-            </svg>
-            <div class="percentage-display">{{ cpuUsage }}%</div>
-          </div>
-          <div class="metric-meta">Intel Core i7-12700H</div>
-        </div>
+  <section class="dashboard">
+    <header class="server-header">
+      <div>
+        <p class="eyebrow">你的私人媒体服务器</p>
+        <h1>FBZ Server</h1>
       </div>
-
-      <!-- Memory Usage -->
-      <div class="metric-card">
-        <div class="card-title">系统内存</div>
-        <div class="progress-bar-wrap">
-          <div class="value-row">
-            <span class="value">{{ memUsed }} GB / {{ memTotal }} GB</span>
-            <span class="percent">{{ Math.round((memUsed / memTotal) * 100) }}%</span>
-          </div>
-          <div class="track">
-            <div class="fill" :style="{ width: `${(memUsed / memTotal) * 100}%` }" />
-          </div>
-          <div class="metric-meta">DDR5 4800MHz</div>
-        </div>
+      <div class="server-state">
+        <span class="connection" :class="{ online }"><i />{{ online ? "已连接" : "未连接" }}</span
+        ><span class="version">版本 {{ version }}</span
+        ><button class="du-btn du-btn-sm" :disabled="loading" @click="refresh">
+          {{ loading ? "更新中…" : "刷新" }}
+        </button>
       </div>
-
-      <!-- Disk Space -->
-      <div class="metric-card">
-        <div class="card-title">存储空间</div>
-        <div class="progress-bar-wrap">
-          <div class="value-row">
-            <span class="value">{{ diskUsed }} TB / {{ diskTotal }} TB</span>
-            <span class="percent">{{ Math.round((diskUsed / diskTotal) * 100) }}%</span>
-          </div>
-          <div class="track">
-            <div class="fill" :style="{ width: `${(diskUsed / diskTotal) * 100}%` }" />
-          </div>
-          <div class="metric-meta">已挂载 3 个硬盘分区</div>
-        </div>
-      </div>
+    </header>
+    <p v-if="error" class="error" role="alert">
+      {{ error }} <RouterLink to="/user/login">重新连接 →</RouterLink>
+    </p>
+    <div v-if="!readSession()" class="connect-prompt">
+      <h2>连接你的媒体服务器</h2>
+      <p>登录后，在这里查看媒体库、播放会话和扫描任务。</p>
+      <RouterLink to="/user/login">连接服务器 →</RouterLink>
     </div>
-
-    <!-- Row 2: Library Totals & Active Streams -->
-    <div class="dashboard-mid-row">
-      <!-- Media Library Totals -->
-      <div class="summary-section">
-        <div class="sub-label">媒体统计</div>
-        <div class="stats-grid">
-          <div class="stat-item">
-            <span class="icon">🎬</span>
-            <div class="stat-info">
-              <span class="number">{{ totalMovies }}</span>
-              <span class="label">电影总数</span>
-            </div>
-          </div>
-          <div class="stat-item">
-            <span class="icon">📺</span>
-            <div class="stat-info">
-              <span class="number">{{ totalSeries }}</span>
-              <span class="label">剧集与动漫</span>
-            </div>
-          </div>
-          <div class="stat-item">
-            <span class="icon">📁</span>
-            <div class="stat-info">
-              <span class="number">{{ libraryStore.libraries.length }}</span>
-              <span class="label">媒体库数量</span>
-            </div>
-          </div>
-        </div>
+    <dl class="metrics">
+      <div>
+        <dt>电影</dt>
+        <dd>{{ online ? counts.MovieCount : "—" }}</dd>
       </div>
-
-      <!-- Active Streams -->
-      <div class="streams-section">
-        <div class="sub-label">
-          <span>正在播放的流媒体</span>
-          <span class="active-count-badge" v-if="activeStreams.length > 0">{{
-            activeStreams.length
-          }}</span>
+      <div>
+        <dt>剧集</dt>
+        <dd>{{ online ? counts.SeriesCount : "—" }}</dd>
+      </div>
+      <div>
+        <dt>分集</dt>
+        <dd>{{ online ? counts.EpisodeCount : "—" }}</dd>
+      </div>
+      <div>
+        <dt>媒体库</dt>
+        <dd>{{ online ? library.libraries.length : "—" }}</dd>
+      </div>
+      <div>
+        <dt>播放会话</dt>
+        <dd>{{ online ? sessions.length : "—" }}</dd>
+      </div>
+    </dl>
+    <section class="playback-section">
+      <div class="section-head">
+        <div>
+          <h2>正在播放</h2>
+          <p>查看播放状态与进度，暂停后也会保留当前会话。</p>
         </div>
-
-        <div class="streams-list" v-if="activeStreams.length > 0">
-          <div v-for="stream in activeStreams" :key="stream.id" class="stream-card">
-            <div class="stream-user">
-              <span class="user-avatar">{{ stream.user.charAt(0) }}</span>
-              <div class="user-details">
-                <span class="username">{{ stream.user }}</span>
-                <span class="client">{{ stream.player }}</span>
-              </div>
-            </div>
-            <div class="stream-playback">
-              <span class="title">{{ stream.title }}</span>
-              <span class="quality">{{ stream.quality }} · {{ stream.bitrate }}</span>
-              <div class="progress-bar">
-                <div class="fill" :style="{ width: `${stream.progress}%` }" />
-              </div>
+        <span class="meta">{{ sessions.length }} 个会话</span>
+      </div>
+      <div v-if="sessions.length" class="session-grid">
+        <article
+          v-for="(session, index) in sessions"
+          :key="`${session.Id}-${index}`"
+          class="session-card"
+        >
+          <div class="session-heading">
+            <div class="media-monogram">{{ session.Name.slice(0, 1) }}</div>
+            <div>
+              <h3>{{ session.Name }}</h3>
+              <p>{{ session.UserName }}</p>
+              <span class="playing-label">{{ session.IsPaused ? "已暂停" : "正在播放" }}</span>
             </div>
           </div>
-        </div>
-        <div class="streams-empty" v-else>
-          <span class="empty-icon">💤</span>
-          <span>当前没有活动的播放连接</span>
-        </div>
+          <div class="timeline">
+            <span
+              >{{ time(session.PositionTicks) }} /
+              {{ session.RunTimeTicks ? time(session.RunTimeTicks) : "—" }}</span
+            ><span>{{
+              session.RunTimeTicks
+                ? Math.min(100, Math.round((session.PositionTicks / session.RunTimeTicks) * 100)) +
+                  "%"
+                : ""
+            }}</span>
+          </div>
+          <progress
+            :value="session.PositionTicks"
+            :max="session.RunTimeTicks || Math.max(1, session.PositionTicks)"
+          />
+          <div class="stream-info">
+            <span>播放方式</span
+            ><strong>{{
+              {
+                direct_play: "直接播放",
+                direct_stream: "直接串流",
+                transcode: "转码播放",
+                strm_redirect: "远程直连",
+              }[session.PlayMethod] ?? session.PlayMethod
+            }}</strong>
+          </div>
+        </article>
       </div>
-    </div>
-
-    <!-- Row 3: Activity Logs -->
-    <div class="activity-section">
-      <div class="sub-label">最近任务动态</div>
-      <div class="activity-list">
-        <div v-for="act in recentActivities" :key="act.id" class="activity-item">
-          <span class="time">{{ act.time }}</span>
-          <span class="status-dot" :class="act.type" />
-          <span class="message">{{ act.msg }}</span>
+      <div v-else class="empty-playback">
+        <svg
+          viewBox="0 0 48 48"
+          width="42"
+          height="42"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.2"
+        >
+          <rect x="5" y="9" width="38" height="26" rx="4" />
+          <path d="m21 17 9 5-9 5z M17 41h14 M24 35v6" />
+        </svg>
+        <div>
+          <h3>{{ online ? "还没有正在播放的内容" : "等待服务器连接" }}</h3>
+          <p>
+            {{
+              online
+                ? "从媒体库选择一部影片，或使用 Emby 兼容客户端开始播放。"
+                : "连接后将显示服务器返回的播放状态。"
+            }}
+          </p>
         </div>
+        <RouterLink to="/library">打开媒体库 →</RouterLink>
       </div>
-    </div>
-  </div>
+    </section>
+    <section>
+      <div class="section-head">
+        <div>
+          <h2>任务动态</h2>
+          <p>扫描、媒体探测与元数据任务的最新状态。</p>
+        </div>
+        <RouterLink to="/admin/libraries">管理媒体库 →</RouterLink>
+      </div>
+      <p v-if="!jobs.length" class="empty-activity">暂无任务。添加媒体库后，启动第一次扫描。</p>
+      <div v-for="job in jobs" :key="job.id" class="activity">
+        <span class="activity-dot" :class="job.status" />
+        <div>
+          <strong>{{ jobNames[job.jobType] ?? "后台任务" }}</strong>
+          <p v-if="job.lastError" class="error">{{ job.lastError }}</p>
+        </div>
+        <span>{{ status[job.status] ?? job.status }}</span
+        ><time>{{ new Date(job.updatedAt).toLocaleTimeString() }}</time>
+      </div>
+    </section>
+    <footer>
+      <span>{{ readSession() ? serverAddress() : "FBZ · 自托管媒体库" }}</span
+      ><span v-if="updated">最后更新 {{ updated }}</span>
+    </footer>
+  </section>
 </template>
 
 <style scoped lang="scss">
-.admin-dashboard-view {
-  display: flex;
-  flex-direction: column;
-  gap: var(--fbz-space-5);
+.dashboard {
+  max-width: 1180px;
+  font-size: 13px;
 }
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--fbz-space-4);
-
-  @media (max-width: 768px) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.metric-card {
-  background: var(--fbz-color-panel-strong);
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: 6px;
-  padding: var(--fbz-space-4) var(--fbz-space-5);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-
-  .card-title {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: var(--fbz-color-text-muted);
-    letter-spacing: 0.5px;
-  }
-}
-
-.progress-container {
+.server-header,
+.server-state,
+.section-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.server-header {
+  padding: 10px 0 28px;
+}
+h1 {
+  margin: 8px 0 0;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.8px;
+}
+.eyebrow {
+  color: var(--fbz-color-text-muted);
+  font-size: 11px;
+  letter-spacing: 1px;
+  margin: 0;
+}
+.server-state {
+  justify-content: flex-end;
+  font-size: 12px;
+}
+.version {
+  color: var(--fbz-color-text-muted);
+}
+.connection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--fbz-color-line);
+  border-radius: 24px;
+  color: var(--fbz-color-text-muted);
+}
+.connection i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.connection.online {
+  color: var(--fbz-color-brand-500);
+}
+button {
+  background: none;
+  color: var(--fbz-color-text-soft);
+  border: 1px solid var(--fbz-color-line);
+  border-radius: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  border-top: 1px solid var(--fbz-color-line-soft);
+  padding: 26px 0;
+  margin: 0 0 34px;
+  gap: 24px;
+}
+dt {
+  color: var(--fbz-color-text-muted);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+dd {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fbz-color-brand-500);
+}
+h2 {
+  font-size: 22px;
+  font-weight: 550;
+  margin: 0 0 9px;
+  letter-spacing: -0.4px;
+}
+h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  font-weight: 550;
+}
+p {
+  color: var(--fbz-color-text-muted);
+  line-height: 1.6;
+  margin: 0;
+}
+.section-head {
+  margin-bottom: 24px;
+}
+.meta,
+time {
+  color: var(--fbz-color-text-muted);
+  font-size: 12px;
+}
+.playback-section {
+  margin-bottom: 56px;
+}
+.session-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 20px;
 }
-
-.progress-circle-wrap {
-  position: relative;
-  width: 80px;
-  height: 80px;
-
-  .progress-ring {
-    transform: rotate(-90deg);
-  }
-
-  .progress-ring-bar {
-    transition: stroke-dashoffset 0.4s ease;
-  }
-
-  .percentage-display {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-content: center;
-    font-family: var(--fbz-font-display);
-    font-size: 16px;
-    font-weight: 800;
-    color: var(--fbz-color-text);
-  }
+.session-card {
+  padding: 18px;
+  background: var(--fbz-color-panel);
+  border: 1px solid var(--fbz-color-line-soft);
+  border-radius: 8px;
+  max-width: 360px;
 }
-
-.progress-bar-wrap {
+.session-heading {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-
-  .value-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 13px;
-
-    .value {
-      font-weight: 700;
-      color: var(--fbz-color-text-soft);
-    }
-
-    .percent {
-      font-family: var(--fbz-font-display);
-      font-weight: 800;
-      color: var(--fbz-color-brand-500);
-    }
-  }
-
-  .track {
-    height: 6px;
-    background: var(--fbz-color-line);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-
-  .fill {
-    height: 100%;
-    background: var(--fbz-color-brand-500);
-    border-radius: 3px;
-    transition: width 0.4s ease;
-  }
+  gap: 16px;
+  margin-bottom: 20px;
 }
-
-.metric-meta {
-  font-size: var(--fbz-font-size-xs);
-  color: var(--fbz-color-text-muted);
-}
-
-.dashboard-mid-row {
+.media-monogram {
   display: grid;
-  grid-template-columns: 1fr 1.5fr;
-  gap: var(--fbz-space-4);
-
-  @media (max-width: 768px) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.sub-label {
-  font-size: 13px;
-  font-weight: 700;
+  place-items: center;
+  width: 64px;
+  height: 88px;
+  border-radius: 4px;
+  background: var(--fbz-color-panel-elevated);
   color: var(--fbz-color-text-soft);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: var(--fbz-space-3);
+  font-size: 28px;
+  flex-shrink: 0;
+}
+.playing-label {
+  display: inline-block;
+  color: var(--fbz-color-brand-500);
+  font-size: 11px;
+  margin-top: 10px;
+}
+.timeline,
+.stream-info {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-
-  .active-count-badge {
-    background: var(--fbz-color-brand-500);
-    color: #07120a;
-    font-family: var(--fbz-font-display);
-    font-size: 9px;
-    font-weight: 900;
-    border-radius: var(--fbz-radius-round);
-    padding: 1px 6px;
-    line-height: 1.2;
-  }
-}
-
-.stats-grid {
-  display: flex;
-  flex-direction: column;
-  gap: var(--fbz-space-2);
-}
-
-.stat-item {
-  display: flex;
-  align-items: center;
   gap: 12px;
-  padding: var(--fbz-space-3) var(--fbz-space-4);
-  background: var(--fbz-color-panel-strong);
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: 6px;
-
-  .icon {
-    font-size: 20px;
-  }
-
-  .stat-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-
-    .number {
-      font-family: var(--fbz-font-display);
-      font-size: 18px;
-      font-weight: 800;
-    }
-
-    .label {
-      font-size: 10px;
-      color: var(--fbz-color-text-muted);
-      font-weight: 700;
-    }
-  }
-}
-
-.streams-section {
-  display: flex;
-  flex-direction: column;
-}
-
-.streams-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--fbz-space-2);
-}
-
-.stream-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--fbz-space-4);
-  padding: var(--fbz-space-4);
-  background: var(--fbz-color-panel-strong);
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: 6px;
-
-  @media (max-width: 600px) {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--fbz-space-3);
-  }
-
-  .stream-user {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-shrink: 0;
-
-    .user-avatar {
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      background: var(--fbz-color-brand-500);
-      color: #07120a;
-      display: grid;
-      place-content: center;
-      font-weight: 800;
-      font-size: 13px;
-    }
-
-    .user-details {
-      display: flex;
-      flex-direction: column;
-
-      .username {
-        font-size: var(--fbz-font-size-md);
-        font-weight: 700;
-        color: var(--fbz-color-text);
-      }
-
-      .client {
-        font-size: 10px;
-        color: var(--fbz-color-text-muted);
-      }
-    }
-  }
-
-  .stream-playback {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    width: 100%;
-
-    .title {
-      font-size: 13px;
-      font-weight: 700;
-      color: var(--fbz-color-text-soft);
-    }
-
-    .quality {
-      font-size: 11px;
-      color: var(--fbz-color-text-muted);
-    }
-
-    .progress-bar {
-      height: 4px;
-      background: var(--fbz-color-line);
-      border-radius: 2px;
-      overflow: hidden;
-      margin-top: 4px;
-
-      .fill {
-        height: 100%;
-        background: var(--fbz-color-brand-500);
-        border-radius: 2px;
-      }
-    }
-  }
-}
-
-.streams-empty {
-  flex: 1;
-  border: 1px dashed var(--fbz-color-line-soft);
-  border-radius: 6px;
-  background: var(--fbz-color-panel-strong);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 40px;
+  font-size: 11px;
   color: var(--fbz-color-text-muted);
-  text-align: center;
-  font-size: var(--fbz-font-size-sm);
-
-  .empty-icon {
-    font-size: 24px;
-  }
 }
-
-.activity-section {
-  display: flex;
-  flex-direction: column;
+.stream-info {
+  border-top: 1px solid var(--fbz-color-line-soft);
+  padding-top: 14px;
+  margin-top: 16px;
 }
-
-.activity-list {
-  background: var(--fbz-color-panel-strong);
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: 6px;
-  padding: var(--fbz-space-4) var(--fbz-space-5);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.stream-info strong {
+  font-weight: 500;
+  color: var(--fbz-color-text-soft);
 }
-
-.activity-item {
+progress {
+  appearance: none;
+  width: 100%;
+  height: 3px;
+  margin: 10px 0 0;
+  border: 0;
+}
+progress::-webkit-progress-bar {
+  background: var(--fbz-color-line);
+}
+progress::-webkit-progress-value {
+  background: var(--fbz-color-brand-500);
+}
+.empty-playback {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: var(--fbz-font-size-sm);
-
-  .time {
-    font-family: var(--fbz-font-display);
-    color: var(--fbz-color-text-muted);
-    width: 45px;
-    flex-shrink: 0;
+  gap: 22px;
+  padding: 32px 0;
+  border-top: 1px solid var(--fbz-color-line-soft);
+  border-bottom: 1px solid var(--fbz-color-line-soft);
+}
+.empty-playback svg {
+  color: var(--fbz-color-text-muted);
+  flex-shrink: 0;
+}
+.empty-playback a {
+  margin-left: auto;
+  white-space: nowrap;
+}
+a {
+  color: var(--fbz-color-text-soft);
+  text-decoration: none;
+  font-size: 12px;
+}
+a:hover {
+  color: var(--fbz-color-brand-500);
+}
+.activity {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 0;
+  border-top: 1px solid var(--fbz-color-line-soft);
+}
+.activity > div {
+  flex: 1;
+  min-width: 0;
+}
+.activity strong {
+  font-weight: 500;
+}
+.activity > span:not(.activity-dot) {
+  color: var(--fbz-color-text-soft);
+  font-size: 12px;
+}
+.activity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fbz-color-text-muted);
+}
+.activity-dot.completed,
+.activity-dot.succeeded {
+  background: var(--fbz-color-brand-500);
+}
+.activity-dot.failed {
+  background: var(--fbz-color-danger-500);
+}
+.empty-activity {
+  padding: 24px 0;
+  border-top: 1px solid var(--fbz-color-line-soft);
+}
+.error {
+  color: var(--fbz-color-danger-500);
+  overflow-wrap: anywhere;
+}
+footer {
+  margin-top: 48px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--fbz-color-text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.connect-prompt {
+  padding: 24px;
+  margin-bottom: 24px;
+  background: var(--fbz-color-panel);
+  border-radius: 8px;
+}
+.connect-prompt a {
+  display: inline-block;
+  margin-top: 14px;
+  color: var(--fbz-color-brand-500);
+}
+:is(button, a):focus-visible {
+  outline: 2px solid var(--fbz-color-brand-500);
+  outline-offset: 4px;
+}
+@media (max-width: 600px) {
+  .server-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 20px;
   }
-
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-
-    &.success {
-      background: var(--fbz-color-brand-500);
-      box-shadow: 0 0 6px var(--fbz-color-brand-500);
-    }
-
-    &.info {
-      background: var(--fbz-color-cyan-500);
-      box-shadow: 0 0 6px var(--fbz-color-cyan-500);
-    }
-
-    &.warning {
-      background: var(--fbz-color-amber-500);
-      box-shadow: 0 0 6px var(--fbz-color-amber-500);
-    }
+  .server-state {
+    gap: 14px;
   }
-
-  .message {
-    color: var(--fbz-color-text-soft);
-    line-height: 1.4;
+  .metrics {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px 12px;
+  }
+  .empty-playback {
+    flex-wrap: wrap;
+  }
+  .empty-playback a {
+    margin: 0;
+  }
+  .section-head {
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .activity time {
+    display: none;
+  }
+  footer {
+    flex-direction: column;
   }
 }
 </style>

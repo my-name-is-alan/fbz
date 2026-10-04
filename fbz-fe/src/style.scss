@@ -18,12 +18,12 @@ html {
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "tnum" 1;
 
-  --header-h: 60px;
+  --header-h: 72px;
 }
 
 @media (max-width: 600px) {
   :root {
-    --header-h: 56px;
+    --header-h: 62px;
   }
 }
 
@@ -133,4 +133,87 @@ a {
     line-height: 1.4;
     margin-top: 2px;
   }
+}
+
+/* Shared daisyUI contract: both themes and every surface use the same tokens. */
+:root {
+  --color-base-100: var(--fbz-color-bg);
+  --color-base-200: var(--fbz-color-panel);
+  --color-base-300: var(--fbz-color-panel-strong);
+  --color-base-content: var(--fbz-color-text);
+  --color-primary: var(--fbz-color-brand-500);
+  --color-primary-content: #07150e;
+  --color-secondary: var(--fbz-color-text-soft);
+  --color-secondary-content: var(--fbz-color-bg);
+  --color-accent: var(--fbz-color-brand-500);
+  --color-accent-content: #07150e;
+  --color-neutral: var(--fbz-color-panel-elevated);
+  --color-neutral-content: var(--fbz-color-text);
+  --color-info: #79b8dc;
+  --color-info-content: #07121d;
+  --color-success: var(--fbz-color-brand-500);
+  --color-success-content: #07150e;
+  --color-warning: #edc674;
+  --color-warning-content: #261a08;
+  --color-error: var(--fbz-color-danger-500);
+  --color-error-content: #210b0e;
+  --radius-selector: 0.65rem;
+  --radius-field: 0.65rem;
+  --radius-box: 1rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+  --fbz-radius-card: 12px;
+  --fbz-radius-control: 10px;
+}
+body {
+  font-size: 14px;
+  line-height: 1.55;
+}
+.du-btn {
+  text-transform: none;
+  letter-spacing: 0;
+  box-shadow: none;
+  font-weight: 550;
+}
+.du-btn:focus-visible,
+.du-input:focus-visible,
+.du-select:focus-visible {
+  outline: 2px solid var(--fbz-color-brand-500);
+  outline-offset: 3px;
+}
+.du-input,
+.du-select,
+.du-textarea {
+  background: var(--fbz-color-panel);
+  border-color: var(--fbz-color-line);
+  color: var(--fbz-color-text);
+}
+.du-input::placeholder,
+.du-textarea::placeholder {
+  color: var(--fbz-color-text-muted);
+}
+.du-alert {
+  box-shadow: none;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.du-badge {
+  font-size: 11px;
+  font-weight: 500;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+:root {
+  --fbz-font-display: var(--fbz-font-sans);
 }

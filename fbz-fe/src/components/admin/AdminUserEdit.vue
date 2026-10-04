@@ -110,7 +110,7 @@ function handleCancel() {
                 v-model="username"
                 type="text"
                 placeholder="输入用户名"
-                class="control-input"
+                class="du-input control-input"
                 :disabled="!isCreate && username === 'admin'"
               />
             </div>
@@ -124,7 +124,7 @@ function handleCancel() {
                 v-model="password"
                 type="password"
                 :placeholder="isCreate ? '输入登录密码' : '重置新密码'"
-                class="control-input"
+                class="du-input control-input"
               />
             </div>
 
@@ -172,8 +172,16 @@ function handleCancel() {
         </div>
 
         <div class="card-actions-row">
-          <button type="button" class="footer-btn secondary" @click="handleCancel">取消</button>
-          <button type="button" class="footer-btn primary" @click="handleSave">保存配置</button>
+          <button type="button" class="du-btn du-btn-sm footer-btn secondary" @click="handleCancel">
+            取消
+          </button>
+          <button
+            type="button"
+            class="du-btn du-btn-sm du-btn-primary footer-btn primary"
+            @click="handleSave"
+          >
+            保存配置
+          </button>
         </div>
       </section>
     </div>

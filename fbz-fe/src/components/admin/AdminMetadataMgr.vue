@@ -66,7 +66,7 @@ function runMaintenance(id: string, name: string) {
               >
             </div>
             <button
-              class="maintenance-btn"
+              class="du-btn du-btn-sm maintenance-btn"
               type="button"
               :disabled="processingId !== null"
               @click="runMaintenance('clean-cache', '清理海报缓存')"
@@ -85,7 +85,7 @@ function runMaintenance(id: string, name: string) {
               >
             </div>
             <button
-              class="maintenance-btn"
+              class="du-btn du-btn-sm maintenance-btn"
               type="button"
               :disabled="processingId !== null"
               @click="runMaintenance('scan-unmatched', '扫描未关联条目')"
@@ -102,7 +102,7 @@ function runMaintenance(id: string, name: string) {
               <span class="desc">导出系统已挂载的影视目录路径、元数据缓存及配置参数。</span>
             </div>
             <button
-              class="maintenance-btn"
+              class="du-btn du-btn-sm maintenance-btn"
               type="button"
               :disabled="processingId !== null"
               @click="runMaintenance('backup-db', '核心数据库备份')"

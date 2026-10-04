@@ -184,7 +184,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let addr = config.socket_addr();
-    let app = build_router(AppState::new(config, database, redis));
+    let state = AppState::new(config, database, redis);
+    fbz_api::storage::scan::spawn_worker(state.clone());
+    let app = build_router(state);
     let listener = TcpListener::bind(addr).await?;
 
     info!(%addr, "fbz-api listening");

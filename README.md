@@ -4,6 +4,8 @@ FBZ 是一个自托管媒体服务器项目，目标是提供 Emby 兼容后端�
 
 项目目前以 vibe coding 方式快速推进，欢迎有能力和兴趣的人一起开发。
 
+管理端已接通真实登录、媒体库创建、扫描、媒体浏览、MP4 直放及观看进度回传。运行方式、实测证据和范围见 [播放闭环记录](docs/PLAYBACK_LOOP_20261004.md)。
+
 ## 界面预览
 
 ![首页](docs/screenshots/readme-home.png)
@@ -61,8 +63,8 @@ fbz/
 - Vite+
 - Pinia
 - Vue Router
-- UnoCSS / SCSS
-- Shaka Player
+- daisyUI / Tailwind CSS / SCSS（保留 UnoCSS 兼容旧页面）
+- webplayer（浏览器重封装、音轨与字幕）
 
 ## 本地开发
 
@@ -86,3 +88,5 @@ pnpm dev
 ## License
 
 MIT
+
+光鸭媒体源首版：管理端 `/admin/storage` 支持扫码、选择已刮削目录、导入 NFO/图片/字幕和按需 302。部署与限制见 [插件说明](fbz-api/plugins/guangya-storage/README.md)。

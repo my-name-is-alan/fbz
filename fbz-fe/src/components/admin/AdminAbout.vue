@@ -53,7 +53,12 @@ function handleCheckUpdates() {
       </div>
 
       <footer class="about-footer">
-        <button class="update-btn" type="button" :disabled="checking" @click="handleCheckUpdates">
+        <button
+          class="du-btn du-btn-sm update-btn"
+          type="button"
+          :disabled="checking"
+          @click="handleCheckUpdates"
+        >
           <span class="spinner" v-if="checking" />
           <span>{{ checking ? "正在检索更新..." : "检查系统更新" }}</span>
         </button>

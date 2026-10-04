@@ -32,7 +32,7 @@ const password = ref("");
 const serverAddress = ref(
   authStore.serverAddress || (typeof window !== "undefined" ? window.location.origin : ""),
 );
-const remember = ref(localStorage.getItem("fbz_authenticated") === "true");
+const remember = ref(Boolean(localStorage.getItem("fbz_session")));
 const showPassword = ref(false);
 const language = ref(authStore.language);
 const loading = ref(false);
@@ -51,10 +51,8 @@ const appVersion = "FBZ Server · v0.1.0";
 async function handleLogin() {
   if (loading.value) return;
   loading.value = true;
-  // 设计阶段模拟一次请求时延，给登录按钮一个加载态
-  await new Promise((resolve) => setTimeout(resolve, 550));
 
-  const ok = authStore.login({
+  const ok = await authStore.login({
     username: username.value,
     password: password.value,
     serverAddress: serverAddress.value,
@@ -65,7 +63,7 @@ async function handleLogin() {
   if (!ok) return;
 
   authStore.setLanguage(language.value);
-  await router.push("/");
+  await router.push("/admin");
 }
 
 function handleForgot() {
