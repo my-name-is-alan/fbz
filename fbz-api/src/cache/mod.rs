@@ -1,3 +1,5 @@
+pub mod mount;
+
 use std::{future::Future, time::Duration};
 
 use redis::{Client, aio::ConnectionManager};

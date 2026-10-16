@@ -1,0 +1,55 @@
+{
+  "projectId": "1573803f-de60-42c9-af6b-34a13736de72",
+  "projectTitle": "FBZ Admin Console Redesign",
+  "projectUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/1573803f-de60-42c9-af6b-34a13736de72",
+  "canvasUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/1573803f-de60-42c9-af6b-34a13736de72?live=1",
+  "updatedAt": "2026-10-15T14:40:00Z",
+  "userRequests": [
+    "先给我出几张设计图 现在是后台管理我不喜欢。 太丑了 做设计",
+    "我想要类emby 或者jellfin那种后台",
+    "都不太好看 在emby向上面改 风格要更好看些 现代化一点 有点太硬了",
+    "线条太多 card也太多了"
+  ],
+  "designSystem": ".superdesign/design-system.md",
+  "styleRefs": {
+    "extractWebsite": [
+      "https://jellyfin.org/ → .superdesign/website/jellyfin.org/design.md (Midnight Teal Docs)",
+      "https://emby.media/ → .superdesign/website/emby.media/design.md (Quiet Orchard Light; accent #418F3C/#52B54B)"
+    ],
+    "searchPrompts": ["ascii-hero (dark dense dashboard / mono data — closest style tag match)"]
+  },
+  "baselineDraft": {
+    "draftId": "c5c67021-fa6e-4886-ac43-31cafe17e481",
+    "title": "Current Admin Dashboard",
+    "returnedTitle": "FBZ Media Server Admin Console",
+    "previewUrl": "https://p.superdesign.dev/draft/c5c67021-fa6e-4886-ac43-31cafe17e481",
+    "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/1573803f-de60-42c9-af6b-34a13736de72?node=draft-variant-c5c67021-fa6e-4886-ac43-31cafe17e481",
+    "role": "Step 3a pixel-perfect reproduction of current /admin"
+  },
+  "activeDrafts": [
+    {
+      "draftId": "315f7fd3-1ad0-4594-8023-a7e5b87e43f2",
+      "title": "FBZ Media Server - Jellyfin-Inspired Admin",
+      "direction": "Jellyfin: charcoal + #00A4DC cyan/blue (+ violet secondary), dense cards",
+      "previewUrl": "https://p.superdesign.dev/draft/315f7fd3-1ad0-4594-8023-a7e5b87e43f2",
+      "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/1573803f-de60-42c9-af6b-34a13736de72?node=draft-variant-315f7fd3-1ad0-4594-8023-a7e5b87e43f2"
+    },
+    {
+      "draftId": "7f912b61-f3fe-4b34-9f48-0a871942e220",
+      "title": "Simplified FBZ Media Server Admin",
+      "direction": "Emby soft modern + fewer lines/cards, open panels",
+      "previewUrl": "https://p.superdesign.dev/draft/7f912b61-f3fe-4b34-9f48-0a871942e220",
+      "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/1573803f-de60-42c9-af6b-34a13736de72?node=draft-variant-7f912b61-f3fe-4b34-9f48-0a871942e220"
+    }
+  ],
+  "contextFiles": [
+    ".superdesign/design-system.md",
+    ".superdesign/ctx/theme-summary.md",
+    ".superdesign/ctx/admin-layout.vue",
+    "src/views/admin/index.vue",
+    "src/components/admin/AdminPageShell.vue",
+    ".superdesign/ctx/AdminDashboard.vue"
+  ],
+  "skipped": ["create-component AdminShell (optional; user wants new style not reuse ugly shell)"],
+  "notes": "Emby draft replaced with modern soft redesign (draft 7f912b61). Design system updated for softer radii/spacing."
+}

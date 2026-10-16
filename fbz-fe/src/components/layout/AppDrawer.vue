@@ -30,6 +30,8 @@ useEventListener(window, "keydown", (e) => {
         <RouterLink to="/" class="link" @click="close">首页</RouterLink>
         <RouterLink to="/" class="link" @click="close">最近添加</RouterLink>
         <RouterLink to="/library" class="link" @click="close">媒体库总览</RouterLink>
+        <RouterLink to="/playlists" class="link" @click="close">播放列表</RouterLink>
+        <RouterLink to="/collections" class="link" @click="close">合集</RouterLink>
 
         <div class="sec">全部库</div>
         <RouterLink

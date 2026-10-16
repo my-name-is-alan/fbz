@@ -168,6 +168,7 @@ pub async fn admin_notification(
             title: input.name,
             message: input.description,
             level: normalize_notification_level(input.level.as_deref()).to_owned(),
+            channel: None,
             metadata: Value::Object(metadata),
         },
     )
@@ -215,6 +216,7 @@ pub async fn service_test(
             title: "FBZ test notification".to_owned(),
             message: "This is a test notification from the FBZ server.".to_owned(),
             level: "info".to_owned(),
+            channel: None,
             metadata: Value::Object(metadata),
         },
     )

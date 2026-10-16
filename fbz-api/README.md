@@ -163,6 +163,9 @@ FBZ API 是一个 Rust 后端骨架，当前已具备基础 Emby 兼容接口、
 | `FBZ_METADATA_WORKER_INTERVAL_SECONDS` | `10` | 元数据 worker 轮询 `metadata.refresh` job 的间隔 |
 | `FBZ_PROBE_WORKER_ENABLED` | `false` | 是否启动媒体探测 worker；仅 `all` / `worker` 节点会运行 |
 | `FBZ_PROBE_WORKER_INTERVAL_SECONDS` | `10` | 媒体探测 worker 轮询 `media.probe` job 的间隔 |
+| `FBZ_MARKER_DETECT_WORKER_ENABLED` | `false` | 是否启动片头片尾探测 worker（`media.marker.detect`） |
+| `FBZ_MARKER_DETECT_WORKER_INTERVAL_SECONDS` | `15` | marker detect worker 轮询间隔（秒） |
+| `FBZ_MARKER_DETECT_MAX_CONCURRENT` | `1` | 每 tick 最多认领的 marker detect 作业数 |
 | `FBZ_PLUGIN_WORKER_ENABLED` | `false` | 是否启动插件 dispatch worker；仅 `all` / `worker` 节点会运行 |
 | `FBZ_PLUGIN_WORKER_INTERVAL_SECONDS` | `5` | 插件 worker 轮询 `plugin.hook.dispatch` outbox 的间隔 |
 | `FBZ_NOTIFICATION_WORKER_ENABLED` | `false` | 是否启动通知投递 worker；仅 `all` / `worker` 节点会运行 |

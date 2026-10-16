@@ -7,11 +7,11 @@ use fbz_api::{
     config::{Config, NodeRole},
     db,
     events::worker::spawn_event_stream_mirror_worker,
-    media::{photo::spawn_photo_worker, probe::spawn_probe_worker, tools::resolve_media_tools},
+    media::{marker_detect::spawn_marker_detect_worker, photo::spawn_photo_worker, probe::spawn_probe_worker, tools::resolve_media_tools},
     metadata::worker::spawn_metadata_worker,
     notifications::worker::spawn_notification_worker,
     plugins::worker::spawn_plugin_worker,
-    scan::worker::spawn_scan_worker,
+    scan::{monitor::spawn_library_monitor, worker::spawn_scan_worker},
     scheduler::{service::SchedulerService, worker::spawn_scheduler_worker},
     settings::{bootstrap_settings, repository::SettingsRepository},
     state::AppState,
@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::from_env()?;
     init_tracing(&config.telemetry);
     let media_tools = resolve_media_tools(&config.media_tools)?;
+    fbz_api::media::book_meta::set_artwork_dir(config.storage.artwork_cache_dir.clone());
     info!(
         ffmpeg_path = %media_tools.ffmpeg.path.display(),
         ffmpeg_source = ?media_tools.ffmpeg.source,
@@ -45,6 +46,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "media tools resolved"
     );
 
+    // Trickplay 运行时（计划任务 / 生成路由共用）：TRICKPLAY_* 环境变量。
+    fbz_api::media::trickplay::install(fbz_api::media::trickplay::Runtime::from_lookup(
+        config.storage.artwork_cache_dir.clone(),
+        media_tools.ffmpeg.path.clone(),
+        |key| std::env::var(key).ok(),
+    ));
     let database = db::connect(&config.database).await?;
     db::migrate(&database).await?;
     let settings_repository = SettingsRepository::new(database.clone());
@@ -94,6 +101,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             scan_worker_enabled = config.scan_worker.enabled,
             node_role = config.node.role.as_str(),
             "scan worker not started"
+        );
+        None
+    };
+    let library_monitor = if should_start_library_monitor(&config) {
+        Some(spawn_library_monitor(
+            database.clone(),
+            config.library_monitor.clone(),
+            shutdown_tx.subscribe(),
+        ))
+    } else {
+        info!(
+            library_monitor_enabled = config.library_monitor.enabled,
+            node_role = config.node.role.as_str(),
+            "library monitor not started"
         );
         None
     };
@@ -175,6 +196,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         None
     };
+    let marker_detect_worker = if should_start_marker_detect_worker(&config) {
+        Some(spawn_marker_detect_worker(
+            database.clone(),
+            config.marker_detect_worker.clone(),
+            media_tools.clone(),
+            config.plugins.clone(),
+            shutdown_tx.subscribe(),
+        ))
+    } else {
+        info!(
+            marker_detect_worker_enabled = config.marker_detect_worker.enabled,
+            node_role = config.node.role.as_str(),
+            "marker detect worker not started"
+        );
+        None
+    };
     let metadata_worker = if should_start_metadata_worker(&config) {
         Some(spawn_metadata_worker(
             database.clone(),
@@ -228,6 +265,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             warn!(error = %err, "scan worker join failed");
         }
     }
+    if let Some(library_monitor) = library_monitor {
+        if let Err(err) = library_monitor.await {
+            warn!(error = %err, "library monitor join failed");
+        }
+    }
     if let Some(scheduler_worker) = scheduler_worker {
         if let Err(err) = scheduler_worker.await {
             warn!(error = %err, "scheduler worker join failed");
@@ -253,6 +295,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             warn!(error = %err, "photo worker join failed");
         }
     }
+    if let Some(marker_detect_worker) = marker_detect_worker {
+        if let Err(err) = marker_detect_worker.await {
+            warn!(error = %err, "marker detect worker join failed");
+        }
+    }
+
     if let Some(metadata_worker) = metadata_worker {
         if let Err(err) = metadata_worker.await {
             warn!(error = %err, "metadata worker join failed");
@@ -278,6 +326,10 @@ fn should_start_scan_worker(config: &Config) -> bool {
     config.scan_worker.enabled && matches!(config.node.role, NodeRole::All | NodeRole::Worker)
 }
 
+fn should_start_library_monitor(config: &Config) -> bool {
+    config.library_monitor.enabled && matches!(config.node.role, NodeRole::All | NodeRole::Worker)
+}
+
 fn should_start_scheduler_worker(config: &Config) -> bool {
     config.scheduler.enabled && matches!(config.node.role, NodeRole::All | NodeRole::Scheduler)
 }
@@ -296,6 +348,11 @@ fn should_start_probe_worker(config: &Config) -> bool {
 
 fn should_start_photo_worker(config: &Config) -> bool {
     config.photo_worker.enabled && matches!(config.node.role, NodeRole::All | NodeRole::Worker)
+}
+
+fn should_start_marker_detect_worker(config: &Config) -> bool {
+    config.marker_detect_worker.enabled
+        && matches!(config.node.role, NodeRole::All | NodeRole::Worker)
 }
 
 fn should_start_metadata_worker(config: &Config) -> bool {

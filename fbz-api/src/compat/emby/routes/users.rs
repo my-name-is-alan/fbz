@@ -4,6 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, Uri},
 };
+use crate::users::access_policy;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -22,8 +23,8 @@ use crate::{
         auth::parse_auth_context,
         dto::{
             AuthenticateByNameRequestDto, AuthenticateUserRequestDto, AuthenticationResultDto,
-            NameIdPairDto, PublicUserDto, QueryResultDto, SessionInfoDto, UserDetailSource,
-            UserDto, UserSource,
+            NameIdPairDto, PublicUserDto, QueryResultDto, SessionInfoDto, UserConfigurationDto,
+            UserDetailSource, UserDto, UserSource,
         },
         payload::parse_emby_body,
     },
@@ -198,11 +199,11 @@ pub async fn users_query(
         .list_users_query(input.clone())
         .await
         .map_err(|err| AppError::internal(format!("failed to query users: {err}")))?;
-    let items = page
-        .records
-        .into_iter()
-        .map(user_detail_record_to_dto)
-        .collect();
+    let repository = UsersRepository::new(database.clone());
+    let mut items = Vec::with_capacity(page.records.len());
+    for record in page.records {
+        items.push(user_detail_record_to_dto_with_configuration(&repository, record).await?);
+    }
 
     Ok(Json(QueryResultDto::new(
         items,
@@ -255,7 +256,10 @@ pub async fn create_user(
         return Err(AppError::internal("created user could not be loaded"));
     };
 
-    Ok(Json(user_detail_record_to_dto(record)))
+    let repository = UsersRepository::new(database.clone());
+    Ok(Json(
+        user_detail_record_to_dto_with_configuration(&repository, record).await?,
+    ))
 }
 
 pub async fn user_prefixes(
@@ -352,6 +356,23 @@ pub async fn update_user(
     }
 
     Ok(())
+}
+
+pub async fn user_configuration(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<UserConfigurationDto>, AppError> {
+    authenticate_user_write_target(&state, &user_id, &headers, &uri).await?;
+    let user_id = normalized_required_user_text("Id", Some(user_id))?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let configuration =
+        load_user_configuration(&UsersRepository::new(database.clone()), &user_id).await?;
+    Ok(Json(configuration))
 }
 
 pub async fn update_user_configuration(
@@ -575,15 +596,42 @@ async fn apply_emby_policy(
     let bool_field = |key: &str, fallback: bool| -> bool {
         policy.get(key).and_then(Value::as_bool).unwrap_or(fallback)
     };
+    let max_parental_rating = policy_optional_i32(
+        policy,
+        &[
+            "MaxParentalRating",
+            "maxParentalRating",
+            "max_parental_rating",
+        ],
+    )
+    .unwrap_or(current.max_parental_rating);
+    let block_unrated_items = policy_string_list(
+        policy,
+        &[
+            "BlockUnratedItems",
+            "blockUnratedItems",
+            "block_unrated_items",
+        ],
+    )
+    .unwrap_or_else(|| current.block_unrated_items.clone());
+
     let updated = AdminRepository::new(database.clone())
         .update_user_policy(
             user_id,
             UpdateUserPolicyInput {
                 display_name: current_display_name,
                 is_disabled: bool_field("IsDisabled", current.is_disabled),
-                allow_download: bool_field("EnableContentDownloading", current.allow_download),
-                allow_transcode: bool_field("EnablePlaybackTranscoding", current.allow_transcode),
+                allow_download: bool_field(
+                    "EnableContentDownloading",
+                    current.allow_download,
+                ),
+                allow_transcode: bool_field(
+                    "EnablePlaybackTranscoding",
+                    current.allow_transcode,
+                ),
                 allow_new_device_login: current.allow_new_device_login,
+                max_parental_rating,
+                block_unrated_items,
             },
         )
         .await
@@ -592,7 +640,155 @@ async fn apply_emby_policy(
         return Err(AppError::not_found("user not found"));
     }
 
+    // 访问策略原样存档（user_access_policies），再推导库级 can_view。见 users::access_policy。
+    let patch = access_policy::patch_from_policy(policy);
+    if !patch.is_empty() {
+        let stored = access_policy::load(database, user_id)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to load access policy: {err}")))?;
+        let base = stored.unwrap_or_else(|| access_policy::RawAccessPolicy {
+            enable_all_folders: current.enable_all_folders,
+            enabled_folders: current.enabled_folders.clone(),
+            ..Default::default()
+        });
+        let merged = access_policy::merge(&base, &patch);
+        access_policy::save(database, user_id, &merged)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to save access policy: {err}")))?;
+        if patch.enable_all_folders.is_some() || patch.enabled_folders.is_some() || patch.blocked_folders.is_some() {
+            let access = FolderAccessPolicy {
+                enable_all: Some(merged.enable_all_folders),
+                enabled: Some(merged.enabled_folders.clone()),
+                blocked: merged.blocked_folders.clone(),
+            };
+            apply_folder_access(database, user_id, &current.enabled_folders, &access).await?;
+        }
+    }
+
     Ok(())
+}
+
+/// JF/Emby 文件夹访问规则：`EnableAllFolders` / `EnabledFolders`（JF）/ `BlockedMediaFolders`
+/// （Emby；亦接受 `BlockedFolders`）。三个键都没出现 → None（不动现有权限）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FolderAccessPolicy {
+    pub enable_all: Option<bool>,
+    pub enabled: Option<Vec<String>>,
+    pub blocked: Vec<String>,
+}
+
+fn normalize_folder_id(id: &str) -> String {
+    id.trim().replace('-', "").to_ascii_lowercase()
+}
+
+pub fn overlay_access_policy(policy: &mut crate::compat::emby::dto::UserPolicyDto, raw: access_policy::RawAccessPolicy) {
+    policy.enable_all_folders = raw.enable_all_folders;
+    policy.enabled_folders = raw.enabled_folders;
+    policy.blocked_media_folders = raw.blocked_folders;
+    policy.blocked_tags = raw.blocked_tags;
+}
+
+#[cfg(test)]
+pub fn folder_access_policy(policy: &Value) -> Option<FolderAccessPolicy> {
+    let enable_all = policy.get("EnableAllFolders").and_then(Value::as_bool);
+    let enabled = policy_string_list(policy, &["EnabledFolders", "enabledFolders"]);
+    let blocked = policy_string_list(policy, &["BlockedMediaFolders", "BlockedFolders", "blockedMediaFolders"]);
+    if enable_all.is_none() && enabled.is_none() && blocked.is_none() {
+        return None;
+    }
+    Some(FolderAccessPolicy { enable_all, enabled, blocked: blocked.unwrap_or_default() })
+}
+
+/// 计算可见库集合（规范化 id）：EnableAllFolders=true → 全部；否则 EnabledFolders（若给出）→ 其交集；
+/// 都没给 → 维持当前；最后减去 Blocked。
+pub fn resolve_visible_folders(all: &[String], current: &[String], access: &FolderAccessPolicy) -> Vec<String> {
+    let all: Vec<String> = all.iter().map(|id| normalize_folder_id(id)).collect();
+    let pick = |ids: &[String]| -> Vec<String> {
+        let wanted: Vec<String> = ids.iter().map(|id| normalize_folder_id(id)).collect();
+        all.iter().filter(|id| wanted.contains(id)).cloned().collect()
+    };
+    let base = if access.enable_all == Some(true) {
+        all.clone()
+    } else if let Some(enabled) = &access.enabled {
+        pick(enabled)
+    } else {
+        pick(current)
+    };
+    let blocked: Vec<String> = access.blocked.iter().map(|id| normalize_folder_id(id)).collect();
+    base.into_iter().filter(|id| !blocked.contains(id)).collect()
+}
+
+async fn apply_folder_access(
+    pool: &crate::db::DbPool,
+    user_id: &str,
+    current: &[String],
+    access: &FolderAccessPolicy,
+) -> Result<(), AppError> {
+    let all: Vec<String> = sqlx::query_scalar("select public_id::text from libraries where is_hidden = false")
+        .fetch_all(pool)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load libraries: {err}")))?;
+    let visible = resolve_visible_folders(&all, current, access);
+    sqlx::query(
+        r#"
+        insert into library_permissions (library_id, user_id, can_view, can_download, can_transcode)
+        select l.id, u.id, replace(l.public_id::text, '-', '') = any($2), u.allow_download, true
+        from libraries l
+        cross join users u
+        where u.public_id = $1::uuid and l.is_hidden = false
+        on conflict (library_id, user_id) do update
+            set can_view = excluded.can_view, updated_at = now()
+        "#,
+    )
+    .bind(user_id)
+    .bind(&visible)
+    .execute(pool)
+    .await
+    .map_err(|err| AppError::internal(format!("failed to update folder access: {err}")))?;
+    Ok(())
+}
+
+
+fn policy_optional_i32(policy: &Value, keys: &[&str]) -> Option<Option<i32>> {
+    for key in keys {
+        let Some(value) = policy.get(*key) else {
+            continue;
+        };
+        if value.is_null() {
+            return Some(None);
+        }
+        if let Some(n) = value.as_i64() {
+            return Some(Some(n as i32));
+        }
+        if let Some(n) = value.as_f64() {
+            return Some(Some(n as i32));
+        }
+        return Some(None);
+    }
+    None
+}
+
+fn policy_string_list(policy: &Value, keys: &[&str]) -> Option<Vec<String>> {
+    for key in keys {
+        let Some(value) = policy.get(*key) else {
+            continue;
+        };
+        if value.is_null() {
+            return Some(Vec::new());
+        }
+        let Some(items) = value.as_array() else {
+            return Some(Vec::new());
+        };
+        return Some(
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(|item| item.trim().to_owned())
+                .filter(|item| !item.is_empty())
+                .collect(),
+        );
+    }
+    None
 }
 
 /// Configuration 文档整体落到 user_settings（`emby.user.configuration`）。
@@ -615,6 +811,54 @@ async fn store_user_configuration(
         .map_err(|err| AppError::internal(format!("failed to store user configuration: {err}")))?;
 
     Ok(())
+}
+
+async fn load_user_configuration(
+    users_repository: &UsersRepository,
+    user_id: &str,
+) -> Result<UserConfigurationDto, AppError> {
+    let Some(internal_id) = users_repository
+        .find_internal_id_by_public_id(user_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to resolve user: {err}")))?
+    else {
+        return Err(AppError::not_found("user not found"));
+    };
+
+    let stored = users_repository
+        .find_user_setting(internal_id, USER_CONFIGURATION_SETTING_KEY)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load user configuration: {err}")))?;
+
+    Ok(user_configuration_from_value(stored.as_ref()))
+}
+
+fn user_configuration_from_value(value: Option<&Value>) -> UserConfigurationDto {
+    let Some(value) = value.filter(|value| value.is_object()) else {
+        return UserConfigurationDto::default();
+    };
+
+    match serde_json::from_value::<UserConfigurationDto>(value.clone()) {
+        Ok(configuration) => configuration,
+        Err(_) => UserConfigurationDto::default(),
+    }
+}
+
+async fn user_detail_record_to_dto_with_configuration(
+    users_repository: &UsersRepository,
+    record: UserDetailRecord,
+) -> Result<UserDto, AppError> {
+    let public_id = record.id.clone();
+    let mut dto = user_detail_record_to_dto(record);
+    dto.configuration = load_user_configuration(users_repository, &public_id).await?;
+    // 保存过策略的用户：文件夹/标签字段原样回显（不再由 library_permissions 推导）。
+    if let Some(raw) = access_policy::load(users_repository.pool(), &public_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load access policy: {err}")))?
+    {
+        overlay_access_policy(&mut dto.policy, raw);
+    }
+    Ok(dto)
 }
 
 pub async fn authenticate_by_name(
@@ -722,7 +966,8 @@ async fn user_by_id_for_authenticated(
         return Err(AppError::internal("database is not configured"));
     };
 
-    let Some(record) = UsersRepository::new(database.clone())
+    let repository = UsersRepository::new(database.clone());
+    let Some(record) = repository
         .find_user_by_public_id(requested_user_id)
         .await
         .map_err(|err| AppError::internal(format!("failed to get user: {err}")))?
@@ -730,7 +975,9 @@ async fn user_by_id_for_authenticated(
         return Err(AppError::not_found("user not found"));
     };
 
-    Ok(Json(user_detail_record_to_dto(record)))
+    Ok(Json(
+        user_detail_record_to_dto_with_configuration(&repository, record).await?,
+    ))
 }
 
 fn public_user_record_to_dto(record: PublicUserRecord) -> PublicUserDto {
@@ -755,6 +1002,8 @@ fn user_detail_record_to_dto(record: UserDetailRecord) -> UserDto {
         enable_playback_transcoding: record.enable_playback_transcoding,
         enable_all_folders: record.enable_all_folders,
         enabled_folders: record.enabled_folders,
+        max_parental_rating: record.max_parental_rating,
+        block_unrated_items: record.block_unrated_items,
     })
 }
 
@@ -778,6 +1027,11 @@ fn authentication_result_to_dto(output: LoginOutput) -> AuthenticationResultDto 
             is_active: true,
             // 登录响应时 websocket 尚未建立。
             supports_remote_control: false,
+            last_activity_date: None,
+            remote_end_point: None,
+            server_id: "fbz-api".to_owned(),
+            now_playing_item: None,
+            play_state: None,
         },
         access_token: output.access_token,
         server_id: "fbz-api".to_owned(),
@@ -999,6 +1253,22 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn folder_access_follows_jellyfin_policy_semantics() {
+        let all = vec!["aaaaaaaa-0000-0000-0000-000000000001".to_owned(), "bbbbbbbb-0000-0000-0000-000000000002".to_owned()];
+        let a = "aaaaaaaa000000000000000000000001".to_owned();
+        let b = "bbbbbbbb000000000000000000000002".to_owned();
+        assert!(folder_access_policy(&serde_json::json!({"IsDisabled": false})).is_none());
+        let p = folder_access_policy(&serde_json::json!({"EnableAllFolders": true, "EnabledFolders": []})).unwrap();
+        assert_eq!(resolve_visible_folders(&all, &[], &p), [a.clone(), b.clone()]);
+        let p = folder_access_policy(&serde_json::json!({"EnableAllFolders": false, "EnabledFolders": ["BBBBBBBB-0000-0000-0000-000000000002", "unknown"]})).unwrap();
+        assert_eq!(resolve_visible_folders(&all, &[all[0].clone()], &p), [b.clone()]);
+        let p = folder_access_policy(&serde_json::json!({"BlockedMediaFolders": [all[0].clone()]})).unwrap();
+        assert_eq!(resolve_visible_folders(&all, &all, &p), [b.clone()]);
+        let p = folder_access_policy(&serde_json::json!({"EnableAllFolders": true, "BlockedFolders": [b.clone()]})).unwrap();
+        assert_eq!(resolve_visible_folders(&all, &[], &p), [a]);
+    }
+
     fn json_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
@@ -1047,6 +1317,48 @@ mod tests {
     }
 
     #[test]
+    fn user_configuration_from_value_merges_stored_fields_over_defaults() {
+        let configuration = user_configuration_from_value(Some(&json!({
+            "SubtitleLanguagePreference": "zh-CN",
+            "AudioLanguagePreference": "zh",
+            "SubtitleMode": "Always",
+            "OrderedViews": ["lib-a", "lib-b"],
+            "HidePlayedInLatest": true,
+            "PlayDefaultAudioTrack": false
+        })));
+
+        assert_eq!(
+            configuration.subtitle_language_preference.as_deref(),
+            Some("zh-CN")
+        );
+        assert_eq!(configuration.audio_language_preference.as_deref(), Some("zh"));
+        assert_eq!(configuration.subtitle_mode, "Always");
+        assert_eq!(configuration.ordered_views, ["lib-a", "lib-b"]);
+        assert!(configuration.hide_played_in_latest);
+        assert!(!configuration.play_default_audio_track);
+        assert!(configuration.remember_audio_selections);
+        assert!(configuration.enable_next_episode_auto_play);
+    }
+
+    #[test]
+    fn user_configuration_from_value_defaults_when_missing_or_invalid() {
+        assert_eq!(
+            user_configuration_from_value(None),
+            UserConfigurationDto::default()
+        );
+        assert_eq!(
+            user_configuration_from_value(Some(&json!("not-an-object"))),
+            UserConfigurationDto::default()
+        );
+        let camel = user_configuration_from_value(Some(&json!({
+            "subtitleLanguagePreference": "en",
+            "orderedViews": ["home"]
+        })));
+        assert_eq!(camel.subtitle_language_preference.as_deref(), Some("en"));
+        assert_eq!(camel.ordered_views, ["home"]);
+    }
+
+    #[test]
     fn user_detail_mapping_exposes_policy_boundary() {
         let dto = user_detail_record_to_dto(UserDetailRecord {
             id: "user-1".to_owned(),
@@ -1061,6 +1373,8 @@ mod tests {
             enable_playback_transcoding: false,
             enable_all_folders: false,
             enabled_folders: vec!["library-1".to_owned()],
+            max_parental_rating: None,
+            block_unrated_items: Vec::new(),
         });
 
         assert_eq!(dto.id, "user-1");
@@ -1414,6 +1728,37 @@ mod tests {
         assert_eq!(dto.new_pw.as_deref(), Some("new-secret"));
     }
 
+
+    #[test]
+    fn policy_helpers_read_parental_fields_in_client_casings() {
+        let policy = json!({
+            "maxParentalRating": 5,
+            "BlockUnratedItems": ["Movie", "Series"]
+        });
+        assert_eq!(
+            policy_optional_i32(
+                &policy,
+                &["MaxParentalRating", "maxParentalRating", "max_parental_rating"]
+            ),
+            Some(Some(5))
+        );
+        assert_eq!(
+            policy_string_list(
+                &policy,
+                &["BlockUnratedItems", "blockUnratedItems", "block_unrated_items"]
+            ),
+            Some(vec!["Movie".to_owned(), "Series".to_owned()])
+        );
+        assert_eq!(
+            policy_optional_i32(&json!({"MaxParentalRating": null}), &["MaxParentalRating"]),
+            Some(None)
+        );
+        assert_eq!(
+            policy_optional_i32(&json!({}), &["MaxParentalRating"]),
+            None
+        );
+    }
+
     fn user_detail_record(id: &str, name: &str) -> UserDetailRecord {
         UserDetailRecord {
             id: id.to_owned(),
@@ -1428,6 +1773,8 @@ mod tests {
             enable_playback_transcoding: true,
             enable_all_folders: true,
             enabled_folders: Vec::new(),
+            max_parental_rating: None,
+            block_unrated_items: Vec::new(),
         }
     }
 }

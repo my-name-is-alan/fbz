@@ -14,6 +14,8 @@ function kindFromBackendKind(kind: string): MediaKind {
       return "series";
     case "music":
       return "music";
+    case "books":
+      return "book";
     case "movie":
     case "mixed":
     default:
@@ -28,6 +30,8 @@ function kindFromLibraryType(libraryType: string): MediaKind {
       return "series";
     case "music":
       return "music";
+    case "books":
+      return "book";
     case "movies":
     case "homevideos":
     case "mixed":

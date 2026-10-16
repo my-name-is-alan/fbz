@@ -1,3 +1,15 @@
+//! Live TV **Emby 兼容空桩**（非目标 / 非明早必验）。
+//!
+//! 客户端探测路由一律受控响应，**禁止 500**：
+//! - 列表类 → 空 `QueryResult`（`Items=[]`, `TotalRecordCount=0`）
+//! - Info / GuideInfo → `IsEnabled=false`
+//! - Folder → 固定 CollectionFolder 形状
+//! - 单条 GET → 404（空 body）
+//! - 写/删/配置 mutation → 409 Conflict（明确 stub 文案）
+//!
+//! **不**实现真 tuner / IPTV 源 / 录制流水线。见
+//! `docs/ACCEPTANCE_2026-10-16.md` 附录 C、`docs/JELLYFIN_PARITY_MATRIX.md`。
+
 use axum::{
     Json,
     extract::{Path, Query},
@@ -98,14 +110,17 @@ pub struct SeriesTimerInfoDto {
     pub keep_until: String,
 }
 
+/// `GET …/LiveTv/Info|GuideInfo` — disabled stub（200，非 500）。
 pub async fn live_tv_info() -> Json<LiveTvInfoDto> {
     Json(LiveTvInfoDto::disabled())
 }
 
+/// `GET …/LiveTv/Folder` — 固定空库文件夹形状（200）。
 pub async fn live_tv_folder() -> Json<BaseItemDto> {
     Json(disabled_live_tv_folder())
 }
 
+/// 列表类 Live TV 探测 — 空列表（200）；忽略多余 query 字段。
 pub async fn empty_query(Query(query): Query<LiveTvListQuery>) -> Json<QueryResultDto<Value>> {
     let start_index = query
         .start_index
@@ -115,18 +130,22 @@ pub async fn empty_query(Query(query): Query<LiveTvListQuery>) -> Json<QueryResu
     Json(QueryResultDto::new(Vec::new(), 0, start_index))
 }
 
+/// `GET …/ListingProviders/Default` — Type=None 空配置（200）。
 pub async fn listing_provider_default() -> Json<ListingsProviderInfoDto> {
     Json(default_listing_provider())
 }
 
+/// `GET …/Timers/Defaults` — 未启用录制的默认 Timer 形状（200）。
 pub async fn timer_defaults(Query(query): Query<TimerDefaultsQuery>) -> Json<SeriesTimerInfoDto> {
     Json(default_timer_info(query.program_id))
 }
 
+/// 单条 Channel/Program/Recording/Timer GET — 明确 404（非 500）。
 pub async fn empty_item(Path(_id): Path<String>) -> Response {
     (StatusCode::NOT_FOUND, "").into_response()
 }
 
+/// Live TV 写/删/配置 — 明确 409 Conflict stub（非 500 / 非真 tuner）。
 pub async fn mutation_not_configured() -> Result<Response, AppError> {
     Err(AppError::conflict(
         "Emby Live TV mutations are disabled; configure Live TV sources through FBZ APIs",
@@ -312,5 +331,47 @@ mod tests {
 
         assert_eq!(err.status_code(), StatusCode::CONFLICT);
         assert_eq!(err.code(), "conflict");
+        assert_ne!(err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn live_tv_info_and_folder_handlers_are_ok_not_500() {
+        let Json(info) = live_tv_info().await;
+        assert!(!info.is_enabled);
+        assert!(info.enabled_users.is_empty());
+
+        let Json(folder) = live_tv_folder().await;
+        assert_eq!(folder.id, "livetv");
+        assert_eq!(folder.collection_type.as_deref(), Some("livetv"));
+    }
+
+    #[tokio::test]
+    async fn empty_item_is_not_found_not_server_error() {
+        let response = empty_item(Path("channel-1".to_owned())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn listing_provider_and_timer_defaults_handlers_are_ok() {
+        let Json(provider) = listing_provider_default().await;
+        assert_eq!(provider.provider_type, "None");
+        assert!(!provider.enable_all_tuners);
+
+        let Json(timer) = timer_defaults(Query(TimerDefaultsQuery {
+            program_id: Some("p1".to_owned()),
+        }))
+        .await;
+        assert_eq!(timer.program_id.as_deref(), Some("p1"));
+        assert!(!timer.record_any_time);
+    }
+
+    #[test]
+    fn stub_contract_documents_no_real_tuner() {
+        // Contract for morning matrix: Live TV is non-target; responses are
+        // empty / 404 / 409 stubs — never an unimplemented panic/500 path.
+        assert!(MAX_LIVE_TV_EMPTY_LIMIT > 0);
+        assert_eq!(default_listing_provider().provider_type, "None");
+        assert!(!LiveTvInfoDto::disabled().is_enabled);
     }
 }

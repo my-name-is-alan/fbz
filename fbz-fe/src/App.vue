@@ -8,8 +8,9 @@ const auth = useAuthStore();
 const library = useLibraryStore();
 watch(
   () => auth.isAuthenticated,
-  () => {
+  (authenticated) => {
     void library.refresh();
+    if (authenticated) void auth.syncPreferencesFromServer();
   },
   { immediate: true },
 );

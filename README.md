@@ -32,12 +32,12 @@ FBZ 是一个自托管媒体服务器项目，目标是提供 Emby 兼容后端�
 
 ```text
 fbz/
-├─ fbz-api/   # Rust 后端
+├─ fbz-api/   # Rust 后端（含 plugins/guangya-storage）
 ├─ fbz-fe/    # Vue 前端
-├─ docs/      # 架构与计划文档
-├─ demo/      # 早期 demo
-└─ canvas/    # 设计探索资产
+└─ docs/      # 架构与计划文档
 ```
+
+仓库根另有 `demo/`、`canvas/`、`chatcontinue/`，均为**非产品**归档/探索目录（见各目录 README），不参与产品构建与部署。
 
 ### 后端
 

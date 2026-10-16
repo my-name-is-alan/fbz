@@ -16,6 +16,7 @@ pub struct AppState {
     database: Option<DbPool>,
     redis: Option<RedisConnection>,
     session_hub: Arc<SessionMessageHub>,
+    syncplay: Arc<crate::syncplay::SyncPlayRegistry>,
     /// 管理端优雅退出触发器（Emby `System/Restart` / `System/Shutdown` 桥接）；
     /// 发送后 axum 优雅停机、workers 收尾，进程退出交给部署侧监管策略。
     shutdown_trigger: Option<tokio::sync::broadcast::Sender<()>>,
@@ -699,6 +700,7 @@ impl AppState {
             database: Some(database),
             redis: Some(redis),
             session_hub: Arc::new(SessionMessageHub::default()),
+            syncplay: Arc::new(crate::syncplay::SyncPlayRegistry::default()),
             shutdown_trigger: None,
         }
     }
@@ -719,6 +721,11 @@ impl AppState {
     /// 进程内会话实时通道（Emby websocket 远程控制指令分发）。
     pub fn session_hub(&self) -> &SessionMessageHub {
         &self.session_hub
+    }
+
+    /// 进程内 SyncPlay 组注册表。
+    pub fn syncplay(&self) -> &crate::syncplay::SyncPlayRegistry {
+        &self.syncplay
     }
 
     pub fn config(&self) -> &Config {
@@ -847,6 +854,7 @@ fn annotate_queue_responsibilities(snapshot: &mut QueueReadinessSnapshot, config
 
     snapshot.jobs.drained_by_node = worker_role
         && (config.scan_worker.enabled
+            || config.library_monitor.enabled
             || config.metadata_worker.enabled
             || config.probe_worker.enabled);
     snapshot.transcodes.drained_by_node = worker_role && config.transcode_worker.enabled;
@@ -938,6 +946,12 @@ fn worker_summaries(config: &Config) -> Vec<WorkerReadinessSnapshot> {
             interval_seconds: config.scan_worker.interval_seconds,
         },
         WorkerReadinessSnapshot {
+            name: "library_monitor",
+            enabled: config.library_monitor.enabled,
+            should_run: config.library_monitor.enabled && worker_role,
+            interval_seconds: config.library_monitor.interval_seconds,
+        },
+        WorkerReadinessSnapshot {
             name: "scheduler",
             enabled: config.scheduler.enabled,
             should_run: config.scheduler.enabled && scheduler_role,
@@ -990,6 +1004,7 @@ impl AppState {
             database: None,
             redis: None,
             session_hub: Arc::new(SessionMessageHub::default()),
+            syncplay: Arc::new(crate::syncplay::SyncPlayRegistry::default()),
             shutdown_trigger: None,
         }
     }

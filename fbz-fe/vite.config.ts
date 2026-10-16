@@ -16,6 +16,7 @@ const EMBY_COMPAT_PROXY_PREFIXES = [
   "/emby",
   "/Albums",
   "/Artists",
+  "/Books",
   "/Audio",
   "/Collections",
   "/DisplayPreferences",
@@ -26,13 +27,16 @@ const EMBY_COMPAT_PROXY_PREFIXES = [
   "/Library",
   "/MusicGenres",
   "/Persons",
+  "/Playlists",
   "/Search",
   "/Sessions",
   "/Shows",
+  "/SyncPlay",
   "/System",
   "/UserData",
   "/Users",
   "/Videos",
+  "/embywebsocket",
 ] as const;
 
 export default defineConfig(({ mode }) => {
@@ -93,6 +97,8 @@ export default defineConfig(({ mode }) => {
           {
             target: devApiTarget,
             changeOrigin: true,
+            // SyncPlay / 远程控制走 /embywebsocket。
+            ws: prefix === "/embywebsocket",
           },
         ]),
       ),
@@ -114,6 +120,8 @@ export default defineConfig(({ mode }) => {
     test: {
       include: ["src/**/*.{test,spec}.{js,ts,jsx,tsx}"],
       exclude: ["**/node_modules/**", "**/dist/**", "**/dist-ssr/**", "**/.tmp/**"],
+      // Node ≥25 自带 webstorage 全局（无 --localstorage-file 时为 undefined），会遮蔽 jsdom 的 localStorage。
+      execArgv: ["--no-experimental-webstorage"],
     },
     fmt: {
       ignorePatterns: [

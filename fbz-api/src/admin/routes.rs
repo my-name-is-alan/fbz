@@ -17,7 +17,8 @@ use crate::{
             AdminUserRecord, CreateAdminUserInput, CreateLibraryInput, DeleteAdminUserOutcome,
             EventStreamMirrorStatusRecord, LibraryListFilter, LibraryMetadataRefreshQueueRecord,
             LibraryPathRecord, LibraryPathSelector, LibraryPhotoListFilter, LibraryPhotoRecord,
-            LibrarySettingsRecord, ManagedLibraryRecord, MetadataRefreshJobRecord,
+            LibrarySettingsRecord, ManagedLibraryRecord, MarkerDetectJobRecord,
+            MetadataRefreshJobRecord,
             NotificationDeliveryAttemptFilter, NotificationDeliveryAttemptRecord,
             NotificationRequestFilter, NotificationRequestRecord, NotificationRetryError,
             NotificationTargetFilter, NotificationTargetRecord, PluginDispatchFilter,
@@ -124,8 +125,21 @@ pub fn router() -> Router<AppState> {
             post(queue_library_metadata_refresh),
         )
         .route(
+            "/api/admin/libraries/{library_id}/metadata/sources",
+            get(crate::library::metadata_sources_routes::get_library_metadata_sources)
+                .put(crate::library::metadata_sources_routes::replace_library_metadata_sources),
+        )
+        .route(
             "/api/admin/media-items/{item_id}/metadata/refresh",
             post(queue_item_metadata_refresh),
+        )
+        .route(
+            "/api/admin/media-items/{item_id}/marker-detect",
+            post(queue_item_marker_detect),
+        )
+        .route(
+            "/api/admin/media-items/{item_id}/markers",
+            get(list_item_markers),
         )
         .route(
             "/api/admin/metadata/providers",
@@ -400,6 +414,7 @@ pub struct LibrarySettingsDto {
     pub name: String,
     pub library_type: String,
     pub is_hidden: bool,
+    pub enable_realtime_monitor: bool,
     pub preferred_metadata_language: Option<String>,
     pub preferred_metadata_country: Option<String>,
     pub preferred_image_language: Option<String>,
@@ -475,6 +490,8 @@ impl From<LibraryPhotoRecord> for LibraryPhotoDto {
 pub struct UpdateLibrarySettingsRequestDto {
     #[serde(default)]
     pub is_hidden: bool,
+    #[serde(default)]
+    pub enable_realtime_monitor: bool,
     pub preferred_metadata_language: Option<String>,
     pub preferred_metadata_country: Option<String>,
     pub preferred_image_language: Option<String>,
@@ -499,6 +516,42 @@ pub struct ScanJobDto {
     pub status: String,
     pub queue_name: String,
     pub job_type: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueMarkerDetectRequestDto {
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkerDetectJobDto {
+    pub id: String,
+    pub status: String,
+    pub queue_name: String,
+    pub job_type: String,
+    pub item_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaMarkerDto {
+    pub marker_type: String,
+    pub start_ticks: i64,
+    pub end_ticks: Option<i64>,
+    pub source: String,
+    pub confidence: Option<f64>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaMarkersResponseDto {
+    pub item_id: String,
+    pub markers: Vec<MediaMarkerDto>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1361,6 +1414,7 @@ pub async fn update_library_settings(
         .update_library_settings(UpdateLibrarySettingsInput {
             library_id,
             is_hidden: payload.is_hidden,
+            enable_realtime_monitor: payload.enable_realtime_monitor,
             preferred_metadata_language: normalize_optional_text(
                 payload.preferred_metadata_language,
             ),
@@ -1529,6 +1583,65 @@ pub async fn queue_scan(
     };
 
     Ok((StatusCode::ACCEPTED, Json(ScanJobDto::from(job))))
+}
+
+
+pub async fn queue_item_marker_detect(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    Json(payload): Json<QueueMarkerDetectRequestDto>,
+) -> Result<(StatusCode, Json<MarkerDetectJobDto>), AppError> {
+    let admin = authenticate_admin(&state, &headers, &uri).await?;
+    let item_id = validate_public_id("itemId", &item_id)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let Some(job) = AdminRepository::new(database.clone())
+        .queue_marker_detect_for_item(item_id, admin.id, payload.reason, payload.force)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to queue marker detect: {err}")))?
+    else {
+        return Err(AppError::not_found("media item not found"));
+    };
+
+    Ok((StatusCode::ACCEPTED, Json(MarkerDetectJobDto::from(job))))
+}
+
+pub async fn list_item_markers(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<MediaMarkersResponseDto>, AppError> {
+    let _admin = authenticate_admin(&state, &headers, &uri).await?;
+    let item_id = validate_public_id("itemId", &item_id)?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let Some(markers) = AdminRepository::new(database.clone())
+        .list_media_item_markers(item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list markers: {err}")))?
+    else {
+        return Err(AppError::not_found("media item not found"));
+    };
+
+    Ok(Json(MediaMarkersResponseDto {
+        item_id: item_id.to_owned(),
+        markers: markers
+            .into_iter()
+            .map(|marker| MediaMarkerDto {
+                marker_type: marker.marker_type,
+                start_ticks: marker.start_ticks,
+                end_ticks: marker.end_ticks,
+                source: marker.source,
+                confidence: marker.confidence,
+                created_at: marker.created_at,
+            })
+            .collect(),
+    }))
 }
 
 pub async fn queue_item_metadata_refresh(
@@ -1865,7 +1978,7 @@ fn metadata_settings_error(err: MetadataSettingsError) -> AppError {
 ///      根目录之内 —— 先各自解析真实路径再前缀匹配，可挡住 `..` 越界与符号链接逃逸；
 ///   3. `MEDIA_ROOTS` 为空时拒绝所有路径（安全优先，宁可拒绝也不放行未受控路径）。
 /// 返回 canonicalize 后的真实路径字符串，交给仓储层落库（去重/normalize 仍由仓储负责）。
-fn validate_media_library_path(config: &Config, raw_path: &str) -> Result<String, AppError> {
+pub(crate) fn validate_media_library_path(config: &Config, raw_path: &str) -> Result<String, AppError> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
         return Err(AppError::unprocessable("路径不能为空"));
@@ -3842,6 +3955,7 @@ impl From<LibrarySettingsRecord> for LibrarySettingsDto {
             name: record.name,
             library_type: record.library_type,
             is_hidden: record.is_hidden,
+            enable_realtime_monitor: record.enable_realtime_monitor,
             preferred_metadata_language: record.preferred_metadata_language,
             preferred_metadata_country: record.preferred_metadata_country,
             preferred_image_language: record.preferred_image_language,
@@ -3869,6 +3983,18 @@ impl From<ScanJobRecord> for ScanJobDto {
             status: record.status,
             queue_name: record.queue_name,
             job_type: record.job_type,
+        }
+    }
+}
+
+impl From<MarkerDetectJobRecord> for MarkerDetectJobDto {
+    fn from(value: MarkerDetectJobRecord) -> Self {
+        Self {
+            id: value.id,
+            status: value.status,
+            queue_name: value.queue_name,
+            job_type: value.job_type,
+            item_id: value.item_id,
         }
     }
 }
@@ -4052,6 +4178,8 @@ impl From<UserPolicyInput> for UpdateUserPolicyInput {
             allow_download: input.allow_download,
             allow_transcode: input.allow_transcode,
             allow_new_device_login: input.allow_new_device_login,
+            max_parental_rating: None,
+            block_unrated_items: Vec::new(),
         }
     }
 }
@@ -4784,7 +4912,8 @@ mod tests {
         assert!(validate_library_type("mixed").is_ok());
         assert!(validate_library_type("livetv").is_ok());
         assert!(validate_library_type("tv").is_err());
-        assert!(validate_library_type("books").is_err());
+        assert!(validate_library_type("books").is_ok());
+        assert!(validate_library_type("comics").is_err());
     }
 
     #[test]
@@ -4828,6 +4957,24 @@ mod tests {
         assert!(routes.contains("list_plugin_host_api_calls_for_run_page"));
         assert!(routes.contains("plugin_host_api_call_limit(query.limit)"));
         assert!(routes.contains("pagination_headers(page.has_more, page.next_cursor.as_deref())"));
+    }
+
+    #[test]
+    fn library_metadata_sources_admin_routes_are_registered() {
+        let routes = include_str!("routes.rs");
+        // §6.4 / §10 P0-D2：库级源链配置面（NFO 槽 + Provider 引用），不接 UI / 非 Emby。
+        assert!(routes.contains(r#""/api/admin/libraries/{library_id}/metadata/sources""#));
+        assert!(routes.contains("get_library_metadata_sources"));
+        assert!(routes.contains("replace_library_metadata_sources"));
+    }
+
+    #[test]
+    fn marker_detect_admin_routes_are_registered() {
+        let routes = include_str!("routes.rs");
+        assert!(routes.contains(r#""/api/admin/media-items/{item_id}/marker-detect""#));
+        assert!(routes.contains("post(queue_item_marker_detect)"));
+        assert!(routes.contains(r#""/api/admin/media-items/{item_id}/markers""#));
+        assert!(routes.contains("get(list_item_markers)"));
     }
 
     #[test]
@@ -5000,7 +5147,7 @@ mod tests {
         let library_type = normalize_library_type(" Movies ");
         assert_eq!(library_type, "movies");
         assert!(validate_library_type(&library_type).is_ok());
-        assert!(validate_library_type(&normalize_library_type("books")).is_err());
+        assert!(validate_library_type(&normalize_library_type(" Books ")).is_ok());
     }
 
     #[test]

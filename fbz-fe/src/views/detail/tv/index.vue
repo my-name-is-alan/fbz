@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { DetailViewModel, EpisodeSummary } from "@/service/modules/detail.ts";
 import { fetchEpisodes, fetchPlaybackSource, loadTvDetail } from "@/service/modules/detail.ts";
+import { searchRemoteSubtitles } from "@/service/modules/metadata.ts";
 import { setFavorite } from "@/service/modules/userData.ts";
 import { useAuthStore } from "@/stores/auth.ts";
 import type { PlaybackEpisode } from "@/stores/playback.ts";
@@ -77,6 +78,26 @@ async function toggleFavorite() {
   }
 }
 
+const searchingSubs = shallowRef(false);
+
+async function searchExternalSubtitles() {
+  const series = detail.value;
+  if (!series || searchingSubs.value) return;
+  searchingSubs.value = true;
+  try {
+    const results = await searchRemoteSubtitles(series.id, "chi");
+    if (!results.length) {
+      uiStore.showToast("暂无可用的外挂字幕源（服务端未配置字幕 provider）。", "info");
+      return;
+    }
+    uiStore.showToast(`找到 ${results.length} 条外挂字幕候选。`, "success");
+  } catch {
+    uiStore.showToast("搜索外挂字幕失败，请稍后重试。", "error");
+  } finally {
+    searchingSubs.value = false;
+  }
+}
+
 /** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
 function editMetadata() {
   const tv = detail.value;
@@ -138,11 +159,13 @@ async function playEpisode({ episode, episodes }: EpisodePlayPayload) {
     poster: episode.poster ?? tv.poster,
     backdrop: tv.backdrop,
     tags: tv.versions[0]?.tags,
-    duration: episode.runtimeSeconds,
-    startPositionSeconds,
+    duration: source?.duration ?? episode.runtimeSeconds,
+    startPositionSeconds: startPositionSeconds ?? 0,
     playlist,
     source: source ?? undefined,
     server: source?.server,
+    mediaSources: source?.mediaSources,
+    chapters: source?.chapters,
   });
 }
 </script>
@@ -175,7 +198,12 @@ async function playEpisode({ episode, episodes }: EpisodePlayPayload) {
             <dd>{{ detail.originalTitle }}</dd>
           </div>
         </dl>
-        <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
+        <div class="hero-extra-actions">
+          <button type="button" class="edit-meta-btn" @click="searchExternalSubtitles">
+            {{ searchingSubs ? "搜索字幕中…" : "外挂字幕" }}
+          </button>
+          <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
+        </div>
       </template>
     </DetailHero>
 
@@ -227,6 +255,13 @@ async function playEpisode({ episode, episodes }: EpisodePlayPayload) {
   &:hover {
     text-decoration: underline;
   }
+}
+
+.hero-extra-actions {
+  margin-top: var(--fbz-space-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fbz-space-2);
 }
 
 .edit-meta-btn {

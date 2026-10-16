@@ -23,11 +23,15 @@ const SUPPORTED_PERMISSIONS: &[&str] = &[
     "library.read",
     "library.write",
     "media.read",
+    "media.analyze",
     "metadata.read",
     "metadata.write",
     "notification.send",
     "playback.read",
     "scheduler.register",
+    "storage.account",
+    "storage.read",
+    "storage.resolve",
     "webhook.emit",
 ];
 
@@ -41,6 +45,9 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[
     "metadata.refresh.completed",
     "metadata.refresh.failed",
     "metadata.provider.query",
+    "media.marker.detect",
+    "subtitle.provider.query",
+    "lyrics.provider.query",
     "playback.started",
     "playback.stopped",
     "scheduler.tick",
@@ -813,6 +820,133 @@ mod tests {
     }
 
     #[test]
+    fn first_party_guangya_storage_manifest_is_valid() {
+        let manifest: PluginManifest =
+            serde_json::from_str(include_str!("../../plugins/guangya-storage/manifest.json"))
+                .unwrap();
+
+        let validated = manifest.validate().unwrap();
+
+        assert_eq!(validated.manifest.id, "dev.fbz.storage.guangya");
+        assert_eq!(validated.manifest.runtime, "http");
+        assert_eq!(validated.manifest.entrypoint, "http://127.0.0.1:8098/rpc");
+        assert!(
+            validated
+                .manifest
+                .permissions
+                .iter()
+                .any(|permission| permission.key == "storage.account")
+        );
+        assert!(
+            validated
+                .manifest
+                .permissions
+                .iter()
+                .any(|permission| permission.key == "storage.read")
+        );
+        assert!(
+            validated
+                .manifest
+                .permissions
+                .iter()
+                .any(|permission| permission.key == "storage.resolve")
+        );
+        // Secrets stay out of the installable package identity.
+        let raw = include_str!("../../plugins/guangya-storage/manifest.json");
+        assert!(!raw.contains("FBZ_STORAGE_PLUGIN_KEY"));
+        assert!(!raw.contains("FBZ_SECRET_KEY"));
+        assert!(!raw.to_lowercase().contains("client_secret"));
+    }
+
+    #[test]
+    fn first_party_official_metadata_provider_manifests_are_valid() {
+        // 对照光鸭：官方 provider 包须能被现有 manifest 校验 / 安装管线接受。
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                include_str!("../../plugins/tmdb-provider/manifest.json"),
+                "fbz.provider.tmdb",
+                "http://127.0.0.1:19101/fbz-plugin",
+            ),
+            (
+                include_str!("../../plugins/tvdb-provider/manifest.json"),
+                "fbz.provider.tvdb",
+                "http://127.0.0.1:19102/fbz-plugin",
+            ),
+            (
+                include_str!("../../plugins/fanart-provider/manifest.json"),
+                "fbz.provider.fanart",
+                "http://127.0.0.1:19103/fbz-plugin",
+            ),
+            (
+                include_str!("../../plugins/imdb-provider/manifest.json"),
+                "fbz.provider.imdb",
+                "http://127.0.0.1:19104/fbz-plugin",
+            ),
+            (
+                include_str!("../../plugins/douban-provider/manifest.json"),
+                "fbz.provider.douban",
+                "http://127.0.0.1:19105/fbz-plugin",
+            ),
+        ];
+
+        for (raw, expect_id, expect_entrypoint) in cases {
+            let manifest: PluginManifest = serde_json::from_str(raw).unwrap();
+            let validated = manifest.validate().unwrap();
+            assert_eq!(validated.manifest.id, *expect_id);
+            assert_eq!(validated.manifest.runtime, "http");
+            assert_eq!(validated.manifest.entrypoint, *expect_entrypoint);
+            assert!(
+                validated
+                    .manifest
+                    .hooks
+                    .iter()
+                    .any(|hook| hook.event == "metadata.provider.query"),
+                "{expect_id} must subscribe metadata.provider.query"
+            );
+            assert!(
+                validated
+                    .manifest
+                    .permissions
+                    .iter()
+                    .any(|permission| permission.key == "metadata.read"),
+                "{expect_id} must declare metadata.read"
+            );
+            // Secrets stay out of the installable package identity.
+            assert!(!raw.to_lowercase().contains("access_token_value"));
+            assert!(!raw.contains("TMDB_ACCESS_TOKEN"));
+            assert!(!raw.contains("TVDB_API_KEY"));
+            assert!(!raw.contains("FANART_API_KEY"));
+        }
+    }
+
+    #[test]
+    fn first_party_marker_detect_manifest_is_valid() {
+        let raw = include_str!("../../plugins/marker-detect/manifest.json");
+        let manifest: PluginManifest = serde_json::from_str(raw).unwrap();
+        let validated = manifest.validate().unwrap();
+        assert_eq!(validated.manifest.id, "fbz.marker.detect");
+        assert_eq!(validated.manifest.runtime, "http");
+        assert!(
+            validated
+                .manifest
+                .hooks
+                .iter()
+                .any(|hook| hook.event == "media.marker.detect"),
+            "marker detect must subscribe media.marker.detect"
+        );
+        assert!(
+            validated
+                .manifest
+                .permissions
+                .iter()
+                .any(|permission| permission.key == "media.analyze"),
+            "marker detect must declare media.analyze"
+        );
+        assert!(!raw.contains("FBZ_SECRET_KEY"));
+    }
+
+
+    #[test]
     fn first_party_wasi_scan_logger_manifest_is_valid() {
         let manifest: PluginManifest = serde_json::from_str(include_str!(
             "../../examples/plugins/wasi-scan-logger-template/manifest.json"
@@ -1340,6 +1474,23 @@ mod tests {
     }
 
     #[test]
+    fn opensubtitles_provider_manifest_is_valid() {
+        let manifest: PluginManifest = serde_json::from_str(include_str!("../../plugins/opensubtitles-provider/manifest.json")).unwrap();
+        let validated = manifest.validate().unwrap();
+        assert_eq!(validated.manifest.id, "fbz.subtitle.opensubtitles");
+        assert_eq!(validated.manifest.entrypoint, "http://127.0.0.1:19107/fbz-plugin");
+        assert!(validated.manifest.hooks.iter().any(|hook| hook.event == "subtitle.provider.query"));
+        assert!(validated.manifest.config_schema.iter().all(|field| !field.required));
+    }
+
+    #[test]
+    fn media_marker_detect_hook_event_is_supported() {
+        assert!(supported_plugin_hook_events().contains(&"media.marker.detect"));
+        assert!(supported_plugin_hook_events().contains(&"subtitle.provider.query"));
+        assert!(supported_plugin_permissions().contains(&"media.analyze"));
+    }
+
+    #[test]
     fn library_scan_hook_events_are_supported() {
         let manifest: PluginManifest = serde_json::from_value(json!({
             "id": "dev.fbz.scan",
@@ -1416,7 +1567,7 @@ mod tests {
     fn hook_event_database_constraint_tracks_supported_events() {
         // Migration 0078 re-defines the allow-list constraint with the current
         // full event set (0019 was the original; later migrations extend it).
-        let migration = include_str!("../../migrations/0078_metadata_provider_query_hook.sql");
+        let migration = include_str!("../../migrations/0109_metadata_locks_nfo_lyrics.sql");
 
         assert!(migration.contains("plugin_hooks_event_key_allowed"));
         for event in supported_plugin_hook_events() {
@@ -1508,6 +1659,22 @@ mod tests {
             .execute(&pool)
             .await
             .expect("cleanup smoke plugin package");
+    }
+
+
+    #[test]
+    fn permission_database_constraint_tracks_supported_permissions() {
+        let migration = include_str!("../../migrations/0103_plugin_permission_media_analyze.sql");
+
+        assert!(migration.contains("plugin_permissions_permission_key_allowed"));
+        assert!(migration.contains("'media.analyze'"));
+        for permission in supported_plugin_permissions() {
+            let quoted = format!("'{permission}'");
+            assert!(
+                migration.contains(&quoted),
+                "migration is missing permission {permission}"
+            );
+        }
     }
 
     #[test]

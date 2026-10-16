@@ -1,0 +1,37 @@
+{
+  "id": "fbz.provider.douban",
+  "name": "Douban Provider",
+  "version": "0.2.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19105/fbz-plugin",
+  "description": "Official Douban provider (minimal). subject_suggest + optional v2/rexxar detail; anti-crawl may yield null. Secrets in plugin config/env only — never in this manifest or core.",
+  "permissions": [
+    {
+      "key": "metadata.read",
+      "reason": "Receive metadata.provider.query lookups with recognition-layer context; contribute whitelist fields via sync response."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "metadata.provider.query",
+      "handler": "providers.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "api_key",
+      "label": "Douban v2 apikey",
+      "type": "secret",
+      "required": false,
+      "helpText": "Optional Douban API v2 apikey for subject detail. Search works without it."
+    },
+    {
+      "key": "language",
+      "label": "Preferred language",
+      "type": "string",
+      "required": false,
+      "helpText": "Default zh-CN"
+    }
+  ]
+}

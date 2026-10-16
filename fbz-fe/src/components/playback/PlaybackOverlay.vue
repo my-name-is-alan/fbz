@@ -25,6 +25,7 @@ useBodyScrollLock(isOpen);
         @select-episode="playback.selectEpisode"
         @previous-episode="playback.playPreviousEpisode"
         @next-episode="playback.playNextEpisode"
+        @switch-media-source="(id, seconds) => playback.switchMediaSource(id, seconds)"
       />
     </Transition>
   </Teleport>

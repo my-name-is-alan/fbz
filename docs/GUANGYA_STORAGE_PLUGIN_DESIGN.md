@@ -1,6 +1,6 @@
 # 光鸭云盘媒体源插件设计
 
-2026-10-04。状态：首版实现已落地（2026-10-04）。下文保留目标设计；当前实现与限制以文末记录及 fbz-api/plugins/guangya-storage/README.md 为准。
+2026-10-04。状态：首版实现已落地（2026-10-04）。P0：`plugins/guangya-storage/manifest.json` 已补正式可装包身份；RPC 仍为 `FBZ_GUANGYA_PLUGIN_URL`，密钥不进清单。下文保留目标设计；当前实现与限制以文末记录及 fbz-api/plugins/guangya-storage/README.md 为准。
 
 ## 目标与选择
 

@@ -84,8 +84,8 @@ const audioOptions = [
   { label: "原声优先 (Original Soundtrack)", value: "original" },
 ];
 
-function handleSaveProfile() {
-  const success = authStore.updateProfile({
+async function handleSaveProfile() {
+  const success = await authStore.updateProfile({
     nickname: formNickname.value,
     username: formUsername.value,
     email: formEmail.value,

@@ -1,0 +1,37 @@
+{
+  "id": "fbz.provider.books",
+  "name": "Book Metadata Provider (Open Library / Google Books)",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19108/fbz-plugin",
+  "description": "Official book metadata provider. Subscribes to metadata.provider.query and answers only lookups with itemType=book: Open Library (keyless) by ISBN or title/author, Google Books as fallback/enrichment (API key optional). Returns title, overview, year, authors (writer), ISBN/Open Library/Google Books ids and cover URL.",
+  "permissions": [
+    {
+      "key": "metadata.read",
+      "reason": "Receive book lookups (title, authors, ISBN, year, language) and contribute whitelist metadata fields via the sync response."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "metadata.provider.query",
+      "handler": "providers.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "google_books_api_key",
+      "label": "Google Books API key",
+      "type": "secret",
+      "required": false,
+      "helpText": "Optional. Without a key Google Books is still queried anonymously (lower quota)."
+    },
+    {
+      "key": "sources",
+      "label": "Sources",
+      "type": "string",
+      "required": false,
+      "helpText": "Comma list, order = priority. Default 'openlibrary,googlebooks'."
+    }
+  ]
+}

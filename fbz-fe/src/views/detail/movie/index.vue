@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { DetailViewModel } from "@/service/modules/detail.ts";
 import { fetchPlaybackSource, loadMovieDetail } from "@/service/modules/detail.ts";
+import { searchRemoteSubtitles } from "@/service/modules/metadata.ts";
 import { setFavorite } from "@/service/modules/userData.ts";
 import { useAuthStore } from "@/stores/auth.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
@@ -38,10 +39,13 @@ async function playMovie(versionId?: string, startAt?: number) {
     poster: movie.poster,
     backdrop: movie.backdrop,
     tags: activeVersion?.tags,
-    duration: movie.runtimeSeconds,
-    startPositionSeconds: startAt,
+    duration: source?.duration ?? movie.runtimeSeconds,
+    // 显式传入秒数：从头=0，续播=上次位置；避免被 server.startTicks 覆盖。
+    startPositionSeconds: startAt ?? 0,
     source: source ?? undefined,
     server: source?.server,
+    mediaSources: source?.mediaSources,
+    chapters: source?.chapters,
   });
 }
 
@@ -70,6 +74,28 @@ async function toggleFavorite() {
 }
 
 /** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
+const searchingSubs = shallowRef(false);
+
+/** 外挂字幕入口：对接 RemoteSearch/Subtitles；无 provider 时提示空结果。 */
+async function searchExternalSubtitles() {
+  const movie = detail.value;
+  if (!movie || searchingSubs.value) return;
+  searchingSubs.value = true;
+  try {
+    const versionId = movie.versions[0]?.id;
+    const results = await searchRemoteSubtitles(movie.id, "chi", versionId);
+    if (!results.length) {
+      uiStore.showToast("暂无可用的外挂字幕源（服务端未配置字幕 provider）。", "info");
+      return;
+    }
+    uiStore.showToast(`找到 ${results.length} 条外挂字幕候选。`, "success");
+  } catch {
+    uiStore.showToast("搜索外挂字幕失败，请稍后重试。", "error");
+  } finally {
+    searchingSubs.value = false;
+  }
+}
+
 function editMetadata() {
   const movie = detail.value;
   if (!movie) return;
@@ -105,7 +131,7 @@ function editMetadata() {
       :is-favorite="detail.isFavorite"
       :resume-position-seconds="detail.resumePositionSeconds"
       :played="detail.played"
-      @play="(versionId) => playMovie(versionId)"
+      @play="(versionId) => playMovie(versionId, 0)"
       @resume="resumeMovie"
       @toggle-favorite="toggleFavorite"
     >
@@ -120,7 +146,12 @@ function editMetadata() {
             <dd>{{ detail.originalTitle }}</dd>
           </div>
         </dl>
-        <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
+        <div class="hero-extra-actions">
+          <button type="button" class="edit-meta-btn" @click="searchExternalSubtitles">
+            {{ searchingSubs ? "搜索字幕中…" : "外挂字幕" }}
+          </button>
+          <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
+        </div>
       </template>
     </DetailHero>
 
@@ -167,8 +198,14 @@ function editMetadata() {
   }
 }
 
-.edit-meta-btn {
+.hero-extra-actions {
   margin-top: var(--fbz-space-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fbz-space-2);
+}
+
+.edit-meta-btn {
   height: 34px;
   padding: 0 16px;
   border-radius: var(--fbz-radius-control);

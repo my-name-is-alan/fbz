@@ -501,7 +501,7 @@ impl PluginRepository {
                 pkg.signature is not null as signature_present,
                 pi.approval_status,
                 pi.enabled,
-                (pi.active_package_id = pkg.id) as active,
+                coalesce(pi.active_package_id = pkg.id, false) as active,
                 pkg.created_at::text as created_at,
                 pkg.updated_at::text as updated_at
             from plugin_packages pkg
@@ -2392,6 +2392,7 @@ mod tests {
         assert!(package_query.contains("pkg.plugin_id ="));
         assert!(package_query.contains("pkg.package_status ="));
         assert!(package_query.contains("pkg.runtime ="));
+        assert!(package_query.contains("coalesce(pi.active_package_id = pkg.id, false) as active"));
         assert!(package_query.contains("order by pkg.created_at desc, pkg.id desc"));
         assert!(!package_query.contains("offset "));
     }

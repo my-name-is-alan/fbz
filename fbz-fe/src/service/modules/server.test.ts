@@ -76,5 +76,98 @@ describe("server integration", () => {
     expect(result.source.uri).toBe(`${window.location.origin}/emby/Videos/m1/stream`);
     expect(result.server.startTicks).toBe(250000000);
     expect(result.duration).toBe(120);
+    expect(result.mediaSources).toEqual([{ id: "1", label: "版本 1" }]);
+  });
+
+  it("selects a requested media source among multiple PlaybackInfo sources", async () => {
+    saveSession({
+      token: "test-token",
+      userId: "u1",
+      username: "Tester",
+      address: "http://localhost:8080",
+    });
+    mocks.request
+      .mockResolvedValueOnce({ data: { Id: "m1", UserData: {} } })
+      .mockResolvedValueOnce({ data: [{ Id: "m1", Overview: "Metadata", ImageTags: {} }] })
+      .mockResolvedValueOnce({
+        data: {
+          PlaySessionId: "p2",
+          MediaSources: [
+            {
+              Id: "src-a",
+              Name: "1080P",
+              Container: "mkv",
+              DirectStreamUrl: "/emby/Videos/m1/stream?ms=a",
+            },
+            {
+              Id: "src-b",
+              Name: "4K",
+              Container: "mkv",
+              DirectStreamUrl: "/emby/Videos/m1/stream?ms=b",
+              Size: 9,
+            },
+          ],
+        },
+      });
+    const result = await preparePlayback({ Id: "m1", Name: "Test", Type: "Movie" }, "src-b");
+    expect(result.server.mediaSourceId).toBe("src-b");
+    expect(result.source.uri).toContain("ms=b");
+    expect(result.mediaSources?.map((s) => s.id)).toEqual(["src-a", "src-b"]);
+    expect(result.mediaSources?.[1]?.label).toContain("4K");
+  });
+
+  it("maps external subtitle DeliveryUrl into subtitleTracks for the player", async () => {
+    saveSession({
+      token: "test-token",
+      userId: "u1",
+      username: "Tester",
+      address: "http://localhost:8080",
+    });
+    mocks.request
+      .mockResolvedValueOnce({ data: { Id: "m1", UserData: {} } })
+      .mockResolvedValueOnce({ data: [{ Id: "m1", Overview: "Metadata", ImageTags: {} }] })
+      .mockResolvedValueOnce({
+        data: {
+          PlaySessionId: "p3",
+          MediaSources: [
+            {
+              Id: "42",
+              DirectStreamUrl: "/emby/Videos/m1/stream",
+              MediaStreams: [
+                { Index: 0, Type: "Video", Codec: "h264" },
+                {
+                  Index: 2,
+                  Type: "Subtitle",
+                  Codec: "srt",
+                  Language: "chi",
+                  DisplayTitle: "简体",
+                  IsExternal: true,
+                  DeliveryMethod: "External",
+                  DeliveryUrl: "/Videos/m1/42/Subtitles/2/0/Stream.srt?api_key=test-token",
+                },
+                {
+                  Index: 3,
+                  Type: "Subtitle",
+                  Codec: "ass",
+                  Language: "eng",
+                  IsExternal: false,
+                  DeliveryMethod: "Embed",
+                },
+              ],
+            },
+          ],
+        },
+      });
+    const result = await preparePlayback({ Id: "m1", Name: "Test", Type: "Movie" });
+    expect(result.subtitleTracks).toEqual([
+      {
+        id: "ext-2",
+        label: "简体",
+        language: "chi",
+        deliveryUrl: `${window.location.origin}/Videos/m1/42/Subtitles/2/0/Stream.srt?api_key=test-token`,
+        codec: "srt",
+        isExternal: true,
+      },
+    ]);
   });
 });

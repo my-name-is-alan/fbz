@@ -84,3 +84,36 @@ it("loads a remote-route episode that has no legacy serverItem", async () => {
   expect(store.item?.source?.proxyUri).toBe("/bytes");
   expect(store.item?.server?.playSessionId).toBe("session");
 });
+
+it("switches media source while keeping the open playlist metadata", async () => {
+  const store = usePlaybackStore();
+  store.open({
+    id: "movie-1",
+    type: "movie",
+    title: "Film",
+    mediaSources: [
+      { id: "a", label: "1080P · MKV" },
+      { id: "b", label: "4K · MKV" },
+    ],
+    server: { playSessionId: "s1", mediaSourceId: "a", startTicks: 0 },
+    source: { uri: "/a" },
+  });
+  mocks.prepare.mockResolvedValue({
+    id: "movie-1",
+    type: "movie",
+    title: "Film",
+    mediaSources: [
+      { id: "a", label: "1080P · MKV" },
+      { id: "b", label: "4K · MKV" },
+    ],
+    source: { uri: "/b", proxyUri: "/bytes-b" },
+    server: { playSessionId: "s2", mediaSourceId: "b", startTicks: 0 },
+    duration: 100,
+  });
+  await store.switchMediaSource("b", 42);
+  expect(mocks.prepare).toHaveBeenCalledWith({ Id: "movie-1", Name: "Film", Type: "Movie" }, "b");
+  expect(store.item?.server?.mediaSourceId).toBe("b");
+  expect(store.item?.source?.uri).toBe("/b");
+  expect(store.item?.startPositionSeconds).toBe(42);
+  expect(store.item?.title).toBe("Film");
+});

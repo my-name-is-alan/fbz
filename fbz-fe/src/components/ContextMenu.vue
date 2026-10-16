@@ -1,16 +1,46 @@
 <script setup lang="ts">
 import { useUiStore } from "@/stores/ui.ts";
 import { useAuthStore } from "@/stores/auth.ts";
+import { usePlaybackStore } from "@/stores/playback.ts";
 import { queueItemMetadataRefresh } from "@/service/modules/admin.ts";
-import { setFavorite } from "@/service/modules/userData.ts";
+import { setFavorite, setPlayed } from "@/service/modules/userData.ts";
+import { deleteMediaItem } from "@/service/modules/detail.ts";
+import {
+  addPlaylistItems,
+  createPlaylist,
+  listPlaylists,
+  type PlaylistSummary,
+} from "@/service/modules/playlists.ts";
+import {
+  addCollectionItems,
+  createCollection,
+  listCollectionSummaries,
+  type CollectionSummary,
+} from "@/service/modules/collections.ts";
 
+const router = useRouter();
 const uiStore = useUiStore();
 const authStore = useAuthStore();
+const playback = usePlaybackStore();
 const { contextMenu } = storeToRefs(uiStore);
+const { isAdmin } = storeToRefs(authStore);
 
 const menuRef = ref<HTMLElement>();
 const showDeleteConfirm = ref(false);
-const busyAction = ref<"favorite" | "refresh" | null>(null);
+const showPlaylistPicker = ref(false);
+const showCollectionPicker = ref(false);
+const playlistChoices = ref<PlaylistSummary[]>([]);
+const playlistLoading = ref(false);
+const collectionChoices = ref<CollectionSummary[]>([]);
+const collectionLoading = ref(false);
+const busyAction = ref<
+  "favorite" | "played" | "refresh" | "play" | "delete" | "playlist" | "collection" | null
+>(null);
+
+const canResume = computed(() => {
+  const item = contextMenu.value.item;
+  return Boolean(item && !item.isPlayed && item.progress != null && item.progress > 0);
+});
 
 // Close menu if user clicks outside
 onClickOutside(menuRef, () => {
@@ -23,6 +53,10 @@ watch(
   (open) => {
     if (!open) {
       showDeleteConfirm.value = false;
+      showPlaylistPicker.value = false;
+      showCollectionPicker.value = false;
+      playlistChoices.value = [];
+      collectionChoices.value = [];
     }
   },
 );
@@ -49,8 +83,73 @@ async function toggleFavorite() {
   }
 }
 
-async function refreshMetadata() {
+async function togglePlayed() {
   if (!contextMenu.value.item || busyAction.value) return;
+  const item = contextMenu.value.item;
+  if (!authStore.userId) {
+    uiStore.showToast("请先登录后再修改观看状态。", "warning");
+    return;
+  }
+
+  const nextPlayed = !item.isPlayed;
+  busyAction.value = "played";
+  try {
+    await setPlayed(authStore.userId, item.id, nextPlayed);
+    item.isPlayed = nextPlayed;
+    // 与 PlayedItems 联动：标已看清进度条；标未看保留原进度（若有）。
+    if (nextPlayed) item.progress = undefined;
+    uiStore.showToast(nextPlayed ? "已标记为已看。" : "已标记为未看。", "success");
+    uiStore.closeContextMenu();
+  } catch {
+    uiStore.showToast("观看状态更新失败，请检查网络与权限。", "error");
+  } finally {
+    busyAction.value = null;
+  }
+}
+
+/** 右键「播放 / 继续播放」：剧集进详情由续看逻辑接管；电影直接起播。 */
+async function playFromMenu(resume: boolean) {
+  const item = contextMenu.value.item;
+  if (!item || busyAction.value) return;
+  const detailType = item.detailType ?? (item.libraryId === "series" ? "tv" : "movie");
+  uiStore.closeContextMenu();
+
+  if (detailType === "tv") {
+    void router.push(`/tv/${item.id}`);
+    return;
+  }
+
+  busyAction.value = "play";
+  try {
+    const { fetchPlaybackSource } = await import("@/service/modules/detail.ts");
+    const source = await fetchPlaybackSource(String(item.id));
+    if (!source?.uri) {
+      uiStore.showToast("该条目暂无可播放媒体源。", "warning");
+      return;
+    }
+    playback.open({
+      type: "movie",
+      id: String(item.id),
+      title: item.title,
+      subtitle: item.meta,
+      poster: item.poster,
+      tags: item.resolution ? [item.resolution] : undefined,
+      duration: source.duration,
+      startPositionSeconds: resume ? undefined : 0,
+      source,
+      server: source.server,
+      mediaSources: source.mediaSources,
+      chapters: source.chapters,
+    });
+  } catch {
+    uiStore.showToast("无法开始播放，请稍后重试。", "error");
+  } finally {
+    busyAction.value = null;
+  }
+}
+
+async function refreshMetadata() {
+  if (!contextMenu.value.item || busyAction.value || !isAdmin.value) return;
   const item = contextMenu.value.item;
   busyAction.value = "refresh";
   try {
@@ -65,17 +164,136 @@ async function refreshMetadata() {
 }
 
 function openEditMetadata() {
-  if (!contextMenu.value.item) return;
+  if (!contextMenu.value.item || !isAdmin.value) return;
   uiStore.openMetadataManager(contextMenu.value.item);
 }
 
-function deleteItem() {
-  if (!contextMenu.value.item) return;
-  uiStore.showToast(
-    "后端尚未开放媒体条目删除接口。请先在服务器文件系统移除文件，再扫描媒体库。",
-    "warning",
-  );
-  uiStore.closeContextMenu();
+function openIdentify() {
+  if (!contextMenu.value.item || !isAdmin.value) return;
+  uiStore.openIdentifyManager(contextMenu.value.item);
+}
+
+async function deleteItem() {
+  if (!contextMenu.value.item || !isAdmin.value || busyAction.value) return;
+  const item = contextMenu.value.item;
+  busyAction.value = "delete";
+  try {
+    await deleteMediaItem(item.id, false);
+    uiStore.showToast(`已删除「${item.title}」`, "success");
+    uiStore.closeContextMenu();
+    // 通知列表页刷新：抛出自定义事件；库页/首页可监听。
+    window.dispatchEvent(new CustomEvent("fbz:item-deleted", { detail: { id: item.id } }));
+  } catch {
+    uiStore.showToast("删除失败，请稍后重试", "error");
+  } finally {
+    busyAction.value = null;
+    showDeleteConfirm.value = false;
+  }
+}
+
+async function openPlaylistPicker() {
+  if (!contextMenu.value.item || busyAction.value) return;
+  if (!authStore.userId) {
+    uiStore.showToast("请先登录后再加入播放列表。", "warning");
+    return;
+  }
+  showPlaylistPicker.value = true;
+  playlistLoading.value = true;
+  try {
+    playlistChoices.value = await listPlaylists(authStore.userId);
+  } catch {
+    playlistChoices.value = [];
+    uiStore.showToast("无法加载播放列表。", "error");
+  } finally {
+    playlistLoading.value = false;
+  }
+}
+
+async function addToPlaylist(playlist: PlaylistSummary) {
+  const item = contextMenu.value.item;
+  if (!item || busyAction.value) return;
+  busyAction.value = "playlist";
+  try {
+    await addPlaylistItems(playlist.id, [String(item.id)], authStore.userId ?? undefined);
+    uiStore.showToast(`已加入「${playlist.name}」`, "success");
+    uiStore.closeContextMenu();
+  } catch {
+    uiStore.showToast("加入播放列表失败。", "error");
+  } finally {
+    busyAction.value = null;
+  }
+}
+
+async function createAndAddPlaylist() {
+  const item = contextMenu.value.item;
+  if (!item || busyAction.value) return;
+  const name = window.prompt("新建播放列表名称", item.title);
+  if (!name?.trim()) return;
+  busyAction.value = "playlist";
+  try {
+    const created = await createPlaylist({ name: name.trim(), ids: [String(item.id)] });
+    uiStore.showToast(`已创建并加入「${created.name}」`, "success");
+    uiStore.closeContextMenu();
+  } catch {
+    uiStore.showToast("创建播放列表失败。", "error");
+  } finally {
+    busyAction.value = null;
+  }
+}
+
+/** 合集写操作后端限管理员；与播放列表 picker 同交互。 */
+async function openCollectionPicker() {
+  if (!contextMenu.value.item || busyAction.value) return;
+  if (!isAdmin.value) {
+    uiStore.showToast("加入合集需要管理员权限。", "warning");
+    return;
+  }
+  if (!authStore.userId) {
+    uiStore.showToast("请先登录后再加入合集。", "warning");
+    return;
+  }
+  showCollectionPicker.value = true;
+  collectionLoading.value = true;
+  try {
+    collectionChoices.value = await listCollectionSummaries(authStore.userId);
+  } catch {
+    collectionChoices.value = [];
+    uiStore.showToast("无法加载合集列表。", "error");
+  } finally {
+    collectionLoading.value = false;
+  }
+}
+
+async function addToCollection(collection: CollectionSummary) {
+  const item = contextMenu.value.item;
+  if (!item || busyAction.value) return;
+  busyAction.value = "collection";
+  try {
+    await addCollectionItems(collection.id, [String(item.id)]);
+    uiStore.showToast(`已加入合集「${collection.name}」`, "success");
+    uiStore.closeContextMenu();
+  } catch {
+    uiStore.showToast("加入合集失败，请确认管理员权限。", "error");
+  } finally {
+    busyAction.value = null;
+  }
+}
+
+async function createAndAddCollection() {
+  const item = contextMenu.value.item;
+  if (!item || busyAction.value) return;
+  const name = window.prompt("新建合集名称", item.title);
+  if (!name?.trim()) return;
+  busyAction.value = "collection";
+  try {
+    const created = await createCollection({ name: name.trim(), ids: [String(item.id)] });
+    uiStore.showToast(`已创建并加入合集「${created.name}」`, "success");
+    uiStore.closeContextMenu();
+  } catch {
+    uiStore.showToast("创建合集失败，请确认管理员权限。", "error");
+  } finally {
+    busyAction.value = null;
+  }
 }
 
 useEventListener(window, "keydown", (e) => {
@@ -97,8 +315,116 @@ useEventListener(window, "keydown", (e) => {
       left: `${contextMenu.x}px`,
     }"
   >
+    <!-- Collection picker（管理员） -->
+    <div
+      v-if="showCollectionPicker"
+      class="confirm-box"
+      role="dialog"
+      aria-modal="true"
+      aria-label="加入合集"
+    >
+      <span class="confirm-title">加入合集</span>
+      <p v-if="collectionLoading" class="picker-hint">加载中…</p>
+      <ul v-else class="menu-list picker-list">
+        <li
+          v-for="col in collectionChoices"
+          :key="col.id"
+          class="menu-item"
+          :class="{ disabled: busyAction === 'collection' }"
+          tabindex="0"
+          role="menuitem"
+          @click="addToCollection(col)"
+        >
+          <span class="icon" aria-hidden="true">▣</span>
+          <span>{{ col.name }}</span>
+        </li>
+        <li class="menu-separator" aria-hidden="true" />
+        <li
+          class="menu-item"
+          :class="{ disabled: busyAction === 'collection' }"
+          tabindex="0"
+          role="menuitem"
+          @click="createAndAddCollection"
+        >
+          <span class="icon" aria-hidden="true">＋</span>
+          <span>新建并加入</span>
+        </li>
+        <li class="menu-item" tabindex="0" role="menuitem" @click="showCollectionPicker = false">
+          <span class="icon" aria-hidden="true">←</span>
+          <span>返回</span>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Playlist picker -->
+    <div
+      v-else-if="showPlaylistPicker"
+      class="confirm-box"
+      role="dialog"
+      aria-modal="true"
+      aria-label="加入播放列表"
+    >
+      <span class="confirm-title">加入播放列表</span>
+      <p v-if="playlistLoading" class="picker-hint">加载中…</p>
+      <ul v-else class="menu-list picker-list">
+        <li
+          v-for="pl in playlistChoices"
+          :key="pl.id"
+          class="menu-item"
+          :class="{ disabled: busyAction === 'playlist' }"
+          tabindex="0"
+          role="menuitem"
+          @click="addToPlaylist(pl)"
+        >
+          <span class="icon" aria-hidden="true">♫</span>
+          <span>{{ pl.name }}</span>
+        </li>
+        <li class="menu-separator" aria-hidden="true" />
+        <li
+          class="menu-item"
+          :class="{ disabled: busyAction === 'playlist' }"
+          tabindex="0"
+          role="menuitem"
+          @click="createAndAddPlaylist"
+        >
+          <span class="icon" aria-hidden="true">＋</span>
+          <span>新建并加入</span>
+        </li>
+        <li class="menu-item" tabindex="0" role="menuitem" @click="showPlaylistPicker = false">
+          <span class="icon" aria-hidden="true">←</span>
+          <span>返回</span>
+        </li>
+      </ul>
+    </div>
+
     <!-- Regular Menu List -->
-    <ul v-if="!showDeleteConfirm" class="menu-list">
+    <ul v-else-if="!showDeleteConfirm" class="menu-list">
+      <li
+        v-if="canResume"
+        class="menu-item"
+        :class="{ disabled: busyAction === 'play' }"
+        tabindex="0"
+        role="menuitem"
+        @click="playFromMenu(true)"
+        @keydown.enter="playFromMenu(true)"
+        @keydown.space.prevent="playFromMenu(true)"
+      >
+        <span class="icon" aria-hidden="true">▶️</span>
+        <span>继续播放</span>
+      </li>
+      <li
+        class="menu-item"
+        :class="{ disabled: busyAction === 'play' }"
+        tabindex="0"
+        role="menuitem"
+        @click="playFromMenu(false)"
+        @keydown.enter="playFromMenu(false)"
+        @keydown.space.prevent="playFromMenu(false)"
+      >
+        <span class="icon" aria-hidden="true">{{ canResume ? "🔁" : "▶️" }}</span>
+        <span>{{ canResume ? "从头播放" : "播放" }}</span>
+      </li>
+      <li class="menu-separator" aria-hidden="true" />
       <li
         class="menu-item"
         :class="{ disabled: busyAction === 'favorite' }"
@@ -113,41 +439,92 @@ useEventListener(window, "keydown", (e) => {
       </li>
       <li
         class="menu-item"
-        :class="{ disabled: busyAction === 'refresh' }"
+        :class="{ disabled: busyAction === 'playlist' }"
         tabindex="0"
         role="menuitem"
-        @click="refreshMetadata"
-        @keydown.enter="refreshMetadata"
-        @keydown.space.prevent="refreshMetadata"
+        @click="openPlaylistPicker"
+        @keydown.enter="openPlaylistPicker"
+        @keydown.space.prevent="openPlaylistPicker"
       >
-        <span class="icon" aria-hidden="true">🔄</span>
-        <span>{{ busyAction === "refresh" ? "正在入队…" : "刷新元数据" }}</span>
+        <span class="icon" aria-hidden="true">♫</span>
+        <span>加入播放列表</span>
+      </li>
+      <li
+        v-if="isAdmin"
+        class="menu-item"
+        :class="{ disabled: busyAction === 'collection' }"
+        tabindex="0"
+        role="menuitem"
+        @click="openCollectionPicker"
+        @keydown.enter="openCollectionPicker"
+        @keydown.space.prevent="openCollectionPicker"
+      >
+        <span class="icon" aria-hidden="true">▣</span>
+        <span>加入合集</span>
       </li>
       <li
         class="menu-item"
+        :class="{ disabled: busyAction === 'played' }"
         tabindex="0"
         role="menuitem"
-        @click="openEditMetadata"
-        @keydown.enter="openEditMetadata"
-        @keydown.space.prevent="openEditMetadata"
+        @click="togglePlayed"
+        @keydown.enter="togglePlayed"
+        @keydown.space.prevent="togglePlayed"
       >
-        <span class="icon" aria-hidden="true">✏️</span>
-        <span>修改元数据</span>
+        <span class="icon" aria-hidden="true">{{ contextMenu.item?.isPlayed ? "👁️" : "✅" }}</span>
+        <span>{{ contextMenu.item?.isPlayed ? "标记未看" : "标记已看" }}</span>
       </li>
 
-      <li class="menu-separator" aria-hidden="true" />
+      <template v-if="isAdmin">
+        <li
+          class="menu-item"
+          :class="{ disabled: busyAction === 'refresh' }"
+          tabindex="0"
+          role="menuitem"
+          @click="refreshMetadata"
+          @keydown.enter="refreshMetadata"
+          @keydown.space.prevent="refreshMetadata"
+        >
+          <span class="icon" aria-hidden="true">🔄</span>
+          <span>{{ busyAction === "refresh" ? "正在入队…" : "刷新元数据" }}</span>
+        </li>
+        <li
+          class="menu-item"
+          tabindex="0"
+          role="menuitem"
+          @click="openIdentify"
+          @keydown.enter="openIdentify"
+          @keydown.space.prevent="openIdentify"
+        >
+          <span class="icon" aria-hidden="true">🔍</span>
+          <span>识别</span>
+        </li>
+        <li
+          class="menu-item"
+          tabindex="0"
+          role="menuitem"
+          @click="openEditMetadata"
+          @keydown.enter="openEditMetadata"
+          @keydown.space.prevent="openEditMetadata"
+        >
+          <span class="icon" aria-hidden="true">✏️</span>
+          <span>修改元数据</span>
+        </li>
 
-      <li
-        class="menu-item danger-item"
-        tabindex="0"
-        role="menuitem"
-        @click="showDeleteConfirm = true"
-        @keydown.enter="showDeleteConfirm = true"
-        @keydown.space.prevent="showDeleteConfirm = true"
-      >
-        <span class="icon" aria-hidden="true">🗑️</span>
-        <span>删除条目</span>
-      </li>
+        <li class="menu-separator" aria-hidden="true" />
+
+        <li
+          class="menu-item danger-item"
+          tabindex="0"
+          role="menuitem"
+          @click="showDeleteConfirm = true"
+          @keydown.enter="showDeleteConfirm = true"
+          @keydown.space.prevent="showDeleteConfirm = true"
+        >
+          <span class="icon" aria-hidden="true">🗑️</span>
+          <span>删除条目</span>
+        </li>
+      </template>
     </ul>
 
     <!-- Inline Secondary Confirmation -->
@@ -200,6 +577,17 @@ useEventListener(window, "keydown", (e) => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.picker-list {
+  max-height: 240px;
+  overflow: auto;
+}
+
+.picker-hint {
+  margin: 8px 4px;
+  font-size: 12px;
+  color: var(--fbz-color-text-muted);
 }
 
 .menu-item {

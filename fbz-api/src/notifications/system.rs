@@ -12,12 +12,47 @@ const SYSTEM_PLUGIN_ID: &str = "fbz-core";
 const SYSTEM_PACKAGE_ID: &str = "system";
 
 /// 系统通知入参。level 必须是 info/success/warning/error（表 check 约束）。
+/// `channel` 与通知目标上的 channel 对齐：为 None 时只投递 channel 为空的目标；
+/// 播放/扫描等生命周期事件使用 event key（如 `playback.started`）作为 channel，
+/// 便于 admin 登记专用 webhook URL。
 #[derive(Clone, Debug, PartialEq)]
 pub struct SystemNotificationInput {
     pub title: String,
     pub message: String,
     pub level: String,
+    pub channel: Option<String>,
     pub metadata: Value,
+}
+
+/// 入队一条生命周期事件通知（播放/扫描），channel = event_key。
+/// 失败由调用方决定是否吞掉；不阻断主路径。
+pub async fn enqueue_event_notification(
+    pool: &DbPool,
+    event_key: &str,
+    title: impl Into<String>,
+    message: impl Into<String>,
+    level: &str,
+    metadata: Value,
+) -> Result<String, sqlx::Error> {
+    let event_key = event_key.trim();
+    let mut metadata = match metadata {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    metadata
+        .entry("event".to_owned())
+        .or_insert_with(|| Value::String(event_key.to_owned()));
+    enqueue_system_notification(
+        pool,
+        SystemNotificationInput {
+            title: title.into(),
+            message: message.into(),
+            level: normalize_notification_level(Some(level)).to_owned(),
+            channel: Some(event_key.to_owned()),
+            metadata: Value::Object(metadata),
+        },
+    )
+    .await
 }
 
 /// 入队一条系统通知，返回请求 public_id。单事务写请求行 + outbox 事件。
@@ -38,7 +73,7 @@ pub async fn enqueue_system_notification(
             channel,
             metadata
         )
-        values ($1, $2, $3, $4, $5, null, $6)
+        values ($1, $2, $3, $4, $5, $6, $7)
         returning id, public_id::text as public_id
         "#,
     )
@@ -47,6 +82,7 @@ pub async fn enqueue_system_notification(
     .bind(&input.title)
     .bind(&input.message)
     .bind(&input.level)
+    .bind(input.channel.as_deref())
     .bind(&input.metadata)
     .fetch_one(&mut *tx)
     .await?;
@@ -60,7 +96,7 @@ pub async fn enqueue_system_notification(
         "title": input.title,
         "message": input.message,
         "level": input.level,
-        "channel": Value::Null,
+        "channel": input.channel,
         "metadata": input.metadata,
     });
     let outbox_row = sqlx::query(
@@ -124,5 +160,18 @@ mod tests {
         assert_eq!(normalize_notification_level(Some("Info")), "info");
         assert_eq!(normalize_notification_level(Some("weird")), "info");
         assert_eq!(normalize_notification_level(None), "info");
+    }
+
+    #[test]
+    fn event_notification_input_uses_event_key_as_channel() {
+        let input = SystemNotificationInput {
+            title: "Playback started".to_owned(),
+            message: "item-1".to_owned(),
+            level: "info".to_owned(),
+            channel: Some("playback.started".to_owned()),
+            metadata: json!({ "event": "playback.started", "itemId": "item-1" }),
+        };
+        assert_eq!(input.channel.as_deref(), Some("playback.started"));
+        assert_eq!(input.metadata["event"], "playback.started");
     }
 }

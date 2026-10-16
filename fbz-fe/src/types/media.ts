@@ -1,5 +1,5 @@
 /** 媒体库类型 —— 用户可创建任意多个、任意类型的库 */
-export type MediaKind = "movie" | "series" | "anime" | "documentary" | "music";
+export type MediaKind = "movie" | "series" | "anime" | "documentary" | "music" | "book";
 
 export interface MediaLibrary {
   scrapers?: string[];
@@ -12,6 +12,11 @@ export interface MediaLibrary {
   kind: MediaKind;
   /** 该库的条目数 */
   count: number;
+  /**
+   * 总览封面（绝对/可鉴权 URL）。有条目 ImageTags.Primary 时由总览页异步填充；
+   * 无则视图继续用文字占位，不盲拼库级图片端点。
+   */
+  cover?: string;
   /** 后端规范库类型（movies / tvshows / music / mixed 等）。 */
   libraryType?: string;
   /** 后端物理路径配置；管理弹窗按需填充。 */
@@ -36,7 +41,7 @@ export interface MediaItem {
    * 详情页类型路由：movie → /movie/:id，tv → /tv/:id。
    * 与 libraryId 解耦（动漫库条目多为 tv，纪录片库多为 movie）。缺省按 movie。
    */
-  detailType?: "movie" | "tv";
+  detailType?: "movie" | "tv" | "collection";
   /** 海报图地址；为空时前端渲染占位块 */
   poster?: string;
   /** 发行年份，用于排序/筛选 */
@@ -51,6 +56,12 @@ export interface MediaItem {
   addedAt?: number;
   /** 用户收藏状态（来自后端 UserData / 右键菜单更新）。 */
   isFavorite?: boolean;
+  /** 已看完标记（来自后端 UserData.Played / 右键菜单更新）。 */
+  isPlayed?: boolean;
+  /** 观看进度百分比 0–100（未看完且有 PlaybackPosition 时）。 */
+  progress?: number;
+  /** 播放列表成员 EntryId（删/移用）；仅播放列表成员携带。 */
+  playlistItemId?: string;
 }
 
 /** 单库列表的排序方式 */
@@ -85,11 +96,8 @@ export interface MediaRow {
   items: ContinueItem[];
 }
 
-/** 继续观看条目（带进度） */
-export interface ContinueItem extends MediaItem {
-  /** 观看进度百分比 0–100 */
-  progress?: number;
-}
+/** 继续观看条目（进度字段已并入 MediaItem，保留别名兼容）。 */
+export type ContinueItem = MediaItem;
 
 /* =========================================================
    TMDB 真实数据模型（与 tmdb-catalog.json / tmdb-details.json 对齐）

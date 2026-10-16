@@ -81,6 +81,16 @@ pub struct CreatePlaylistQuery {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
+pub struct RenamePlaylistQuery {
+    #[serde(alias = "name")]
+    pub name: Option<String>,
+    /// JF `UpdatePlaylistDto.IsPublic`（fbz 以查询参数接收）→ OpenAccess。
+    #[serde(alias = "isPublic")]
+    pub is_public: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub struct AddToPlaylistInfoQuery {
     #[serde(alias = "userId", alias = "user_id")]
     pub user_id: Option<String>,
@@ -193,6 +203,47 @@ pub async fn create_playlist(
     }))
 }
 
+/// `POST /Playlists/{playlist_id}?Name=` — 重命名属主播放列表（最小 Emby 兼容）。
+pub async fn rename_playlist(
+    State(state): State<AppState>,
+    Path(playlist_id): Path<String>,
+    Query(query): Query<RenamePlaylistQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<PlaylistCreationResultDto>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let playlist_id = normalize_playlist_id(&playlist_id, "Id")?;
+    if let Some(is_public) = query.is_public {
+        let outcome = LibraryRepository::new(database.clone())
+            .set_playlist_open_access(user.id, &playlist_id, is_public)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to update playlist: {err}")))?;
+        map_share_outcome(outcome)?;
+        if query.name.as_deref().is_none_or(|n| n.trim().is_empty()) {
+            return Ok(Json(PlaylistCreationResultDto { id: playlist_id, name: String::new(), item_added_count: 0 }));
+        }
+    }
+    let name = normalize_required_playlist_name(query.name.as_deref())?;
+
+    let outcome = LibraryRepository::new(database.clone())
+        .rename_playlist(user.id, &playlist_id, &name)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to rename playlist: {err}")))?;
+
+    match outcome {
+        PlaylistWriteOutcome::Applied(name) => Ok(Json(PlaylistCreationResultDto {
+            id: playlist_id,
+            name,
+            item_added_count: 0,
+        })),
+        PlaylistWriteOutcome::NotFound => Err(AppError::not_found("playlist not found")),
+        PlaylistWriteOutcome::Forbidden => Err(playlist_not_owned_error()),
+    }
+}
+
 pub async fn playlist_items(
     State(state): State<AppState>,
     Path(playlist_id): Path<String>,
@@ -230,6 +281,166 @@ pub async fn playlist_items(
         result.total_record_count,
         window.start_index as u32,
     )))
+}
+
+/// JF 10.9 `PlaylistDto`（`GET /Playlists/{id}`）：OpenAccess + Shares（`playlist_shares`）。
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaylistDto {
+    pub open_access: bool,
+    pub shares: Vec<PlaylistUserPermissionsDto>,
+    pub item_ids: Vec<String>,
+}
+
+/// JF `PlaylistUserPermissions`。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaylistUserPermissionsDto {
+    #[serde(default, alias = "userId")]
+    pub user_id: String,
+    #[serde(default, alias = "canEdit")]
+    pub can_edit: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdatePlaylistUserDto {
+    #[serde(default, alias = "canEdit")]
+    pub can_edit: bool,
+}
+
+async fn sharing_for(
+    state: &AppState,
+    user_id: i64,
+    playlist_id: &str,
+) -> Result<crate::library::repository::PlaylistSharing, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    LibraryRepository::new(database.clone())
+        .playlist_sharing(user_id, playlist_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to read playlist sharing: {err}")))?
+        .ok_or_else(|| AppError::not_found("playlist not found"))
+}
+
+fn shares_dto(sharing: &crate::library::repository::PlaylistSharing) -> Vec<PlaylistUserPermissionsDto> {
+    sharing
+        .shares
+        .iter()
+        .map(|(user_id, can_edit)| PlaylistUserPermissionsDto { user_id: user_id.clone(), can_edit: *can_edit })
+        .collect()
+}
+
+fn map_share_outcome(outcome: PlaylistWriteOutcome<()>) -> Result<StatusCode, AppError> {
+    match outcome {
+        PlaylistWriteOutcome::Applied(()) => Ok(StatusCode::NO_CONTENT),
+        PlaylistWriteOutcome::NotFound => Err(AppError::not_found("playlist or user not found")),
+        PlaylistWriteOutcome::Forbidden => Err(playlist_not_owned_error()),
+    }
+}
+
+/// `GET /Playlists/{id}/Users`。
+pub async fn playlist_users(
+    State(state): State<AppState>,
+    Path(playlist_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<Vec<PlaylistUserPermissionsDto>>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let sharing = sharing_for(&state, user.id, &playlist_id).await?;
+    Ok(Json(shares_dto(&sharing)))
+}
+
+/// `GET /Playlists/{id}/Users/{userId}`。
+pub async fn playlist_user(
+    State(state): State<AppState>,
+    Path((playlist_id, target)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<PlaylistUserPermissionsDto>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let sharing = sharing_for(&state, user.id, &playlist_id).await?;
+    let target = target.trim().to_ascii_lowercase();
+    if sharing.owner_user_id == user.id && target == user.public_id.to_ascii_lowercase() {
+        return Ok(Json(PlaylistUserPermissionsDto { user_id: user.public_id, can_edit: true }));
+    }
+    shares_dto(&sharing)
+        .into_iter()
+        .find(|s| s.user_id.to_ascii_lowercase() == target)
+        .map(Json)
+        .ok_or_else(|| AppError::not_found("user has no access to this playlist"))
+}
+
+/// `POST /Playlists/{id}/Users/{userId}` body `{CanEdit}` — 属主共享/改权限。
+pub async fn update_playlist_user(
+    State(state): State<AppState>,
+    Path((playlist_id, target)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let dto: UpdatePlaylistUserDto = if body.iter().all(u8::is_ascii_whitespace) {
+        UpdatePlaylistUserDto::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|err| AppError::unprocessable(format!("invalid body: {err}")))?
+    };
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let outcome = LibraryRepository::new(database.clone())
+        .upsert_playlist_share(user.id, &playlist_id, target.trim(), dto.can_edit)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to share playlist: {err}")))?;
+    map_share_outcome(outcome)
+}
+
+/// `DELETE /Playlists/{id}/Users/{userId}`。
+pub async fn remove_playlist_user(
+    State(state): State<AppState>,
+    Path((playlist_id, target)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let outcome = LibraryRepository::new(database.clone())
+        .delete_playlist_share(user.id, &playlist_id, target.trim())
+        .await
+        .map_err(|err| AppError::internal(format!("failed to unshare playlist: {err}")))?;
+    map_share_outcome(outcome)
+}
+
+pub async fn playlist_detail(
+    State(state): State<AppState>,
+    Path(playlist_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<PlaylistDto>, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let result = LibraryRepository::new(database.clone())
+        .list_user_playlist_items(PlaylistItemsInput {
+            user_id: user.id,
+            playlist_id: playlist_id.clone(),
+            start_index: 0,
+            limit: 10_000,
+            include_image_tags: false,
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list playlist items: {err}")))?;
+    let playlist_id_for_sharing = playlist_id;
+    let sharing = sharing_for(&state, user.id, &playlist_id_for_sharing).await?;
+    Ok(Json(PlaylistDto {
+        open_access: sharing.open_access,
+        shares: shares_dto(&sharing),
+        item_ids: result.items.into_iter().map(|item| media_item_to_base_item(item).id).collect(),
+    }))
 }
 
 pub async fn add_to_playlist_info(
@@ -761,5 +972,38 @@ mod tests {
             .status_code(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
+    }
+}
+
+#[cfg(test)]
+mod playlist_dto_tests {
+    use super::PlaylistDto;
+
+    #[test]
+    fn playlist_dto_is_jf_shape() {
+        let v = serde_json::to_value(PlaylistDto { open_access: false, shares: vec![], item_ids: vec!["a".into()] }).unwrap();
+        assert_eq!(v, serde_json::json!({"OpenAccess": false, "Shares": [], "ItemIds": ["a"]}));
+    }
+}
+
+#[cfg(test)]
+mod sharing_dto_tests {
+    use super::*;
+
+    #[test]
+    fn user_permissions_dto_shape() {
+        let v = serde_json::to_value(PlaylistUserPermissionsDto { user_id: "u".into(), can_edit: true }).unwrap();
+        assert_eq!(v, serde_json::json!({"UserId": "u", "CanEdit": true}));
+        let d: UpdatePlaylistUserDto = serde_json::from_str(r#"{"canEdit":true}"#).unwrap();
+        assert!(d.can_edit);
+        let q: RenamePlaylistQuery = serde_json::from_str(r#"{"IsPublic":true}"#).unwrap();
+        assert_eq!(q.is_public, Some(true));
+    }
+
+    #[test]
+    fn share_outcome_maps_statuses() {
+        assert_eq!(map_share_outcome(PlaylistWriteOutcome::Applied(())).unwrap(), StatusCode::NO_CONTENT);
+        assert_eq!(map_share_outcome(PlaylistWriteOutcome::NotFound).unwrap_err().status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(map_share_outcome(PlaylistWriteOutcome::Forbidden).unwrap_err().status_code(), StatusCode::FORBIDDEN);
     }
 }

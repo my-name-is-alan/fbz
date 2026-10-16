@@ -161,7 +161,22 @@ export function createHttpPluginServer(options) {
       })
 
       const context = dispatchContextFromHeaders(request.headers)
-      const dispatch = JSON.parse(body.toString('utf8'))
+      let dispatch
+      try {
+        const text = body.toString('utf8')
+        if (!text.trim()) {
+          sendJson(response, 400, { error: 'request body is required' })
+          return
+        }
+        dispatch = JSON.parse(text)
+      } catch {
+        sendJson(response, 400, { error: 'invalid JSON body' })
+        return
+      }
+      if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch)) {
+        sendJson(response, 400, { error: 'request body must be a JSON object' })
+        return
+      }
       dispatch.idempotencyKey = context.idempotencyKey
 
       if (idempotency.has(context.idempotencyKey)) {

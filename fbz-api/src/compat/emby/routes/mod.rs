@@ -30,6 +30,9 @@ mod genres;
 mod images;
 mod item_lookup;
 mod item_refresh;
+mod item_update;
+mod library_options;
+mod remote_lyrics;
 mod items;
 mod live_tv;
 mod localization;
@@ -49,6 +52,11 @@ mod streaming;
 mod studios;
 mod subtitles;
 mod sync;
+mod syncplay;
+mod trickplay;
+mod books;
+mod remote_subtitles;
+mod subtitle_upload;
 mod system;
 mod theme_media;
 mod transcoding;
@@ -627,6 +635,51 @@ pub fn router() -> Router<AppState> {
             "/LiveTv/Tuners/{id}/Reset",
             post(live_tv::mutation_not_configured),
         )
+        // SyncPlay：进程内组 + websocket 广播（New/Join/Leave/List/Get/SetNewQueue/Pause/Unpause/Seek/Stop/Ping）。
+        .route("/emby/SyncPlay/List", get(syncplay::list_groups))
+        .route("/SyncPlay/List", get(syncplay::list_groups))
+        .route("/emby/SyncPlay/New", post(syncplay::create_group))
+        .route("/SyncPlay/New", post(syncplay::create_group))
+        .route("/emby/SyncPlay/CreateGroup", post(syncplay::create_group_alias))
+        .route("/SyncPlay/CreateGroup", post(syncplay::create_group_alias))
+        .route("/emby/SyncPlay/Join", post(syncplay::join_group))
+        .route("/SyncPlay/Join", post(syncplay::join_group))
+        .route("/emby/SyncPlay/Leave", post(syncplay::leave_group))
+        .route("/SyncPlay/Leave", post(syncplay::leave_group))
+        .route("/emby/SyncPlay/Ping", post(syncplay::ping))
+        .route("/SyncPlay/Ping", post(syncplay::ping))
+        .route("/emby/SyncPlay/SetNewQueue", post(syncplay::set_new_queue))
+        .route("/SyncPlay/SetNewQueue", post(syncplay::set_new_queue))
+        .route("/emby/SyncPlay/Pause", post(syncplay::pause))
+        .route("/SyncPlay/Pause", post(syncplay::pause))
+        .route("/emby/SyncPlay/Unpause", post(syncplay::unpause))
+        .route("/SyncPlay/Unpause", post(syncplay::unpause))
+        .route("/emby/SyncPlay/Stop", post(syncplay::stop))
+        .route("/SyncPlay/Stop", post(syncplay::stop))
+        .route("/emby/SyncPlay/Seek", post(syncplay::seek))
+        .route("/SyncPlay/Seek", post(syncplay::seek))
+        .route("/emby/SyncPlay/Buffering", post(syncplay::buffering))
+        .route("/SyncPlay/Buffering", post(syncplay::buffering))
+        .route("/emby/SyncPlay/Ready", post(syncplay::ready))
+        .route("/SyncPlay/Ready", post(syncplay::ready))
+        .route("/emby/SyncPlay/SetShuffleMode", post(syncplay::set_shuffle_mode))
+        .route("/SyncPlay/SetShuffleMode", post(syncplay::set_shuffle_mode))
+        .route("/emby/SyncPlay/SetRepeatMode", post(syncplay::set_repeat_mode))
+        .route("/SyncPlay/SetRepeatMode", post(syncplay::set_repeat_mode))
+        .route("/emby/SyncPlay/Queue", post(syncplay::queue))
+        .route("/SyncPlay/Queue", post(syncplay::queue))
+        .route("/emby/SyncPlay/RemoveFromPlaylist", post(syncplay::remove_from_playlist))
+        .route("/SyncPlay/RemoveFromPlaylist", post(syncplay::remove_from_playlist))
+        .route("/emby/SyncPlay/MovePlaylistItem", post(syncplay::move_playlist_item))
+        .route("/SyncPlay/MovePlaylistItem", post(syncplay::move_playlist_item))
+        .route("/emby/SyncPlay/NextItem", post(syncplay::next_item))
+        .route("/SyncPlay/NextItem", post(syncplay::next_item))
+        .route("/emby/SyncPlay/PreviousItem", post(syncplay::previous_item))
+        .route("/SyncPlay/PreviousItem", post(syncplay::previous_item))
+        .route("/emby/SyncPlay/SetPlaylistItem", post(syncplay::set_playlist_item))
+        .route("/SyncPlay/SetPlaylistItem", post(syncplay::set_playlist_item))
+        .route("/emby/SyncPlay/{group_id}", get(syncplay::get_group))
+        .route("/SyncPlay/{group_id}", get(syncplay::get_group))
         .route(
             "/emby/System/Ping",
             get(system::system_ping).post(system::system_ping),
@@ -754,11 +807,11 @@ pub fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Delete", post(users::delete_user))
         .route(
             "/emby/Users/{user_id}/Configuration",
-            post(users::update_user_configuration),
+            get(users::user_configuration).post(users::update_user_configuration),
         )
         .route(
             "/Users/{user_id}/Configuration",
-            post(users::update_user_configuration),
+            get(users::user_configuration).post(users::update_user_configuration),
         )
         .route(
             "/emby/Users/{user_id}/Configuration/Partial",
@@ -1157,6 +1210,8 @@ pub fn router() -> Router<AppState> {
             get(media_folders::virtual_folders),
         )
         .route("/Library/VirtualFolders", get(media_folders::virtual_folders))
+        .route("/emby/Library/VirtualFolders/LibraryOptions", post(library_options::update_library_options))
+        .route("/Library/VirtualFolders/LibraryOptions", post(library_options::update_library_options))
         .route(
             "/emby/Library/VirtualFolders/Query",
             get(media_folders::virtual_folders_query),
@@ -1164,6 +1219,24 @@ pub fn router() -> Router<AppState> {
         .route(
             "/Library/VirtualFolders/Query",
             get(media_folders::virtual_folders_query),
+        )
+        .route(
+            "/emby/Library/VirtualFolders/Paths",
+            post(media_folders::add_virtual_folder_path)
+                .delete(media_folders::remove_virtual_folder_path),
+        )
+        .route(
+            "/Library/VirtualFolders/Paths",
+            post(media_folders::add_virtual_folder_path)
+                .delete(media_folders::remove_virtual_folder_path),
+        )
+        .route(
+            "/emby/Library/VirtualFolders/Paths/Delete",
+            post(media_folders::remove_virtual_folder_path_by_body),
+        )
+        .route(
+            "/Library/VirtualFolders/Paths/Delete",
+            post(media_folders::remove_virtual_folder_path_by_body),
         )
         .route(
             "/emby/Library/PhysicalPaths",
@@ -1330,6 +1403,29 @@ pub fn router() -> Router<AppState> {
             "/Videos/{item_id}/live.m3u8",
             get(transcoding::hls_live_manifest),
         )
+        .route("/emby/Videos/{item_id}/Subtitles", post(subtitle_upload::upload_subtitle))
+        .route("/Videos/{item_id}/Subtitles", post(subtitle_upload::upload_subtitle))
+        // Trickplay（JF 兼容拼图缩略图 + 管理员后台生成）。
+        .route("/emby/Books/{item_id}/Manifest", get(books::manifest))
+        .route("/Books/{item_id}/Manifest", get(books::manifest))
+        .route("/emby/Books/{item_id}/Chapters/{index}", get(books::chapter))
+        .route("/Books/{item_id}/Chapters/{index}", get(books::chapter))
+        .route("/emby/Books/{item_id}/Resource", get(books::resource))
+        .route("/Books/{item_id}/Resource", get(books::resource))
+        .route("/emby/Books/{item_id}/Pages/{index}", get(books::page))
+        .route("/Books/{item_id}/Pages/{index}", get(books::page))
+        .route("/emby/Books/{item_id}/File", get(books::file))
+        .route("/Books/{item_id}/File", get(books::file))
+        .route("/emby/Videos/{item_id}/Trickplay", get(trickplay::list))
+        .route("/Videos/{item_id}/Trickplay", get(trickplay::list))
+        .route("/emby/Videos/{item_id}/Trickplay/Status", get(trickplay::status))
+        .route("/Videos/{item_id}/Trickplay/Status", get(trickplay::status))
+        .route("/emby/Videos/{item_id}/Trickplay/Generate", post(trickplay::generate))
+        .route("/Videos/{item_id}/Trickplay/Generate", post(trickplay::generate))
+        .route("/emby/Videos/{item_id}/Trickplay/{width}/tiles.m3u8", get(trickplay::playlist))
+        .route("/Videos/{item_id}/Trickplay/{width}/tiles.m3u8", get(trickplay::playlist))
+        .route("/emby/Videos/{item_id}/Trickplay/{width}/{index}", get(trickplay::tile))
+        .route("/Videos/{item_id}/Trickplay/{width}/{index}", get(trickplay::tile))
         .route(
             "/emby/Videos/{item_id}/index.bif",
             get(bif::video_index_bif),
@@ -1491,14 +1587,14 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/emby/Audio/{item_id}/Lyrics",
-            get(lyrics::item_lyrics),
+            get(lyrics::item_lyrics).post(lyrics::upload_lyrics).delete(lyrics::delete_lyrics),
         )
         .route(
             "/emby/audio/{item_id}/Lyrics",
             get(lyrics::item_lyrics),
         )
-        .route("/Audio/{item_id}/Lyrics", get(lyrics::item_lyrics))
-        .route("/audio/{item_id}/Lyrics", get(lyrics::item_lyrics))
+        .route("/Audio/{item_id}/Lyrics", get(lyrics::item_lyrics).post(lyrics::upload_lyrics).delete(lyrics::delete_lyrics))
+        .route("/audio/{item_id}/Lyrics", get(lyrics::item_lyrics).post(lyrics::upload_lyrics).delete(lyrics::delete_lyrics))
         .route(
             "/emby/Audio/{item_id}/RemoteSearch/Lyrics",
             get(lyrics::remote_lyrics_search),
@@ -1515,6 +1611,11 @@ pub fn router() -> Router<AppState> {
             "/audio/{item_id}/RemoteSearch/Lyrics",
             get(lyrics::remote_lyrics_search),
         )
+        .route("/emby/Audio/{item_id}/RemoteSearch/Lyrics/{lyric_id}", post(lyrics::download_remote_lyrics))
+        .route("/Audio/{item_id}/RemoteSearch/Lyrics/{lyric_id}", post(lyrics::download_remote_lyrics))
+        .route("/audio/{item_id}/RemoteSearch/Lyrics/{lyric_id}", post(lyrics::download_remote_lyrics))
+        .route("/emby/Providers/Lyrics/{lyric_id}", get(lyrics::remote_lyric_by_id))
+        .route("/Providers/Lyrics/{lyric_id}", get(lyrics::remote_lyric_by_id))
         .route(
             "/emby/Audio/{item_id}/stream",
             get(streaming::audio_stream_exact),
@@ -1741,6 +1842,18 @@ pub fn router() -> Router<AppState> {
             "/Playlists",
             get(playlists::playlists).post(playlists::create_playlist),
         )
+        .route("/emby/Playlists/{playlist_id}/Users", get(playlists::playlist_users))
+        .route("/Playlists/{playlist_id}/Users", get(playlists::playlist_users))
+        .route("/emby/Playlists/{playlist_id}/Users/{user_id}", get(playlists::playlist_user).post(playlists::update_playlist_user).delete(playlists::remove_playlist_user))
+        .route("/Playlists/{playlist_id}/Users/{user_id}", get(playlists::playlist_user).post(playlists::update_playlist_user).delete(playlists::remove_playlist_user))
+        .route(
+            "/emby/Playlists/{playlist_id}",
+            get(playlists::playlist_detail).post(playlists::rename_playlist),
+        )
+        .route(
+            "/Playlists/{playlist_id}",
+            get(playlists::playlist_detail).post(playlists::rename_playlist),
+        )
         .route(
             "/emby/Playlists/{playlist_id}/AddToPlaylistInfo",
             get(playlists::add_to_playlist_info),
@@ -1919,6 +2032,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/Users/{user_id}/Suggestions",
             get(items::suggested_items),
+        )
+        .route(
+            "/emby/Items/Suggestions",
+            get(items::suggested_items_for_query_user),
+        )
+        .route(
+            "/Items/Suggestions",
+            get(items::suggested_items_for_query_user),
         )
         .route(
             "/emby/Movies/Recommendations",
@@ -2473,8 +2594,26 @@ pub fn router() -> Router<AppState> {
             "/Items/{item_id}/ThemeVideos",
             get(theme_media::theme_videos),
         )
-        .route("/emby/Items/{item_id}", get(items::item_by_id))
-        .route("/Items/{item_id}", get(items::item_by_id))
+        .route(
+            "/emby/Items/{item_id}",
+            get(items::item_by_id)
+                .post(item_update::update_item)
+                .delete(items::delete_item),
+        )
+        .route(
+            "/Items/{item_id}",
+            get(items::item_by_id)
+                .post(item_update::update_item)
+                .delete(items::delete_item),
+        )
+        .route(
+            "/emby/Items/{item_id}/Delete",
+            post(items::delete_item),
+        )
+        .route(
+            "/Items/{item_id}/Delete",
+            post(items::delete_item),
+        )
         .route(
             "/emby/Items/{item_id}/PlaybackInfo",
             get(playback::playback_info).post(playback::post_playback_info),
@@ -2604,6 +2743,39 @@ mod tests {
         assert!(
             routes.contains(".route(\"/Albums/{item_id}/Similar\", get(items::similar_items))")
         );
+    }
+
+    #[test]
+    fn syncplay_stub_routes_are_registered_with_prefixed_and_plain_paths() {
+        let routes = include_str!("mod.rs");
+        for route in [
+            "/emby/SyncPlay/List",
+            "/SyncPlay/List",
+            "/emby/SyncPlay/New",
+            "/SyncPlay/New",
+            "/emby/SyncPlay/CreateGroup",
+            "/SyncPlay/CreateGroup",
+            "/emby/SyncPlay/Join",
+            "/SyncPlay/Join",
+            "/emby/SyncPlay/Leave",
+            "/SyncPlay/Leave",
+            "/emby/SyncPlay/Ping",
+            "/SyncPlay/Ping",
+        ] {
+            assert!(routes.contains(route), "missing route {route}");
+        }
+        assert!(routes.contains("get(syncplay::list_groups)"));
+        assert!(routes.contains("post(syncplay::create_group)"));
+        assert!(routes.contains("post(syncplay::join_group)"));
+        assert!(routes.contains("post(syncplay::leave_group)"));
+        assert!(routes.contains("post(syncplay::ping)"));
+        for path in ["SetNewQueue", "Pause", "Unpause", "Stop", "Seek", "Buffering", "Ready", "{group_id}"] {
+            assert!(routes.contains(&format!("\"/emby/SyncPlay/{path}\"")), "missing /emby/SyncPlay/{path}");
+            assert!(routes.contains(&format!("\"/SyncPlay/{path}\"")), "missing /SyncPlay/{path}");
+        }
+        assert!(routes.contains("post(syncplay::set_new_queue)"));
+        assert!(routes.contains("get(syncplay::get_group)"));
+        assert!(routes.contains("mod syncplay;"));
     }
 
     #[test]

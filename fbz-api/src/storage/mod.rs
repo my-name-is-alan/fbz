@@ -1,5 +1,6 @@
 pub mod importer;
 pub mod nfo;
+pub mod provider;
 pub mod scan;
 mod settings;
 
@@ -51,6 +52,10 @@ pub fn router() -> Router<AppState> {
 }
 
 pub async fn rpc(state: &AppState, account_id: &str, mut input: Value) -> Result<Value, AppError> {
+    use provider::{
+        StorageProviderContext, global_registry, load_plugin_key, user_message_for_provider_error,
+    };
+
     let c = cipher(state)?;
     let mut tx = db(state)?.begin().await.map_err(sql_error)?;
     // This row lock serializes credentials and quotas across all FBZ processes.
@@ -63,6 +68,10 @@ pub async fn rpc(state: &AppState, account_id: &str, mut input: Value) -> Result
         return Err(AppError::conflict("授权任务已取消"));
     }
     let op = input["op"].as_str().unwrap_or("").to_owned();
+    let provider_id: String = row.get("provider");
+    let storage_provider = global_registry().get(&provider_id).ok_or_else(|| {
+        AppError::unprocessable(format!("未知存储源 `{provider_id}`，请检查扩展点注册表"))
+    })?;
     let nonce: Option<Vec<u8>> = row.get("secret_nonce");
     let ciphertext: Option<Vec<u8>> = row.get("secret_ciphertext");
     let credentials: Value = if let (Some(nonce), Some(ciphertext)) = (nonce, ciphertext) {
@@ -80,83 +89,69 @@ pub async fn rpc(state: &AppState, account_id: &str, mut input: Value) -> Result
         json!({})
     };
     if !op.starts_with("auth.") && credentials["access_token"].as_str().is_none() {
-        return Err(AppError::unauthorized("请先扫码连接光鸭"));
+        return Err(AppError::unauthorized("请先扫码连接云盘账号"));
     }
     let wait: f64 = row.get("wait");
     if wait > 2.0 {
-        return Err(AppError::unprocessable("光鸭限流冷却中，请稍后重试"));
+        return Err(AppError::unprocessable("云盘限流冷却中，请稍后重试"));
     }
     tokio::time::sleep(Duration::from_secs_f64(wait.max(0.0))).await;
-    input["accountId"] = json!(account_id);
-    input["deviceId"] = json!(row.get::<String, _>("device_id"));
-    input["credentialVersion"] = json!(row.get::<i64, _>("version"));
-    input["qps"] = json!(row.get::<i32, _>("qps"));
-    input["credentials"] = credentials;
-    let endpoint = std::env::var("FBZ_GUANGYA_PLUGIN_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8098/rpc".into());
-    let key = std::env::var("FBZ_STORAGE_PLUGIN_KEY")
-        .map_err(|_| AppError::unprocessable("请配置 FBZ_STORAGE_PLUGIN_KEY 并启动光鸭插件"))?;
-    if key.len() < 32 {
-        return Err(AppError::unprocessable("插件通信密钥至少需要 32 字符"));
+
+    let plugin_key = load_plugin_key().map_err(|e| AppError::unprocessable(e.message))?;
+    let ctx = StorageProviderContext {
+        account_id: account_id.to_owned(),
+        device_id: row.get::<String, _>("device_id"),
+        credential_version: row.get::<i64, _>("version"),
+        qps: row.get::<i32, _>("qps"),
+        credentials,
+        plugin_key,
+    };
+
+    // Drop op from the mutable bag; adapter re-inserts it with account fields.
+    if let Some(obj) = input.as_object_mut() {
+        obj.remove("op");
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(55))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| AppError::internal("plugin client unavailable"))?;
-    let mut response = client
-        .post(endpoint)
-        .bearer_auth(key)
-        .json(&input)
-        .send()
+
+    let outcome = storage_provider
+        .invoke(&ctx, &op, input)
         .await
-        .map_err(|_| AppError::internal("光鸭插件连接失败"))?;
-    if !response.status().is_success() {
-        return Err(AppError::internal("光鸭插件拒绝请求，请检查通信密钥"));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| AppError::internal("插件响应读取失败"))?
-    {
-        if bytes.len() + chunk.len() > 45 * 1024 * 1024 {
-            return Err(AppError::unprocessable("插件响应超出上限"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let result: Value =
-        serde_json::from_slice(&bytes).map_err(|_| AppError::internal("插件响应无效"))?;
-    if result["data"]["authenticated"] == true {
+        .map_err(|e| {
+            if e.code == "transport" || e.code == "invalid_request" {
+                AppError::unprocessable(e.message)
+            } else {
+                AppError::internal(e.message)
+            }
+        })?;
+
+    if outcome.data["authenticated"] == true {
         let cloud_id: Option<String> = row.get("cloud_user_id");
         if cloud_id
             .as_deref()
-            .is_some_and(|v| Some(v) != result["data"]["userId"].as_str())
+            .is_some_and(|v| Some(v) != outcome.data["userId"].as_str())
         {
             return Err(AppError::unprocessable(
                 "扫码账号与原绑定账号不同，请添加新账号",
             ));
         }
     }
-    if result["credentials"].is_object() {
+    if let Some(ref refreshed) = outcome.credentials {
         let encrypted = c
             .encrypt_scoped(
                 "storage-account",
                 account_id,
                 "credentials",
-                &result["credentials"].to_string(),
+                &refreshed.to_string(),
             )
             .map_err(|_| AppError::internal("凭据加密失败"))?;
         sqlx::query("update storage_accounts set secret_nonce=$2,secret_ciphertext=$3,version=version+1,status='ready',updated_at=now(),cloud_user_id=coalesce($4,cloud_user_id) where id::text=$1")
-            .bind(account_id).bind(encrypted.nonce).bind(encrypted.ciphertext).bind(result["data"]["userId"].as_str()).execute(&mut *tx).await.map_err(sql_error)?;
+            .bind(account_id).bind(encrypted.nonce).bind(encrypted.ciphertext).bind(outcome.data["userId"].as_str()).execute(&mut *tx).await.map_err(sql_error)?;
     }
-    let cooldown = result["error"]["retryAfter"]
-        .as_f64()
-        .unwrap_or(0.0)
+    let cooldown = outcome
+        .retry_after
         .clamp(0.0, 300.0)
         .max(1.0 / row.get::<i32, _>("qps") as f64);
     sqlx::query("update storage_accounts set next_request_at=clock_timestamp()+$2*interval '1 second' where id::text=$1").bind(account_id).bind(cooldown).execute(&mut *tx).await.map_err(sql_error)?;
-    if result["error"]["code"] == "auth_expired" {
+    if outcome.error_code.as_deref() == Some("auth_expired") {
         sqlx::query("update storage_accounts set status='expired' where id::text=$1")
             .bind(account_id)
             .execute(&mut *tx)
@@ -164,15 +159,13 @@ pub async fn rpc(state: &AppState, account_id: &str, mut input: Value) -> Result
             .map_err(sql_error)?;
     }
     tx.commit().await.map_err(sql_error)?;
-    if let Some(code) = result["error"]["code"].as_str() {
-        return Err(AppError::unprocessable(match code {
-            "auth_expired" => "光鸭登录已失效，请重新扫码",
-            "rate_limited" => "光鸭限流，请稍后重试",
-            "unsafe_url" => "云端文件地址被安全策略拒绝",
-            _ => "光鸭操作失败，请稍后重试或检查插件配置",
-        }));
+    if let Some(code) = outcome.error_code.as_deref() {
+        return Err(AppError::unprocessable(user_message_for_provider_error(
+            &provider_id,
+            code,
+        )));
     }
-    Ok(result["data"].clone())
+    Ok(outcome.data)
 }
 
 async fn overview(
@@ -183,14 +176,19 @@ async fn overview(
     authenticate_admin(&state, &headers, &uri).await?;
     let accounts: Vec<Value> = sqlx::query_scalar("select jsonb_build_object('id',id,'name',name,'status',status,'cloudUserId',cloud_user_id,'qps',qps) from storage_accounts order by created_at").fetch_all(db(&state)?).await.map_err(sql_error)?;
     let mounts: Vec<Value> = sqlx::query_scalar("select jsonb_build_object('id',m.id,'accountId',m.account_id,'name',m.name,'mountPath',m.mount_path,'refreshMinutes',m.refresh_minutes,'nfoSource',m.nfo_source,'imageCache',m.image_cache,'lastRefreshedAt',m.last_refreshed_at,'nextRefreshAt',m.next_refresh_at,'libraryId',l.public_id,'rootId',root_id,'path',display_path,'status',status,'scanned',scanned,'imported',imported,'lastError',last_error) from storage_mounts m left join libraries l on l.id=m.library_id order by m.updated_at desc").fetch_all(db(&state)?).await.map_err(sql_error)?;
-    Ok(Json(
-        json!({"accounts":accounts,"mounts":mounts,"configured":cipher(&state).is_ok() && std::env::var("FBZ_STORAGE_PLUGIN_KEY").is_ok()}),
-    ))
+    Ok(Json(json!({
+        "accounts": accounts,
+        "mounts": mounts,
+        "configured": cipher(&state).is_ok() && std::env::var(provider::STORAGE_PLUGIN_KEY_ENV).is_ok(),
+        "providers": provider::global_registry().ids(),
+    })))
 }
 #[derive(Deserialize)]
 struct AccountInput {
     name: String,
     qps: Option<i32>,
+    /// Registered StorageProvider id; defaults to the Guangya transitional adapter.
+    provider: Option<String>,
 }
 async fn create_account(
     State(state): State<AppState>,
@@ -203,8 +201,28 @@ async fn create_account(
     if input.name.trim().is_empty() || input.name.len() > 120 {
         return Err(AppError::unprocessable("请填写账号名称"));
     }
-    let id:String=sqlx::query_scalar("insert into storage_accounts(provider,name,device_id,qps) values('guangya',$1,gen_random_uuid()::text,$2) returning id::text").bind(input.name.trim()).bind(input.qps.unwrap_or(10).clamp(1,20)).fetch_one(db(&state)?).await.map_err(sql_error)?;
-    Ok(Json(json!({"id":id})))
+    let provider_id = input
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(provider::GUANGYA_PROVIDER_ID);
+    if !provider::global_registry().contains(provider_id) {
+        return Err(AppError::unprocessable(format!(
+            "未知存储源 `{provider_id}`，当前已注册: {}",
+            provider::global_registry().ids().join(", ")
+        )));
+    }
+    let id: String = sqlx::query_scalar(
+        "insert into storage_accounts(provider,name,device_id,qps) values($1,$2,gen_random_uuid()::text,$3) returning id::text",
+    )
+    .bind(provider_id)
+    .bind(input.name.trim())
+    .bind(input.qps.unwrap_or(10).clamp(1, 20))
+    .fetch_one(db(&state)?)
+    .await
+    .map_err(sql_error)?;
+    Ok(Json(json!({"id": id, "provider": provider_id})))
 }
 async fn start_login(
     State(state): State<AppState>,
@@ -217,7 +235,7 @@ async fn start_login(
     let data = rpc(&state, &id, json!({"op":"auth.start","loginEpoch":epoch})).await?;
     let code = data["device_code"]
         .as_str()
-        .ok_or_else(|| AppError::internal("光鸭未返回授权码"))?;
+        .ok_or_else(|| AppError::internal("云盘未返回授权码"))?;
     let encrypted = cipher(&state)?
         .encrypt_scoped("storage-login", &id, "device-code", code)
         .map_err(|_| AppError::internal("授权码加密失败"))?;
@@ -405,7 +423,7 @@ pub async fn stream(state: &AppState, media_file_id: i64) -> Result<Option<Respo
     .await?;
     let url = data["url"]
         .as_str()
-        .ok_or_else(|| AppError::internal("光鸭未返回播放地址"))?;
+        .ok_or_else(|| AppError::internal("云盘未返回播放地址"))?;
     let parsed = reqwest::Url::parse(url).map_err(|_| AppError::unprocessable("播放地址无效"))?;
     if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(AppError::unprocessable("播放地址不安全"));

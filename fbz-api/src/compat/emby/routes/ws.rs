@@ -108,6 +108,14 @@ async fn handle_session_socket(mut socket: WebSocket, state: AppState, session_i
     }
 
     state.session_hub().unregister(&session_id, generation);
+    // 会话彻底断开（未被新连接替换）时自动退出 SyncPlay 组并通知其余成员。
+    if !state.session_hub().is_connected(&session_id)
+        && let Ok(outbound) = state.syncplay().leave(&session_id)
+    {
+        for message in outbound {
+            state.session_hub().send_to_session(&message.session_id, message.payload);
+        }
+    }
 }
 
 fn is_keep_alive_message(raw: &str) -> bool {

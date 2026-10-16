@@ -100,6 +100,7 @@ pub struct CreateLibraryInput {
 pub struct UpdateLibrarySettingsInput {
     pub library_id: String,
     pub is_hidden: bool,
+    pub enable_realtime_monitor: bool,
     pub preferred_metadata_language: Option<String>,
     pub preferred_metadata_country: Option<String>,
     pub preferred_image_language: Option<String>,
@@ -251,6 +252,8 @@ pub struct UpdateUserPolicyInput {
     pub allow_download: bool,
     pub allow_transcode: bool,
     pub allow_new_device_login: bool,
+    pub max_parental_rating: Option<i32>,
+    pub block_unrated_items: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,6 +279,7 @@ pub struct LibrarySettingsRecord {
     pub name: String,
     pub library_type: String,
     pub is_hidden: bool,
+    pub enable_realtime_monitor: bool,
     pub preferred_metadata_language: Option<String>,
     pub preferred_metadata_country: Option<String>,
     pub preferred_image_language: Option<String>,
@@ -352,6 +356,23 @@ pub struct ScanJobRecord {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct MarkerDetectJobRecord {
+    pub id: String,
+    pub status: String,
+    pub queue_name: String,
+    pub job_type: String,
+    pub item_id: String,
+}
+
+pub struct MediaMarkerRecord {
+    pub marker_type: String,
+    pub start_ticks: i64,
+    pub end_ticks: Option<i64>,
+    pub source: String,
+    pub confidence: Option<f64>,
+    pub created_at: String,
+}
+
 pub struct MetadataRefreshJobRecord {
     pub id: String,
     pub status: String,
@@ -447,6 +468,70 @@ const ADMIN_QUEUE_LIBRARY_SCAN_SQL: &str = r#"
             limit 1
             "#;
 
+
+const ADMIN_QUEUE_MARKER_DETECT_ITEM_SQL: &str = r#"
+            with target_item as (
+                select public_id::text as item_public_id
+                from media_items
+                where public_id = case
+                    when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    then $1::uuid
+                    else null::uuid
+                end
+                  and is_deleted = false
+            ),
+            inserted as (
+                insert into jobs (
+                    job_type,
+                    status,
+                    queue_name,
+                    priority,
+                    payload
+                )
+                select
+                    $2,
+                    'queued',
+                    'marker',
+                    -2,
+                    jsonb_build_object(
+                        'mediaItemId', target_item.item_public_id,
+                        'requestedByUserId', $3::bigint,
+                        'reason', $4::jsonb,
+                        'force', $5::boolean
+                    )
+                from target_item
+                on conflict do nothing
+                returning public_id::text as id,
+                          status,
+                          queue_name,
+                          job_type,
+                          payload->>'mediaItemId' as item_id,
+                          created_at
+            ),
+            existing as (
+                select j.public_id::text as id,
+                       j.status,
+                       j.queue_name,
+                       j.job_type,
+                       j.payload->>'mediaItemId' as item_id,
+                       j.created_at
+                from jobs j
+                join target_item
+                  on target_item.item_public_id = j.payload->>'mediaItemId'
+                where j.job_type = $2
+                  and j.status in ('queued', 'running', 'failed')
+                  and j.attempts < j.max_attempts
+                order by j.created_at desc, j.id desc
+                limit 1
+            )
+            select id, status, queue_name, job_type, item_id
+            from inserted
+            union all
+            select id, status, queue_name, job_type, item_id
+            from existing
+            limit 1
+            "#;
+
 const ADMIN_QUEUE_METADATA_REFRESH_ITEM_SQL: &str = r#"
             with target_item as (
                 select public_id::text as item_public_id
@@ -536,7 +621,7 @@ const ADMIN_QUEUE_METADATA_REFRESH_LIBRARY_SQL: &str = r#"
                   on target_library.id = mi.library_id
                 where mi.is_deleted = false
                   and mi.metadata_status in ('pending', 'failed')
-                  and mi.item_type in ('movie', 'series', 'episode')
+                  and mi.item_type in ('movie', 'series', 'episode', 'book')
                   and not exists (
                       select 1
                       from jobs j
@@ -1262,6 +1347,14 @@ impl AdminRepository {
             insert_library_path(&mut tx, library_row_id, &path).await?;
         }
 
+        // §6.4 / §10 P0-D2：创建库预填推荐源链（NFO 槽 + Provider 引用）。
+        crate::library::metadata_sources::LibraryMetadataSourcesRepository::seed_defaults_in_tx(
+            &mut tx,
+            library_row_id,
+            &input.library_type,
+        )
+        .await?;
+
         tx.commit().await?;
 
         ManagedLibraryRecord::from_row(library_row)
@@ -1282,6 +1375,7 @@ impl AdminRepository {
                    libraries.name,
                    libraries.library_type,
                    libraries.is_hidden,
+                   libraries.enable_realtime_monitor,
                    libraries.preferred_metadata_language,
                    libraries.preferred_metadata_country,
                    libraries.preferred_image_language,
@@ -1489,11 +1583,12 @@ impl AdminRepository {
             r#"
             update libraries
             set is_hidden = $2,
-                preferred_metadata_language = $3,
-                preferred_metadata_country = $4,
-                preferred_image_language = $5,
-                preferred_image_prefer_original = $6,
-                preferred_image_fallback_languages = $7,
+                enable_realtime_monitor = $3,
+                preferred_metadata_language = $4,
+                preferred_metadata_country = $5,
+                preferred_image_language = $6,
+                preferred_image_prefer_original = $7,
+                preferred_image_fallback_languages = $8,
                 updated_at = now()
             where public_id = case
                 when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -1505,6 +1600,7 @@ impl AdminRepository {
                 name,
                 library_type,
                 is_hidden,
+                enable_realtime_monitor,
                 preferred_metadata_language,
                 preferred_metadata_country,
                 preferred_image_language,
@@ -1514,6 +1610,7 @@ impl AdminRepository {
         )
         .bind(input.library_id.trim())
         .bind(input.is_hidden)
+        .bind(input.enable_realtime_monitor)
         .bind(input.preferred_metadata_language.as_deref().map(str::trim))
         .bind(input.preferred_metadata_country.as_deref().map(str::trim))
         .bind(input.preferred_image_language.as_deref().map(str::trim))
@@ -1523,6 +1620,31 @@ impl AdminRepository {
         .await?;
 
         row.map(LibrarySettingsRecord::from_row).transpose()
+    }
+
+    /// Resolve a managed library by display name (trimmed, case-sensitive).
+    /// Emby/JF VirtualFolders Paths write APIs address libraries by `Name`.
+    pub async fn find_library_public_id_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            r#"
+            select public_id::text as id
+            from libraries
+            where name = $1
+            order by created_at asc, id asc
+            limit 1
+            "#,
+        )
+        .bind(trimmed)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.try_get::<String, _>("id")).transpose()?)
     }
 
     pub async fn add_library_path(
@@ -1701,6 +1823,91 @@ impl AdminRepository {
         row.map(ScanJobRecord::from_row).transpose()
     }
 
+
+    pub async fn queue_marker_detect_for_item(
+        &self,
+        item_id: &str,
+        requested_by_user_id: i64,
+        reason: Option<String>,
+        force: bool,
+    ) -> Result<Option<MarkerDetectJobRecord>, sqlx::Error> {
+        let reason_json = serde_json::json!(reason.unwrap_or_else(|| "admin".to_owned()));
+        let row = sqlx::query(ADMIN_QUEUE_MARKER_DETECT_ITEM_SQL)
+            .bind(item_id)
+            .bind(crate::media::marker_detect::MEDIA_MARKER_DETECT_JOB_TYPE)
+            .bind(requested_by_user_id)
+            .bind(reason_json)
+            .bind(force)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(MarkerDetectJobRecord {
+                id: row.try_get("id")?,
+                status: row.try_get("status")?,
+                queue_name: row.try_get("queue_name")?,
+                job_type: row.try_get("job_type")?,
+                item_id: row.try_get("item_id")?,
+            })),
+        }
+    }
+
+    pub async fn list_media_item_markers(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<Vec<MediaMarkerRecord>>, sqlx::Error> {
+        let Some(internal_id) = sqlx::query_scalar::<_, i64>(
+            r#"
+            select id
+            from media_items
+            where public_id = case
+                when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+              and is_deleted = false
+            limit 1
+            "#,
+        )
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let rows = sqlx::query(
+            r#"
+            select
+                marker_type,
+                start_ticks,
+                end_ticks,
+                source,
+                confidence::float8 as confidence,
+                created_at::text as created_at
+            from media_markers
+            where media_item_id = $1
+            order by start_ticks asc, marker_type asc, source asc
+            "#,
+        )
+        .bind(internal_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut markers = Vec::with_capacity(rows.len());
+        for row in rows {
+            markers.push(MediaMarkerRecord {
+                marker_type: row.try_get("marker_type")?,
+                start_ticks: row.try_get("start_ticks")?,
+                end_ticks: row.try_get("end_ticks")?,
+                source: row.try_get("source")?,
+                confidence: row.try_get("confidence")?,
+                created_at: row.try_get("created_at")?,
+            });
+        }
+        Ok(Some(markers))
+    }
+
     pub async fn queue_metadata_refresh_for_item(
         &self,
         item_id: &str,
@@ -1877,6 +2084,16 @@ impl AdminRepository {
                     allow_new_device_login = "#,
         );
         query.push_bind(input.allow_new_device_login);
+        query.push(
+            r#",
+                    max_parental_rating = "#,
+        );
+        query.push_bind(input.max_parental_rating);
+        query.push(
+            r#",
+                    block_unrated_items = "#,
+        );
+        query.push_bind(&input.block_unrated_items);
         query.push(
             r#",
                     updated_at = now()
@@ -4431,6 +4648,7 @@ impl LibrarySettingsRecord {
             name: row.try_get("name")?,
             library_type: row.try_get("library_type")?,
             is_hidden: row.try_get("is_hidden")?,
+            enable_realtime_monitor: row.try_get("enable_realtime_monitor")?,
             preferred_metadata_language: row.try_get("preferred_metadata_language")?,
             preferred_metadata_country: row.try_get("preferred_metadata_country")?,
             preferred_image_language: row.try_get("preferred_image_language")?,
@@ -6347,7 +6565,9 @@ mod tests {
                     allow_download: true,
                     allow_transcode: true,
                     allow_new_device_login: true,
-                },
+                    max_parental_rating: None,
+                    block_unrated_items: Vec::new(),
+            },
             )
             .await
             .expect("admin user policy update should execute against live schema");
@@ -9666,6 +9886,7 @@ mod tests {
             .update_library_settings(UpdateLibrarySettingsInput {
                 library_id: created.id.clone(),
                 is_hidden: true,
+                enable_realtime_monitor: false,
                 preferred_metadata_language: Some("zh-CN".to_owned()),
                 preferred_metadata_country: Some("CN".to_owned()),
                 preferred_image_language: Some("ja".to_owned()),
@@ -9693,6 +9914,7 @@ mod tests {
             .update_library_settings(UpdateLibrarySettingsInput {
                 library_id: "00000000-0000-0000-0000-000000000000".to_owned(),
                 is_hidden: false,
+                enable_realtime_monitor: false,
                 preferred_metadata_language: None,
                 preferred_metadata_country: None,
                 preferred_image_language: None,

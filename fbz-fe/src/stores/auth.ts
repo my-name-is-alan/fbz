@@ -9,6 +9,7 @@ import {
   listSystemUsers,
   updateSystemUserPolicy,
 } from "@/service/modules/admin.ts";
+import { getUserConfiguration, updateUserConfiguration } from "@/service/modules/userData.ts";
 import { getAccessToken } from "@/service/request.ts";
 import type { AdminUser } from "@/types/admin.ts";
 
@@ -54,6 +55,8 @@ export const useAuthStore = defineStore("auth", () => {
   // 登录态：以本地是否持有访问令牌为准（令牌由真实登录接口签发）。
   const userId = ref<string>(localStorage.getItem("fbz_auth_user_id") ?? "");
   const isAuthenticated = ref<boolean>(getAccessToken() !== null);
+  /** 是否管理员（来自导航 BFF `user.isAdmin`；未拉取前为 false）。 */
+  const isAdmin = ref<boolean>(localStorage.getItem("fbz_auth_is_admin") === "1");
 
   // 头像缓存版本：null = 未设置头像（BaseAvatar 直接渲染首字母、不发请求）。
   // 有值时作为 `<img src>` 的 `?v=` 击穿缓存；导航接口返回权威值。
@@ -136,7 +139,7 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
-  function updateProfile(profile: Partial<UserProfile>) {
+  function applyLocalProfile(profile: Partial<UserProfile>): boolean {
     if (profile.username !== undefined) {
       if (!profile.username.trim()) {
         uiStore.showToast("用户名不能为空！", "error");
@@ -165,6 +168,53 @@ export const useAuthStore = defineStore("auth", () => {
       audioPreference.value = profile.audioPreference;
       localStorage.setItem("fbz_pref_audiopref", audioPreference.value);
     }
+    return true;
+  }
+
+  /** 从服务端 UserConfiguration 回填字幕/音轨偏好（登录后或恢复会话时）。 */
+  async function syncPreferencesFromServer(): Promise<void> {
+    if (!userId.value) return;
+    try {
+      const configuration = await getUserConfiguration(userId.value);
+      if (configuration.SubtitleLanguagePreference) {
+        language.value = configuration.SubtitleLanguagePreference;
+        localStorage.setItem("fbz_pref_language", language.value);
+      }
+      if (configuration.AudioLanguagePreference) {
+        audioPreference.value = configuration.AudioLanguagePreference;
+        localStorage.setItem("fbz_pref_audiopref", audioPreference.value);
+      }
+      if (typeof configuration.PlayDefaultAudioTrack === "boolean") {
+        // PlayDefaultAudioTrack=false 时仍记本地音轨偏好；autoSubtitles 映射 SubtitleMode
+      }
+      if (configuration.SubtitleMode) {
+        const mode = configuration.SubtitleMode.toLowerCase();
+        autoSubtitles.value = mode !== "none" && mode !== "off";
+        localStorage.setItem("fbz_pref_autosub", String(autoSubtitles.value));
+      }
+    } catch {
+      // 偏好拉取失败不阻断登录；保留本地缓存。
+    }
+  }
+
+  async function updateProfile(profile: Partial<UserProfile>): Promise<boolean> {
+    if (!applyLocalProfile(profile)) return false;
+
+    if (userId.value) {
+      try {
+        await updateUserConfiguration(userId.value, {
+          SubtitleLanguagePreference: language.value || null,
+          AudioLanguagePreference: audioPreference.value || null,
+          SubtitleMode: autoSubtitles.value ? "Default" : "None",
+          PlayDefaultAudioTrack: true,
+          RememberAudioSelections: true,
+          RememberSubtitleSelections: true,
+        });
+      } catch {
+        uiStore.showToast("本地已保存，但同步到服务器失败。", "warning");
+        return true;
+      }
+    }
 
     uiStore.showToast("个人信息与偏好设置已成功保存！", "success");
     return true;
@@ -174,6 +224,13 @@ export const useAuthStore = defineStore("auth", () => {
     if (!lang) return;
     language.value = lang;
     localStorage.setItem("fbz_pref_language", lang);
+  }
+
+  /** 写入管理员标记（导航 BFF 权威值）并持久化。 */
+  function setIsAdmin(value: boolean): void {
+    isAdmin.value = value;
+    if (value) localStorage.setItem("fbz_auth_is_admin", "1");
+    else localStorage.removeItem("fbz_auth_is_admin");
   }
 
   interface LoginPayload {
@@ -207,6 +264,7 @@ export const useAuthStore = defineStore("auth", () => {
       isAuthenticated.value = true;
       localStorage.setItem("fbz_auth_username", session.username);
       localStorage.setItem("fbz_auth_user_id", session.userId);
+      void syncPreferencesFromServer();
 
       uiStore.showToast(`欢迎回来，${nickname.value || session.username}！`, "success");
       return true;
@@ -229,6 +287,7 @@ export const useAuthStore = defineStore("auth", () => {
     logoutRequest();
     isAuthenticated.value = false;
     userId.value = "";
+    setIsAdmin(false);
     localStorage.removeItem("fbz_auth_user_id");
   }
 
@@ -388,6 +447,8 @@ export const useAuthStore = defineStore("auth", () => {
     autoSubtitles,
     audioPreference,
     isAuthenticated,
+    isAdmin,
+    setIsAdmin,
     userId,
     avatarVersion,
     setAvatarVersion,
@@ -398,6 +459,7 @@ export const useAuthStore = defineStore("auth", () => {
     logout,
     setLanguage,
     updateProfile,
+    syncPreferencesFromServer,
     changePassword,
     loadUsers,
     toggleUserStatus,

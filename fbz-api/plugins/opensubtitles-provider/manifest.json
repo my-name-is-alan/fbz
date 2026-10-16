@@ -1,0 +1,44 @@
+{
+  "id": "fbz.subtitle.opensubtitles",
+  "name": "OpenSubtitles Provider",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19107/fbz-plugin",
+  "description": "Official remote subtitle provider. Subscribes to subtitle.provider.query (search + download). With an api_key it uses the OpenSubtitles.com REST v1 API; without a key it falls back to the keyless legacy rest.opensubtitles.org search. Secrets live in plugin config only.",
+  "permissions": [
+    {
+      "key": "media.read",
+      "reason": "Receive item title/year/IMDb id/season/episode/file name for subtitle search; return subtitle bytes for core to write as a sidecar."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "subtitle.provider.query",
+      "handler": "subtitles.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "api_key",
+      "label": "OpenSubtitles.com API Key",
+      "type": "secret",
+      "required": false,
+      "helpText": "Optional. When set, uses api.opensubtitles.com v1; otherwise keyless legacy rest.opensubtitles.org."
+    },
+    {
+      "key": "user_agent",
+      "label": "User-Agent",
+      "type": "string",
+      "required": false,
+      "helpText": "Default 'fbz v0.1' (com API) / 'TemporaryUserAgent' (legacy API)."
+    },
+    {
+      "key": "max_results",
+      "label": "Max results",
+      "type": "number",
+      "required": false,
+      "helpText": "Default 30."
+    }
+  ]
+}

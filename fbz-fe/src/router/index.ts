@@ -34,6 +34,16 @@ export const routes = [
         component: () => import("@/views/music/library/index.vue"),
       },
       {
+        path: "books/:id",
+        name: "books-library",
+        component: () => import("@/views/books/library/index.vue"),
+      },
+      {
+        path: "book/:id",
+        name: "book-reader",
+        component: () => import("@/views/books/reader/index.vue"),
+      },
+      {
         path: "artist/:id",
         name: "artist-detail",
         component: () => import("@/views/detail/artist/index.vue"),
@@ -62,6 +72,21 @@ export const routes = [
         path: "collection/:id",
         name: "collection-detail",
         component: () => import("@/views/detail/collection/index.vue"),
+      },
+      {
+        path: "collections",
+        name: "collections",
+        component: () => import("@/views/collections/index.vue"),
+      },
+      {
+        path: "playlists",
+        name: "playlists",
+        component: () => import("@/views/playlists/index.vue"),
+      },
+      {
+        path: "playlists/:id",
+        name: "playlist-detail",
+        component: () => import("@/views/playlists/detail/index.vue"),
       },
     ],
   },

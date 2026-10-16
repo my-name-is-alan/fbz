@@ -111,7 +111,20 @@ pub async fn remote_subtitle_search(
 
     ensure_user_can_access_item(&state, user.id, &item_id).await?;
 
-    Ok(Json(empty_remote_subtitle_results(language)))
+    // 插件优先：已启用的 `subtitle.provider.query` 订阅者（如 fbz.subtitle.opensubtitles）。
+    // 无订阅者时返回空列表（不造假命中）。
+    let results = super::remote_subtitles::search(
+        &state,
+        &item_id,
+        &language,
+        super::remote_subtitles::SearchFlags {
+            is_perfect_match: _requested_match_flags.0,
+            is_forced: _requested_match_flags.1,
+            is_hearing_impaired: _requested_match_flags.2,
+        },
+    )
+    .await?;
+    Ok(Json(results))
 }
 
 pub async fn provider_subtitle_download(
@@ -119,13 +132,13 @@ pub async fn provider_subtitle_download(
     AxumPath(subtitle_id): AxumPath<String>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<StatusCode, AppError> {
+) -> Result<Response, AppError> {
     let _user = authenticate_request_user(&state, &headers, &uri).await?;
-    let _subtitle_id = normalize_remote_subtitle_id(&subtitle_id)?;
-
-    Err(AppError::conflict(
-        "remote subtitle provider downloads are not configured",
-    ))
+    let subtitle_id = normalize_remote_subtitle_id(&subtitle_id)?;
+    // JF `GET /Providers/Subtitles/Subtitles/{id}`：直接回字幕内容（不落盘）。
+    let downloaded = super::remote_subtitles::download(&state, "", &subtitle_id).await?;
+    let mime = if downloaded.format.eq_ignore_ascii_case("vtt") { "text/vtt; charset=utf-8" } else { "text/plain; charset=utf-8" };
+    Ok(axum::response::IntoResponse::into_response(([(axum::http::header::CONTENT_TYPE, mime)], downloaded.data)))
 }
 
 pub async fn download_remote_subtitle(
@@ -136,13 +149,27 @@ pub async fn download_remote_subtitle(
     uri: Uri,
 ) -> Result<StatusCode, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
-    let _subtitle_id = normalize_remote_subtitle_id(&subtitle_id)?;
-    let _media_source_id = normalize_required_media_source_id(query.media_source_id.as_deref())?;
+    let subtitle_id = normalize_remote_subtitle_id(&subtitle_id)?;
+    let _media_source_id = normalize_optional_media_source_id(query.media_source_id.as_deref())?;
+    if !user.can_manage_server() {
+        return Err(AppError::forbidden("subtitle management permission required"));
+    }
     ensure_user_can_access_item(&state, user.id, &item_id).await?;
 
-    Err(AppError::conflict(
-        "remote subtitle downloads are not configured",
-    ))
+    let downloaded = super::remote_subtitles::download(&state, &item_id, &subtitle_id).await?;
+    super::subtitle_upload::write_sidecar(
+        &state,
+        user.id,
+        &item_id,
+        &downloaded.language,
+        &downloaded.format,
+        downloaded.is_forced,
+        downloaded.is_hearing_impaired,
+        &downloaded.data,
+        "subtitle.remote.download",
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn delete_item_subtitle(
@@ -936,10 +963,6 @@ fn subtitle_path_io_error(error: std::io::Error, not_found_message: &'static str
     AppError::internal(format!("failed to read subtitle file: {error}"))
 }
 
-fn empty_remote_subtitle_results(_language: String) -> Vec<RemoteSubtitleInfoDto> {
-    Vec::new()
-}
-
 fn normalize_remote_subtitle_id(value: &str) -> Result<String, AppError> {
     let value = value.trim();
     if value.is_empty() {
@@ -1196,7 +1219,7 @@ mod tests {
 
     #[test]
     fn empty_remote_subtitle_results_serializes_as_array() {
-        let value = serde_json::to_value(empty_remote_subtitle_results("eng".to_owned())).unwrap();
+        let value = serde_json::to_value(Vec::<RemoteSubtitleInfoDto>::new()).unwrap();
 
         assert_eq!(value, json!([]));
     }

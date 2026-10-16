@@ -19,6 +19,7 @@ const libraryTypeOptions = [
   { label: "动漫 (Anime)", value: "anime" },
   { label: "纪录片 (Documentary)", value: "documentary" },
   { label: "音乐 (Music)", value: "music" },
+  { label: "书籍 (Books)", value: "book" },
 ];
 
 /** Library type → icon SVG path data and accent color */

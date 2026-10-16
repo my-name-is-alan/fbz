@@ -367,6 +367,13 @@ const PLUGIN_PERMISSION_CAPABILITIES: &[PluginPermissionCapability] = &[
         manifest_features: &[],
     },
     PluginPermissionCapability {
+        key: "media.analyze",
+        category: "media",
+        risk_level: "high",
+        description: "Allows the plugin to receive media.marker.detect analysis jobs and probe summaries (no bare storage paths).",
+        manifest_features: &["media.marker.detect"],
+    },
+    PluginPermissionCapability {
         key: "metadata.read",
         category: "metadata",
         risk_level: "medium",
@@ -400,6 +407,27 @@ const PLUGIN_PERMISSION_CAPABILITIES: &[PluginPermissionCapability] = &[
         risk_level: "medium",
         description: "Allows the plugin manifest to register interval or cron scheduled tasks.",
         manifest_features: &["schedules"],
+    },
+    PluginPermissionCapability {
+        key: "storage.account",
+        category: "storage",
+        risk_level: "high",
+        description: "Allows the plugin to participate in cloud-account bind/auth flows for a StorageProvider media source.",
+        manifest_features: &["storage.provider"],
+    },
+    PluginPermissionCapability {
+        key: "storage.read",
+        category: "storage",
+        risk_level: "high",
+        description: "Allows list/stat/readSmallFile RPCs for StorageProvider mounts (no playback resolve).",
+        manifest_features: &["storage.provider"],
+    },
+    PluginPermissionCapability {
+        key: "storage.resolve",
+        category: "storage",
+        risk_level: "high",
+        description: "Allows resolve of short-lived playback/download URLs for StorageProvider media files.",
+        manifest_features: &["storage.provider"],
     },
     PluginPermissionCapability {
         key: "webhook.emit",
@@ -440,6 +468,8 @@ pub struct PluginCapabilitiesDto {
     pub permissions: Vec<String>,
     pub permission_details: Vec<PluginPermissionCapabilityDto>,
     pub hook_events: Vec<String>,
+    /// Product extension slots (storage.provider, metadata.provider.query, …).
+    pub extension_points: Vec<String>,
     pub host_apis: Vec<PluginHostApiCapabilityDto>,
 }
 
@@ -641,6 +671,10 @@ struct PluginMetadataPatchInput {
     tags: Option<Vec<PluginNamedMetadataInput>>,
     people: Option<Vec<PluginPersonInput>>,
     updated_fields: Vec<String>,
+    /// 元数据编辑器写入：绕过 LockData/LockedFields（编辑器就是改锁定数据的入口）。
+    bypass_locks: bool,
+    lock_data: Option<bool>,
+    locked_fields: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1331,9 +1365,12 @@ impl PluginHostRepository {
         input: &PluginMetadataPatchInput,
     ) -> Result<Option<PluginMediaItemDetailDto>, PluginMetadataWriteError> {
         let mut tx = self.pool.begin().await?;
+        if input.bypass_locks {
+            sqlx::query("select set_config('fbz.metadata_edit', 'on', true)").execute(&mut *tx).await?;
+        }
         let Some(row) = sqlx::query(
             r#"
-            select mi.id
+            select mi.id, mi.lock_data, mi.locked_fields
             from media_items mi
             join libraries l on l.id = mi.library_id
             where mi.public_id = case
@@ -1354,6 +1391,18 @@ impl PluginHostRepository {
             return Ok(None);
         };
         let internal_id = row.try_get::<i64, _>("id")?;
+        // 非编辑器写入（插件）：LockData 整体只读；LockedFields 中的子表（Genres/Studios/Tags/Cast）不改。
+        let locked_all = !input.bypass_locks && row.try_get::<bool, _>("lock_data").unwrap_or(false);
+        let locked_fields: Vec<String> = if input.bypass_locks { Vec::new() } else { row.try_get("locked_fields").unwrap_or_default() };
+        let child_locked = |field: &str| locked_all || locked_fields.iter().any(|f| f.eq_ignore_ascii_case(field));
+        if input.bypass_locks && (input.lock_data.is_some() || input.locked_fields.is_some()) {
+            sqlx::query("update media_items set lock_data = coalesce($2, lock_data), locked_fields = coalesce($3, locked_fields) where id = $1")
+                .bind(internal_id)
+                .bind(input.lock_data)
+                .bind(input.locked_fields.as_deref())
+                .execute(&mut *tx)
+                .await?;
+        }
         let provider_fingerprint = input
             .external_ids
             .first()
@@ -1393,7 +1442,7 @@ impl PluginHostRepository {
         .execute(&mut *tx)
         .await?;
 
-        for external_id in &input.external_ids {
+        for external_id in input.external_ids.iter().filter(|_| !locked_all) {
             let conflict = sqlx::query_scalar::<_, bool>(
                 r#"
                 select exists (
@@ -1436,11 +1485,11 @@ impl PluginHostRepository {
             .await?;
         }
 
-        if let Some(genres) = &input.genres {
+        if let Some(genres) = input.genres.as_ref().filter(|_| !child_locked("Genres")) {
             replace_item_genres(&mut tx, internal_id, genres).await?;
         }
 
-        if let Some(tags) = &input.tags {
+        if let Some(tags) = input.tags.as_ref().filter(|_| !child_locked("Tags")) {
             sqlx::query(
                 r#"
                 delete from media_item_tags
@@ -1480,11 +1529,11 @@ impl PluginHostRepository {
             }
         }
 
-        if let Some(studios) = &input.studios {
+        if let Some(studios) = input.studios.as_ref().filter(|_| !child_locked("Studios")) {
             replace_item_studios(&mut tx, internal_id, studios).await?;
         }
 
-        if let Some(people) = &input.people {
+        if let Some(people) = input.people.as_ref().filter(|_| !child_locked("Cast")) {
             replace_item_people(&mut tx, internal_id, people).await?;
         }
 
@@ -1752,8 +1801,10 @@ impl PluginHostRepository {
             .bind(image.width)
             .bind(image.height)
             .bind(image.is_primary)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
+            // 图片锁（0110 trg_artwork_image_lock）静默跳过时无返回行。
+            let Some(row) = row else { continue };
 
             artwork.push(PluginArtworkDto {
                 artwork_type: row.try_get("artwork_type")?,
@@ -3357,9 +3408,16 @@ pub fn plugin_capabilities() -> PluginCapabilitiesDto {
         permissions: string_list(supported_plugin_permissions()),
         permission_details: plugin_permission_capabilities(),
         hook_events: string_list(supported_plugin_hook_events()),
+        extension_points: string_list(SUPPORTED_EXTENSION_POINTS),
         host_apis: plugin_host_api_capabilities(),
     }
 }
+
+const SUPPORTED_EXTENSION_POINTS: &[&str] = &[
+    "metadata.provider.query",
+    "media.marker.detect",
+    "storage.provider",
+];
 
 fn plugin_host_api_routes() -> [PluginHostApiRoute; 12] {
     [
@@ -3679,6 +3737,12 @@ mod tests {
                 .hook_events
                 .contains(&"library.scan.completed".to_owned())
         );
+        assert!(
+            capabilities
+                .extension_points
+                .contains(&"storage.provider".to_owned())
+        );
+        assert!(capabilities.permissions.iter().any(|p| p == "storage.read"));
         assert!(capabilities.host_apis.iter().any(|api| {
             api.method == "GET"
                 && api.path == "/api/plugin/capabilities"
@@ -4577,4 +4641,33 @@ mod tests {
             .is_err()
         );
     }
+}
+
+/// Jellyfin 元数据编辑器（`POST /Items/{id}`）复用插件 Host 的同一条校验 + 写入路径
+/// （标题/简介/年份/评级/分类/人物/外部 id；写后 `metadata_status = manual`）。
+/// 返回 `Ok(false)` 表示条目不存在。
+pub async fn apply_item_metadata_patch(
+    pool: DbPool,
+    item_id: &str,
+    payload: PatchPluginItemMetadataRequestDto,
+    lock_data: Option<bool>,
+    locked_fields: Option<Vec<String>>,
+) -> Result<bool, AppError> {
+    let item_id = validate_public_id("itemId", item_id)?;
+    let has_lock_change = lock_data.is_some() || locked_fields.is_some();
+    let mut input = match validate_plugin_metadata_patch(payload) {
+        Ok(input) => input,
+        // 只改锁状态（无其它字段）也是合法的编辑器保存。
+        Err(_) if has_lock_change => PluginMetadataPatchInput::default(),
+        Err(err) => return Err(err),
+    };
+    input.bypass_locks = true;
+    input.lock_data = lock_data;
+    input.locked_fields = locked_fields;
+    let repository = PluginHostRepository::new(pool);
+    Ok(repository
+        .patch_item_metadata(item_id, &input)
+        .await
+        .map_err(plugin_metadata_write_error_to_app_error)?
+        .is_some())
 }

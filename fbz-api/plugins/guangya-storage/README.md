@@ -2,6 +2,15 @@
 
 独立 HTTP 媒体源插件。Node.js 24，无第三方运行依赖。不启动 hack-guangya 主应用、不读取它的 SQLite，不挂载文件系统、不下载视频。
 
+## 插件包身份
+
+目录内 `manifest.json` 提供可安装的正式 plugin 包声明（`id`: `dev.fbz.storage.guangya`，`runtime`: `http`）。可用于打包 / 审批面展示权限声明。
+
+- 进程仍可用 `compose.yaml` 或 `node server.mjs` 拉起；宿主 RPC 继续走环境变量 `FBZ_GUANGYA_PLUGIN_URL`（默认 `http://127.0.0.1:8098/rpc`）。
+- `FBZ_STORAGE_PLUGIN_KEY`、`FBZ_SECRET_KEY` 以及光鸭 OAuth 相关密钥**只**通过部署 secret / 环境注入，**不得**写入 manifest。
+- Host 已通过 `StorageProvider` 注册表分发（`provider=guangya` → `HttpRpcStorageAdapter`）；端点优先 `FBZ_STORAGE_PROVIDER_ENDPOINT_guangya`，回退 `FBZ_GUANGYA_PLUGIN_URL`。权限键为 `storage.account` / `storage.read` / `storage.resolve`。装包生命周期与第二网盘 mock 仍属后续。
+
+
 ## 运行
 
 FBZ 与插件配置同一个至少 32 字符的随机 `FBZ_STORAGE_PLUGIN_KEY`；FBZ 另需独立 `FBZ_SECRET_KEY` 用于数据库凭据加密。两个密钥应通过部署 secret/环境注入，妥善保存；丢失加密密钥将无法恢复已存账号。

@@ -8,20 +8,27 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::service::AuthenticatedUser,
     compat::emby::dto::{
-        BaseItemDto, BaseItemPersonDto, BaseItemSource, DeleteInfoDto, ItemCountsDto,
+        BaseItemDto, BaseItemPersonDto, BaseItemSource, ChapterInfoDto, DeleteInfoDto, ItemCountsDto,
         MediaSourceDto, QueryResultDto, RecommendationDto, UserItemDataDto,
     },
     db::DbPool,
     error::AppError,
-    library::repository::{
-        BrowseItemsInput, IntListFilter, ItemAssociationFilter, ItemCountsRecord, ItemImageFilter,
-        ItemMediaFilter, ItemProviderFilter, ItemQueryOptions, ItemScalarFilter, ItemSortField,
-        ItemStructureFilter, ItemTypeFilter, ItemUserDataFilter, LibraryRepository,
-        MediaItemBrowseRecord, MediaQueryInput, PersonRoleFilter, PlaylistListInput,
-        SimilarItemsInput, SortDirection, StringListFilter, UserItemAncestorRecord,
-        UserLibraryViewRecord,
+    library::{
+        parental::normalize_block_unrated_items,
+        repository::{
+            BrowseItemsInput, IntListFilter, ItemAssociationFilter, ItemCountsRecord,
+            ItemImageFilter, ItemMediaFilter, ItemProviderFilter, ItemQueryOptions,
+            ItemScalarFilter, ItemSortField, ItemStructureFilter, ItemTypeFilter,
+            ItemUserDataFilter, LibraryRepository, MediaItemBrowseRecord, MediaQueryInput,
+            PersonRoleFilter, PlaylistListInput, SimilarItemsInput, SortDirection,
+            StringListFilter, UserItemAncestorRecord, UserLibraryViewRecord,
+        },
     },
-    media::repository::MediaRepository,
+    users::repository::UsersRepository,
+    media::{
+        container::normalize_media_source_container,
+        repository::MediaRepository,
+    },
     state::AppState,
 };
 
@@ -30,8 +37,14 @@ use super::{
     playlists::playlist_to_base_item,
 };
 
+// 瘦 API：Items 浏览/详情只读库组装 DTO（lower-bound 计数 + Limit/StartIndex 帽）。
+// 刮削 / ffprobe / 转码执行不在本路由；刷新走 item_refresh → jobs → worker。
+
+/// 列表默认 page size（客户端未传 Limit 时）。
 const DEFAULT_ITEMS_LIMIT: u32 = 100;
+/// 列表最大 page size 帽（客户端 Limit 再大也钳到此值）。
 const MAX_ITEMS_LIMIT: u32 = 200;
+/// 深 offset 风险帽：StartIndex 超过此值钳制，避免大库无界 skip。
 const MAX_ITEMS_START_INDEX: u32 = 10_000;
 const DEFAULT_SEARCH_HINTS_LIMIT: u32 = 20;
 const MAX_SEARCH_HINTS_LIMIT: u32 = 50;
@@ -48,7 +61,7 @@ const BANNER_IMAGE_TYPES: &[&str] = &["banner"];
 const DISC_IMAGE_TYPES: &[&str] = &["disc"];
 const ART_IMAGE_TYPES: &[&str] = &["artist", "album"];
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
     #[serde(alias = "parentId", alias = "parent_id")]
@@ -61,6 +74,12 @@ pub struct ItemsQuery {
     pub recursive: Option<bool>,
     #[serde(alias = "includeItemTypes", alias = "include_item_types")]
     pub include_item_types: Option<String>,
+    #[serde(alias = "excludeItemTypes", alias = "exclude_item_types")]
+    pub exclude_item_types: Option<String>,
+    #[serde(alias = "minCommunityRating", alias = "min_community_rating")]
+    pub min_community_rating: Option<f64>,
+    #[serde(alias = "maxCommunityRating", alias = "max_community_rating")]
+    pub max_community_rating: Option<f64>,
     #[serde(alias = "imageTypes", alias = "image_types")]
     pub image_types: Option<String>,
     #[serde(alias = "enableImages", alias = "enable_images")]
@@ -239,6 +258,17 @@ pub struct ItemByIdQuery {
     pub user_id: Option<String>,
 }
 
+/// Emby `DELETE Items/{Id}` / `POST Items/{Id}/Delete` query。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct DeleteItemQuery {
+    #[serde(alias = "userId", alias = "user_id")]
+    pub user_id: Option<String>,
+    /// 为 true 时尝试删除本地媒体文件；默认 false（仅库内软删，右键删除更安全）。
+    #[serde(alias = "deleteFiles", alias = "delete_files")]
+    pub delete_files: Option<bool>,
+}
+
 /// Query for the bare `Artists/InstantMix` and `MusicGenres/InstantMix`
 /// endpoints, where the seed is supplied as `?Id=` (an artist `public_id` or a
 /// music genre id) rather than in the path.
@@ -395,6 +425,8 @@ pub(super) struct MediaListQuery {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SuggestionsQuery {
+    #[serde(alias = "userId", alias = "user_id")]
+    pub user_id: Option<String>,
     #[serde(alias = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>,
     #[serde(alias = "startIndex", alias = "start_index")]
@@ -835,8 +867,68 @@ pub async fn trailers(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
-    let _user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
-    Ok(Json(empty_trailers_result(&query)))
+    let user = authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let window = TrailersWindow::from_query(&query);
+    let Some(parent_id) = normalized_parent_id(query.parent_id.clone()) else {
+        // Global /Trailers without ParentId: keep Emby-empty shape (no Trailer ItemType yet).
+        return Ok(Json(empty_trailers_result(&query)));
+    };
+
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let repository = LibraryRepository::new(database.clone());
+    let Some(local) = repository
+        .list_local_extra_items(user.id, &parent_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list trailers: {err}")))?
+    else {
+        return Ok(Json(empty_trailers_result(&query)));
+    };
+
+    let search = normalized_text_filter(query.search_term.as_deref());
+    let mut items: Vec<BaseItemDto> = local
+        .into_iter()
+        .filter(|extra| extra.extra_type == crate::media::extras::ExtraType::Trailer.as_str())
+        .filter(|extra| match search.as_deref() {
+            Some(term) => extra.item.name.to_ascii_lowercase().contains(&term.to_ascii_lowercase()),
+            None => true,
+        })
+        .map(|extra| {
+            media_item_to_base_item_with_extra_type(
+                extra.item,
+                crate::media::extras::ExtraType::Trailer,
+            )
+        })
+        .collect();
+
+    let remote = repository
+        .list_item_videos(&parent_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list remote trailers: {err}")))?;
+    for video in remote {
+        if matches!(video.video_type.as_str(), "trailer" | "teaser") {
+            let dto = remote_trailer_to_base_item(&video);
+            if let Some(term) = search.as_deref() {
+                if !dto.name.to_ascii_lowercase().contains(&term.to_ascii_lowercase()) {
+                    continue;
+                }
+            }
+            items.push(dto);
+        }
+    }
+
+    let total = items.len() as u32;
+    let page: Vec<BaseItemDto> = items
+        .into_iter()
+        .skip(window.start_index)
+        .take(window.limit)
+        .collect();
+    Ok(Json(QueryResultDto::new(
+        page,
+        total,
+        window.start_index as u32,
+    )))
 }
 
 pub(super) async fn list_items_for_authenticated_user(
@@ -844,6 +936,7 @@ pub(super) async fn list_items_for_authenticated_user(
     authenticated_user: AuthenticatedUser,
     query: ItemsQuery,
 ) -> Result<QueryResultDto<BaseItemDto>, AppError> {
+    let parental = load_user_parental_controls(&database, &authenticated_user.public_id).await?;
     let repository = LibraryRepository::new(database);
     let window = ItemWindow::from_query(&query);
     if include_item_types_requests_playlists_only(query.include_item_types.as_deref()) {
@@ -880,7 +973,6 @@ pub(super) async fn list_items_for_authenticated_user(
     let image_filter = image_filter_from_query(&query);
     let requested_images = requested_item_images(&query);
     let association_filter = association_filter_from_query(&query);
-    let parent_id = normalized_parent_id(query.parent_id);
     let recursive = query.recursive.unwrap_or(false);
     // 带 SearchTerm 且客户端未显式指定排序时按相关度排序（命中质量优先于字典序）。
     let default_sort = if scalar_filter.search_term.is_some() {
@@ -888,23 +980,28 @@ pub(super) async fn list_items_for_authenticated_user(
     } else {
         ItemSortField::SortName
     };
-    let options = item_query_options_with_filters(
-        query.include_item_types.as_deref(),
-        query.sort_by.as_deref(),
-        query.sort_order.as_deref(),
-        default_sort,
-        SortDirection::Asc,
-        scalar_filter,
-        user_data_filter,
-        structure_filter,
-        media_filter,
-        provider_filter,
-        image_filter,
-        association_filter,
+    let mut options = apply_items_query_type_and_rating_filters(
+        item_query_options_with_filters(
+            query.include_item_types.as_deref(),
+            query.sort_by.as_deref(),
+            query.sort_order.as_deref(),
+            default_sort,
+            SortDirection::Asc,
+            scalar_filter,
+            user_data_filter,
+            structure_filter,
+            media_filter,
+            provider_filter,
+            image_filter,
+            association_filter,
+        ),
+        &query,
     );
+    apply_user_parental_controls(&mut options, &parental);
+    let parent_id = normalized_parent_id(query.parent_id);
     let should_return_views =
         should_return_library_views(parent_id.as_deref(), recursive, &options);
-    let _requested_fields = requested_item_fields(query.fields.as_deref());
+    let requested_fields = requested_item_fields(query.fields.as_deref());
 
     if should_return_views {
         let views = repository
@@ -927,17 +1024,56 @@ pub(super) async fn list_items_for_authenticated_user(
         .await
         .map_err(|err| AppError::internal(format!("failed to list user items: {err}")))?;
 
-    let items = result
+    let mut items = result
         .items
         .into_iter()
         .map(|record| media_item_to_base_item_with_images(record, &requested_images))
         .collect::<Vec<_>>();
+    apply_requested_list_fields(&repository, &mut items, &requested_fields).await?;
 
     Ok(QueryResultDto::new(
         items,
         result.total_record_count,
         window.start_index as u32,
     ))
+}
+
+/// 列表人物上限（每条目）；详情不受限于此（走 `fetch_item_people`）。
+const LIST_PEOPLE_PER_ITEM: i64 = 20;
+
+/// JF Fields 语义：列表只在请求 `Overview` / `People` 时批量补齐（各一条 SQL，不 N+1）。
+async fn apply_requested_list_fields(
+    repository: &LibraryRepository,
+    items: &mut [BaseItemDto],
+    requested: &RequestedItemFields,
+) -> Result<(), AppError> {
+    if items.is_empty() || !(requested.overview || requested.people) {
+        return Ok(());
+    }
+    let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+    if requested.overview {
+        let overviews = repository
+            .fetch_item_overviews(&ids)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get item overviews: {err}")))?;
+        for item in items.iter_mut() {
+            if item.overview.is_none() {
+                item.overview = overviews.get(&item.id).cloned();
+            }
+        }
+    }
+    if requested.people {
+        let mut people = repository
+            .fetch_items_people(&ids, LIST_PEOPLE_PER_ITEM)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to get item people: {err}")))?;
+        for item in items.iter_mut() {
+            if let Some(list) = people.remove(&item.id) {
+                item.people = list.into_iter().map(item_person_to_dto).collect();
+            }
+        }
+    }
+    Ok(())
 }
 
 fn music_items_query(
@@ -1079,16 +1215,19 @@ fn search_hints_items_query(query: SearchHintsQuery) -> ItemsQuery {
 }
 
 fn suggestions_items_query(query: SuggestionsQuery) -> ItemsQuery {
+    // JF 客户端常用 Suggestions：偏未看 + 社区评分；客户端显式 SortBy/Filters 时仍透传。
     ItemsQuery {
         parent_id: query.parent_id,
         start_index: query.start_index,
         limit: query.limit.or(query.item_limit),
         recursive: Some(true),
         include_item_types: query.include_item_types,
-        sort_by: Some(query.sort_by.unwrap_or_else(|| "DateCreated".to_owned())),
+        sort_by: Some(query.sort_by.unwrap_or_else(|| "CommunityRating".to_owned())),
         sort_order: Some(query.sort_order.unwrap_or_else(|| "Descending".to_owned())),
         fields: query.fields,
         media_types: query.media_types,
+        filters: Some("IsUnplayed".to_owned()),
+        is_played: Some(false),
         ..ItemsQuery::default()
     }
 }
@@ -1311,6 +1450,30 @@ pub async fn suggested_items(
     Ok(Json(result))
 }
 
+
+/// Query-parameter variant `/Items/Suggestions?UserId=...`（JF Web / 部分客户端）。
+pub async fn suggested_items_for_query_user(
+    State(state): State<AppState>,
+    Query(query): Query<SuggestionsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<QueryResultDto<BaseItemDto>>, AppError> {
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let authenticated_user =
+        authenticate_query_user(&state, query.user_id.as_deref(), &headers, &uri).await?;
+    let result = list_items_for_authenticated_user(
+        database.clone(),
+        authenticated_user,
+        suggestions_items_query(query),
+    )
+    .await?;
+
+    Ok(Json(result))
+}
+
 pub async fn movie_recommendations(
     State(state): State<AppState>,
     Query(query): Query<MovieRecommendationsQuery>,
@@ -1405,9 +1568,11 @@ pub async fn user_item_by_id(
     Path((user_id, item_id)): Path<(String, String)>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<BaseItemDto>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
-    item_by_id_for_user(&state, user, item_id).await
+    let Json(dto) = item_by_id_for_user(&state, user, item_id).await?;
+    let Json(value) = super::trickplay::attach_item_field(&state, dto).await;
+    Ok(Json(super::item_update::attach_detail_fields(&state, value).await))
 }
 
 pub async fn item_by_id(
@@ -1416,7 +1581,7 @@ pub async fn item_by_id(
     Query(query): Query<ItemByIdQuery>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<BaseItemDto>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let user = authenticate_request_user(&state, &headers, &uri).await?;
     if let Some(query_user_id) = query.user_id
         && query_user_id != user.public_id
@@ -1426,7 +1591,9 @@ pub async fn item_by_id(
         ));
     }
 
-    item_by_id_for_user(&state, user, item_id).await
+    let Json(dto) = item_by_id_for_user(&state, user, item_id).await?;
+    let Json(value) = super::trickplay::attach_item_field(&state, dto).await;
+    Ok(Json(super::item_update::attach_detail_fields(&state, value).await))
 }
 
 pub async fn additional_video_parts(
@@ -1525,9 +1692,88 @@ pub async fn item_delete_info(
         ));
     }
 
-    let _ = item_by_id_for_user(&state, user, item_id).await?;
+    let _ = item_by_id_for_user(&state, user, item_id.clone()).await?;
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let paths = MediaRepository::new(database.clone())
+        .list_item_delete_paths(&item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get delete info: {err}")))?
+        .unwrap_or_default();
 
-    Ok(Json(DeleteInfoDto::empty()))
+    Ok(Json(DeleteInfoDto { paths }))
+}
+
+/// Emby `DELETE Items/{Id}` / `POST Items/{Id}/Delete`：管理员软删（可选删本地文件）。
+pub async fn delete_item(
+    State(state): State<AppState>,
+    Path(item_id): Path<String>,
+    Query(query): Query<DeleteItemQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let user = authenticate_request_user(&state, &headers, &uri).await?;
+    // JF 删除播放列表也走 `DELETE /Items/{id}`：属主（或管理员）可删，其他人 403。
+    if let Some(database) = state.database()
+        && let Some(owner_id) = sqlx::query_scalar::<_, i64>(
+            "select owner_user_id from playlists where public_id::text = $1",
+        )
+        .bind(item_id.trim())
+        .fetch_optional(database)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to resolve playlist: {err}")))?
+    {
+        if owner_id != user.id {
+            ensure_server_admin(&user)
+                .map_err(|_| AppError::forbidden("only the playlist owner can delete it"))?;
+        }
+        sqlx::query("delete from playlists where public_id::text = $1")
+            .bind(item_id.trim())
+            .execute(database)
+            .await
+            .map_err(|err| AppError::internal(format!("failed to delete playlist: {err}")))?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    ensure_server_admin(&user)?;
+    if let Some(query_user_id) = query.user_id.as_deref()
+        && query_user_id != user.public_id
+    {
+        return Err(AppError::forbidden(
+            "authenticated user does not match query user",
+        ));
+    }
+
+    let item_id = delete_item_id(&item_id)?;
+    let delete_files = query.delete_files.unwrap_or(false);
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+
+    let deleted = MediaRepository::new(database.clone())
+        .soft_delete_item(&item_id, delete_files)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to delete item: {err}")))?;
+    if deleted.is_none() {
+        return Err(AppError::not_found("item not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn delete_item_id(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::unprocessable("item id is required"));
+    }
+    if value.len() > MAX_VIDEO_VERSION_ID_LEN
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(AppError::unprocessable("item id is invalid"));
+    }
+    Ok(value.to_owned())
 }
 
 pub async fn item_critic_reviews(
@@ -1793,9 +2039,80 @@ async fn local_trailers_for_user(
     item_id: String,
     query: PlaybackExtrasQuery,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
-    validate_playback_extras_request(state, user, item_id, &query).await?;
+    let _requested_fields = requested_item_fields(query.fields.as_deref());
+    let _requested_images = requested_item_images(&ItemsQuery {
+        enable_images: query.enable_images,
+        image_type_limit: query.image_type_limit,
+        enable_image_types: query.enable_image_types.clone(),
+        ..ItemsQuery::default()
+    });
+    let _include_user_data = query.enable_user_data.unwrap_or(true);
+    let limit = query.limit.map(|limit| limit.min(MAX_ITEMS_LIMIT) as usize);
+    let start = clamped_start_index_usize(query.start_index);
 
-    Ok(Json(Vec::new()))
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let repository = LibraryRepository::new(database.clone());
+
+    let Some(local) = repository
+        .list_local_extra_items(user.id, &item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list local trailers: {err}")))?
+    else {
+        return Err(AppError::not_found("item not found"));
+    };
+
+    let mut items: Vec<BaseItemDto> = local
+        .into_iter()
+        .filter(|extra| extra.extra_type == crate::media::extras::ExtraType::Trailer.as_str())
+        .map(|extra| {
+            media_item_to_base_item_with_extra_type(
+                extra.item,
+                crate::media::extras::ExtraType::Trailer,
+            )
+        })
+        .collect();
+
+    let remote = repository
+        .list_item_videos(&item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list remote trailers: {err}")))?;
+    for video in remote {
+        if matches!(video.video_type.as_str(), "trailer" | "teaser") {
+            items.push(remote_trailer_to_base_item(&video));
+        }
+    }
+
+    let items = items
+        .into_iter()
+        .skip(start)
+        .take(limit.unwrap_or(usize::MAX))
+        .collect();
+    Ok(Json(items))
+}
+
+fn remote_trailer_to_base_item(
+    video: &crate::library::repository::ItemVideoRecord,
+) -> BaseItemDto {
+    let name = video
+        .name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| video.url.clone())
+        .unwrap_or_else(|| "Trailer".to_owned());
+    let mut item = BaseItemDto::from(BaseItemSource {
+        id: video.id.clone(),
+        name,
+        item_type: "Trailer".to_owned(),
+        media_type: Some("Video".to_owned()),
+        parent_id: None,
+        is_folder: false,
+        run_time_ticks: None,
+        production_year: None,
+    });
+    item.overview = video.url.clone();
+    item
 }
 
 fn empty_critic_reviews_result(query: &CriticReviewsQuery) -> QueryResultDto<BaseItemDto> {
@@ -1871,7 +2188,7 @@ async fn item_by_id_for_user(
         .map_err(|err| AppError::internal(format!("failed to get item people: {err}")))?;
     base_item.people = people.into_iter().map(item_person_to_dto).collect();
 
-    // 详情增强字段：原名/分级/首播日期/题材（列表接口不带，详情单查回填）。
+    // 详情增强字段：原名/分级/首播日期/题材（列表已带 Genres/CommunityRating；详情再补原名等）。
     if let Some(extras) = repository
         .fetch_item_detail_extras(&base_item.id)
         .await
@@ -1887,10 +2204,41 @@ async fn item_by_id_for_user(
         }
     }
 
+    // 片头/片尾/章节：从 core media_markers 映射 Emby Chapters（播放跳过消费）。
+    let chapters = repository
+        .fetch_item_markers_as_chapters(&base_item.id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get item markers: {err}")))?;
+    base_item.chapters = chapters
+        .into_iter()
+        .map(media_marker_to_chapter_dto)
+        .collect();
+
     Ok(Json(base_item))
 }
 
 /// people 表 role_type → Emby Person Type（PascalCase）。
+
+fn media_marker_to_chapter_dto(
+    record: crate::library::repository::MediaChapterRecord,
+) -> ChapterInfoDto {
+    let (name, marker_type) = match record.marker_type.as_str() {
+        "intro_start" => ("Intro", "IntroStart"),
+        "intro_end" => ("Intro End", "IntroEnd"),
+        "credits_start" => ("Credits", "CreditsStart"),
+        "credits_end" => ("Credits End", "CreditsEnd"),
+        "commercial" => ("Commercial", "CommercialBreak"),
+        "chapter" => ("Chapter", "Chapter"),
+        other => (other, "Chapter"),
+    };
+    ChapterInfoDto {
+        start_position_ticks: record.start_ticks,
+        name: name.to_owned(),
+        image_tag: None,
+        marker_type: marker_type.to_owned(),
+    }
+}
+
 fn emby_person_type(role_type: &str) -> &'static str {
     match role_type {
         "director" => "Director",
@@ -2160,6 +2508,11 @@ fn item_query_options_with_filters(
 ) -> ItemQueryOptions {
     ItemQueryOptions {
         type_filter: include_item_types_filter(include_item_types),
+        exclude_type_filter: ItemTypeFilter::default(),
+        min_community_rating: None,
+        max_community_rating: None,
+        max_parental_rating: None,
+        block_unrated_item_types: Vec::new(),
         scalar_filter,
         user_data_filter,
         structure_filter,
@@ -2170,6 +2523,45 @@ fn item_query_options_with_filters(
         sort_field: sort_field_from_query(sort_by, default_sort),
         sort_direction: sort_direction_from_query(sort_order, default_direction),
     }
+}
+
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct UserParentalControls {
+    max_parental_rating: Option<i32>,
+    block_unrated_item_types: Vec<String>,
+}
+
+async fn load_user_parental_controls(
+    database: &DbPool,
+    user_public_id: &str,
+) -> Result<UserParentalControls, AppError> {
+    let Some(detail) = UsersRepository::new(database.clone())
+        .find_user_by_public_id(user_public_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to load user parental controls: {err}")))?
+    else {
+        return Ok(UserParentalControls::default());
+    };
+    Ok(UserParentalControls {
+        max_parental_rating: detail.max_parental_rating,
+        block_unrated_item_types: normalize_block_unrated_items(&detail.block_unrated_items),
+    })
+}
+
+fn apply_user_parental_controls(options: &mut ItemQueryOptions, parental: &UserParentalControls) {
+    options.max_parental_rating = parental.max_parental_rating;
+    options.block_unrated_item_types = parental.block_unrated_item_types.clone();
+}
+
+fn apply_items_query_type_and_rating_filters(
+    mut options: ItemQueryOptions,
+    query: &ItemsQuery,
+) -> ItemQueryOptions {
+    options.exclude_type_filter = include_item_types_filter(query.exclude_item_types.as_deref());
+    options.min_community_rating = query.min_community_rating.filter(|v| v.is_finite());
+    options.max_community_rating = query.max_community_rating.filter(|v| v.is_finite());
+    options
 }
 
 fn scalar_filter_from_query(query: &ItemsQuery) -> ItemScalarFilter {
@@ -2627,6 +3019,8 @@ fn emby_filter_item_type(item_type: &str) -> Option<&'static str> {
         "tvchannel" => Some("tvchannel"),
         "program" => Some("program"),
         "recording" => Some("recording"),
+        "book" => Some("book"),
+        "audiobook" => Some("audiobook"),
         "folder" | "collectionfolder" => Some("folder"),
         _ => None,
     }
@@ -2660,6 +3054,7 @@ fn emby_sort_field(sort_by: &str) -> Option<ItemSortField> {
         "datecreated" | "dateadded" => Some(ItemSortField::DateCreated),
         "runtime" | "runtimeticks" => Some(ItemSortField::Runtime),
         "productionyear" => Some(ItemSortField::ProductionYear),
+        "communityrating" => Some(ItemSortField::CommunityRating),
         "indexnumber" | "parentindexnumber" => Some(ItemSortField::IndexNumber),
         _ => None,
     }
@@ -2683,6 +3078,9 @@ pub(super) struct RequestedItemFields {
     pub media_sources: bool,
     pub media_streams: bool,
     pub chapters: bool,
+    /// JF `Fields=Overview` / `Fields=People`：列表默认不带，请求了才批量补。
+    pub overview: bool,
+    pub people: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2724,6 +3122,12 @@ pub(super) fn requested_item_fields(fields: Option<&str>) -> RequestedItemFields
         }
         if field.eq_ignore_ascii_case("Chapters") {
             requested.chapters = true;
+        }
+        if field.eq_ignore_ascii_case("Overview") {
+            requested.overview = true;
+        }
+        if field.eq_ignore_ascii_case("People") {
+            requested.people = true;
         }
     }
     requested
@@ -2885,6 +3289,21 @@ pub(super) fn media_item_to_base_item(record: MediaItemBrowseRecord) -> BaseItem
     media_item_to_base_item_with_images(record, &requested_images)
 }
 
+/// Map a browse record and override Emby `Type` for local Extra (Trailer / Theme*).
+pub(super) fn media_item_to_base_item_with_extra_type(
+    record: MediaItemBrowseRecord,
+    extra: crate::media::extras::ExtraType,
+) -> BaseItemDto {
+    let mut item = media_item_to_base_item(record);
+    item.item_type = crate::media::extras::emby_extra_item_type(extra).to_owned();
+    if extra == crate::media::extras::ExtraType::ThemeSong {
+        item.media_type = Some("Audio".to_owned());
+    } else {
+        item.media_type = Some("Video".to_owned());
+    }
+    item
+}
+
 fn search_hint_from_item(item: BaseItemDto) -> SearchHintDto {
     SearchHintDto {
         item_id: item.id.clone(),
@@ -2927,6 +3346,8 @@ fn media_item_to_base_item_with_images(
     item.index_number = record.index_number;
     item.parent_index_number = record.parent_index_number;
     item.premiere_date = record.premiere_date.clone();
+    item.genres = record.genres;
+    item.community_rating = record.community_rating.map(|rating| rating as f32);
     item.size = record.media_file_size;
     item.container = record.media_file_container.clone();
     item.bitrate = record.media_file_bitrate;
@@ -3020,7 +3441,7 @@ fn media_item_source_summary(record: &MediaItemBrowseRecord) -> Option<MediaSour
         requires_closing: false,
         supports_probing: false,
         read_at_native_framerate: false,
-        container: record.media_file_container.clone(),
+        container: normalize_media_source_container(record.media_file_container.as_deref()),
         run_time_ticks: record.run_time_ticks,
         size: record.media_file_size,
         bitrate: record.media_file_bitrate,
@@ -3062,6 +3483,8 @@ fn emby_item_type(item_type: &str) -> &'static str {
         "tvchannel" => "TvChannel",
         "program" => "Program",
         "recording" => "Recording",
+        "book" => "Book",
+        "audiobook" => "AudioBook",
         _ => "Folder",
     }
 }
@@ -3070,8 +3493,9 @@ fn media_type(item_type: &str) -> Option<&'static str> {
     match item_type {
         "movie" | "series" | "season" | "episode" | "video" | "tvchannel" | "program"
         | "recording" => Some("Video"),
-        "artist" | "album" | "track" => Some("Audio"),
+        "artist" | "album" | "track" | "audiobook" => Some("Audio"),
         "photo" => Some("Photo"),
+        "book" => Some("Book"),
         _ => None,
     }
 }
@@ -3085,6 +3509,20 @@ fn is_folder(item_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delete_item_query_accepts_delete_files_aliases() {
+        let uri: Uri = "/emby/Items/item-1?DeleteFiles=true&userId=u1"
+            .parse()
+            .unwrap();
+        let Query(q) = Query::<DeleteItemQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(q.delete_files, Some(true));
+        assert_eq!(q.user_id.as_deref(), Some("u1"));
+
+        let uri: Uri = "/Items/item-1?deleteFiles=false".parse().unwrap();
+        let Query(q) = Query::<DeleteItemQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(q.delete_files, Some(false));
+    }
+
     use axum::{extract::Query, http::Uri};
     use serde_json::json;
 
@@ -3095,49 +3533,7 @@ mod tests {
         let window = ItemWindow::from_query(&ItemsQuery {
             start_index: Some(20),
             limit: Some(10_000),
-            recursive: None,
-            parent_id: None,
-            include_item_types: None,
-            any_provider_id_equals: None,
-            sort_by: None,
-            sort_order: None,
-            fields: None,
-            filters: None,
-            is_played: None,
-            is_favorite: None,
-            is_folder: None,
-            is_movie: None,
-            is_series: None,
-            ids: None,
-            exclude_item_ids: None,
-            search_term: None,
-            years: None,
-            name_starts_with: None,
-            name_starts_with_or_greater: None,
-            name_less_than: None,
-            genres: None,
-            genre_ids: None,
-            official_ratings: None,
-            tags: None,
-            exclude_tags: None,
-            studios: None,
-            studio_ids: None,
-            person: None,
-            person_ids: None,
-            person_types: None,
-            artists: None,
-            artist_ids: None,
-            albums: None,
-            album_ids: None,
-            media_types: None,
-            containers: None,
-            audio_codecs: None,
-            video_codecs: None,
-            subtitle_codecs: None,
-            image_types: None,
-            enable_images: None,
-            image_type_limit: None,
-            enable_image_types: None,
+            ..ItemsQuery::default()
         });
 
         assert_eq!(window.start_index, 20);
@@ -3246,6 +3642,23 @@ mod tests {
         );
         assert!(options.type_filter.enabled);
         assert_eq!(options.type_filter.item_types, ["photo", "video"]);
+    }
+
+    #[test]
+    fn book_item_types_map_to_jellyfin_in_both_directions() {
+        assert_eq!(emby_item_type("book"), "Book");
+        assert_eq!(media_type("book"), Some("Book"));
+        assert_eq!(emby_item_type("audiobook"), "AudioBook");
+        assert_eq!(media_type("audiobook"), Some("Audio"));
+        assert!(!is_folder("book"));
+        let options = item_query_options(
+            Some("Book,AudioBook"),
+            None,
+            None,
+            ItemSortField::SortName,
+            SortDirection::Asc,
+        );
+        assert_eq!(options.type_filter.item_types, ["book", "audiobook"]);
     }
 
     #[test]
@@ -3646,7 +4059,7 @@ mod tests {
     }
 
     #[test]
-    fn suggestions_query_maps_to_recent_recursive_item_browse() {
+    fn suggestions_query_maps_to_unplayed_rated_item_browse() {
         let query = suggestions_items_query(SuggestionsQuery {
             parent_id: Some("music-lib".to_owned()),
             start_index: Some(4),
@@ -3663,9 +4076,11 @@ mod tests {
         assert_eq!(query.recursive, Some(true));
         assert_eq!(query.include_item_types.as_deref(), Some("Movie,Episode"));
         assert_eq!(query.media_types.as_deref(), Some("Video"));
-        assert_eq!(query.sort_by.as_deref(), Some("DateCreated"));
+        assert_eq!(query.sort_by.as_deref(), Some("CommunityRating"));
         assert_eq!(query.sort_order.as_deref(), Some("Descending"));
         assert_eq!(query.fields.as_deref(), Some("PrimaryImageAspectRatio"));
+        assert_eq!(query.filters.as_deref(), Some("IsUnplayed"));
+        assert_eq!(query.is_played, Some(false));
     }
 
     #[test]
@@ -4171,6 +4586,15 @@ mod tests {
     }
 
     #[test]
+    fn requested_item_fields_follow_jellyfin_overview_and_people() {
+        let fields = requested_item_fields(Some("people, overview,ProductionYear"));
+        assert!(fields.people && fields.overview);
+        let none = requested_item_fields(Some("ProductionYear"));
+        assert!(!none.people && !none.overview);
+        assert!(!requested_item_fields(None).people);
+    }
+
+    #[test]
     fn requested_item_fields_accepts_chapters_field() {
         let fields = requested_item_fields(Some("MediaSources,Chapters,MediaStreams"));
 
@@ -4281,6 +4705,45 @@ mod tests {
 
         assert_eq!(options.sort_field, ItemSortField::DateCreated);
         assert_eq!(options.sort_direction, SortDirection::Desc);
+    }
+
+    #[test]
+    fn exclude_item_types_and_community_rating_filters_map_from_query() {
+        let query = ItemsQuery {
+            exclude_item_types: Some("Folder,BoxSet,Person".to_owned()),
+            min_community_rating: Some(6.5),
+            max_community_rating: Some(9.0),
+            include_item_types: Some("Movie,Series".to_owned()),
+            ..ItemsQuery::default()
+        };
+        let options = apply_items_query_type_and_rating_filters(
+            item_query_options_with_filters(
+                query.include_item_types.as_deref(),
+                None,
+                None,
+                ItemSortField::SortName,
+                SortDirection::Asc,
+                ItemScalarFilter::default(),
+                ItemUserDataFilter::default(),
+                ItemStructureFilter::default(),
+                ItemMediaFilter::default(),
+                ItemProviderFilter::default(),
+                ItemImageFilter::default(),
+                ItemAssociationFilter::default(),
+            ),
+            &query,
+        );
+        assert!(options.type_filter.enabled);
+        assert_eq!(options.type_filter.item_types, ["movie", "series"]);
+        assert!(options.exclude_type_filter.enabled);
+        assert_eq!(
+            options.exclude_type_filter.item_types,
+            ["folder", "collection"]
+        );
+        assert_eq!(options.min_community_rating, Some(6.5));
+        assert_eq!(options.max_community_rating, Some(9.0));
+        assert!(options.has_community_rating_filter());
+        assert!(options.has_exclude_type_filter());
     }
 
     #[test]
@@ -4543,6 +5006,26 @@ mod tests {
         assert!(filter.person_role_types.enabled);
         assert!(filter.person_role_types.role_types.is_empty());
         assert!(filter.has_any_filter());
+    }
+
+    #[test]
+    fn emby_sort_field_maps_community_rating_and_existing_keys() {
+        assert_eq!(
+            sort_field_from_query(Some("CommunityRating"), ItemSortField::SortName),
+            ItemSortField::CommunityRating
+        );
+        assert_eq!(
+            sort_field_from_query(Some("SortName"), ItemSortField::DateCreated),
+            ItemSortField::SortName
+        );
+        assert_eq!(
+            sort_field_from_query(Some("ProductionYear"), ItemSortField::SortName),
+            ItemSortField::ProductionYear
+        );
+        assert_eq!(
+            sort_field_from_query(Some("UnknownField"), ItemSortField::SortName),
+            ItemSortField::SortName
+        );
     }
 
     #[test]
@@ -4832,6 +5315,8 @@ mod tests {
             media_file_is_strm: Some(false),
             supports_transcoding: true,
             production_year: Some(2026),
+            community_rating: Some(7.8),
+            genres: vec!["Action".to_owned(), "Sci-Fi".to_owned()],
             index_number: None,
             parent_index_number: None,
             premiere_date: None,
@@ -4846,6 +5331,8 @@ mod tests {
         });
 
         assert_eq!(item.item_type, "Movie");
+        assert_eq!(item.genres, ["Action", "Sci-Fi"]);
+        assert_eq!(item.community_rating, Some(7.8));
         assert_eq!(item.media_type.as_deref(), Some("Video"));
         assert!(!item.is_folder);
         assert_eq!(item.size, Some(42_000_000));
@@ -4902,6 +5389,8 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: None,
+                community_rating: None,
+                genres: Vec::new(),
                 index_number: None,
                 parent_index_number: None,
                 premiere_date: None,
@@ -4957,6 +5446,8 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: None,
+                community_rating: None,
+                genres: Vec::new(),
                 index_number: None,
                 parent_index_number: None,
                 premiere_date: None,
@@ -5004,6 +5495,8 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: None,
+                community_rating: None,
+                genres: Vec::new(),
                 index_number: None,
                 parent_index_number: None,
                 premiere_date: None,
@@ -5062,6 +5555,8 @@ mod tests {
                 media_file_is_strm: None,
                 supports_transcoding: false,
                 production_year: Some(2026),
+                community_rating: None,
+                genres: Vec::new(),
                 index_number: None,
                 parent_index_number: None,
                 premiere_date: None,

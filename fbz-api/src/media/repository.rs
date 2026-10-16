@@ -1,10 +1,25 @@
+use std::collections::HashMap;
+
 use sqlx::{Row, postgres::PgRow};
 
 use crate::db::DbPool;
 
+/// PlaybackInfo 多版本 MediaSource 上限（与 list SQL `limit` 对齐）。
+pub const MAX_PLAYBACK_MEDIA_SOURCES: i64 = 32;
+/// 单文件返回的 MediaStreams 上限，避免病态容器撑爆 PlaybackInfo 响应。
+const MAX_STREAMS_PER_MEDIA_FILE: i64 = 64;
+
 #[derive(Clone)]
 pub struct MediaRepository {
+
     pool: DbPool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoftDeleteItemResult {
+    pub item_id: String,
+    pub deleted_item_count: u64,
+    pub paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +57,7 @@ pub struct PlaybackMediaStreamRecord {
     pub bitrate: Option<i32>,
     pub is_default: bool,
     pub is_forced: bool,
+    pub is_external: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,7 +201,7 @@ impl MediaRepository {
         row.map(SubtitleStreamRecord::from_row).transpose()
     }
 
-    /// 列出条目全部可播放文件 id（多版本），主文件优先。带库权限过滤，上限 32 个版本。
+    /// 列出条目全部可播放文件 id（多版本），主文件优先。带库权限过滤，上限 [`MAX_PLAYBACK_MEDIA_SOURCES`]。
     pub async fn list_playback_media_file_ids(
         &self,
         user_id: i64,
@@ -208,17 +224,173 @@ impl MediaRepository {
               and mi.is_deleted = false
               and l.is_hidden = false
             order by mf.is_primary desc, mf.id
-            limit 32
+            limit $3
             "#,
         )
         .bind(user_id)
         .bind(item_id)
+        .bind(MAX_PLAYBACK_MEDIA_SOURCES)
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter()
             .map(|row| row.try_get::<i64, _>("id"))
             .collect()
+    }
+
+    /// 批量加载 PlaybackInfo 用的 MediaSource（含 streams）。
+    ///
+    /// `media_file_id = Some` 时只取该版本；`None` 时取主文件优先的最多
+    /// [`MAX_PLAYBACK_MEDIA_SOURCES`] 个版本。用 2 次查询替代按版本 N+1。
+    /// 本路径只读已落库探针结果，不在请求内跑 ffprobe / 刮削 / 转码执行。
+    pub async fn list_playback_media_sources(
+        &self,
+        user_id: i64,
+        item_id: &str,
+        media_file_id: Option<i64>,
+    ) -> Result<Vec<PlaybackMediaSourceRecord>, sqlx::Error> {
+        let source_rows = sqlx::query(
+            r#"
+            select
+                mi.id as media_item_id,
+                mi.public_id::text as item_id,
+                mi.item_type,
+                mf.id as media_file_id,
+                mf.path,
+                mf.file_size,
+                mf.is_strm,
+                mf.strm_target,
+                mf.container,
+                coalesce(mi.runtime_ticks, mf.duration_ticks) as runtime_ticks,
+                mf.bitrate,
+                (u.allow_transcode and lp.can_transcode and mf.path not like 'fbz-storage://%') as supports_transcoding
+            from media_items mi
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+            join users u on u.id = lp.user_id
+            join media_files mf on mf.media_item_id = mi.id
+            where mi.public_id = case
+                when $2 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $2::uuid
+                else null::uuid
+            end
+              and ($3::bigint is null or mf.id = $3)
+              and lp.user_id = $1
+              and lp.can_view = true
+              and mi.is_deleted = false
+              and l.is_hidden = false
+            order by mf.is_primary desc, mf.id
+            limit $4
+            "#,
+        )
+        .bind(user_id)
+        .bind(item_id)
+        .bind(media_file_id)
+        .bind(MAX_PLAYBACK_MEDIA_SOURCES)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if source_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sources = Vec::with_capacity(source_rows.len());
+        let mut file_ids = Vec::with_capacity(source_rows.len());
+        for source_row in source_rows {
+            let media_file_id = source_row.try_get::<i64, _>("media_file_id")?;
+            file_ids.push(media_file_id);
+            sources.push(PlaybackMediaSourceRecord {
+                media_item_id: source_row.try_get("media_item_id")?,
+                item_id: source_row.try_get("item_id")?,
+                item_type: source_row.try_get("item_type")?,
+                media_file_id,
+                path: source_row.try_get("path")?,
+                file_size: source_row.try_get("file_size")?,
+                is_strm: source_row.try_get("is_strm")?,
+                strm_target: source_row.try_get("strm_target")?,
+                container: source_row.try_get("container")?,
+                runtime_ticks: source_row.try_get("runtime_ticks")?,
+                bitrate: source_row.try_get("bitrate")?,
+                supports_transcoding: source_row.try_get("supports_transcoding")?,
+                streams: Vec::new(),
+            });
+        }
+
+        let stream_rows = sqlx::query(
+            r#"
+            select
+                media_file_id,
+                stream_index,
+                stream_type,
+                codec,
+                codec_tag,
+                language,
+                title,
+                profile,
+                level,
+                width,
+                height,
+                channels,
+                sample_rate,
+                bit_depth,
+                bitrate,
+                is_default,
+                is_forced,
+                is_external
+            from (
+                select
+                    media_file_id,
+                    stream_index,
+                    stream_type,
+                    codec,
+                    codec_tag,
+                    language,
+                    title,
+                    profile,
+                    level,
+                    width,
+                    height,
+                    channels,
+                    sample_rate,
+                    bit_depth,
+                    bitrate,
+                    is_default,
+                    is_forced,
+                    is_external,
+                    row_number() over (
+                        partition by media_file_id
+                        order by stream_index
+                    ) as rn
+                from media_streams
+                where media_file_id = any($1)
+            ) ranked
+            where rn <= $2
+            order by media_file_id, stream_index
+            "#,
+        )
+        .bind(&file_ids)
+        .bind(MAX_STREAMS_PER_MEDIA_FILE)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut streams_by_file: HashMap<i64, Vec<PlaybackMediaStreamRecord>> =
+            HashMap::with_capacity(file_ids.len());
+        for row in stream_rows {
+            let media_file_id: i64 = row.try_get("media_file_id")?;
+            let stream = PlaybackMediaStreamRecord::from_row(row)?;
+            streams_by_file
+                .entry(media_file_id)
+                .or_default()
+                .push(stream);
+        }
+
+        for source in &mut sources {
+            if let Some(streams) = streams_by_file.remove(&source.media_file_id) {
+                source.streams = streams;
+            }
+        }
+
+        Ok(sources)
     }
 
     /// 取内嵌附件流（字体等，stream_type='attachment'），带库权限过滤。
@@ -343,13 +515,16 @@ impl MediaRepository {
                 bit_depth,
                 bitrate,
                 is_default,
-                is_forced
+                is_forced,
+                is_external
             from media_streams
             where media_file_id = $1
             order by stream_index
+            limit $2
             "#,
         )
         .bind(media_file_id)
+        .bind(MAX_STREAMS_PER_MEDIA_FILE)
         .fetch_all(&self.pool)
         .await?;
 
@@ -952,6 +1127,7 @@ impl MediaRepository {
         input: InsertArtworkInput,
     ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
+        allow_manual_artwork_edit(&mut tx).await?;
 
         let Some(internal_id) = resolve_item_internal_id(&mut tx, &input.item_id).await? else {
             return Ok(false);
@@ -1030,6 +1206,7 @@ impl MediaRepository {
         }
 
         let mut tx = self.pool.begin().await?;
+        allow_manual_artwork_edit(&mut tx).await?;
 
         let Some(internal_id) = resolve_item_internal_id(&mut tx, item_id).await? else {
             return Ok(None);
@@ -1088,6 +1265,7 @@ impl MediaRepository {
         }
 
         let mut tx = self.pool.begin().await?;
+        allow_manual_artwork_edit(&mut tx).await?;
 
         let Some(internal_id) = resolve_item_internal_id(&mut tx, item_id).await? else {
             return Ok(false);
@@ -1476,6 +1654,7 @@ impl MediaRepository {
         }
 
         let mut tx = self.pool.begin().await?;
+        allow_manual_artwork_edit(&mut tx).await?;
 
         let Some(internal_id) = resolve_item_internal_id(&mut tx, item_id).await? else {
             return Ok(false);
@@ -1560,6 +1739,162 @@ impl MediaRepository {
         Ok(true)
     }
 
+
+    /// Emby `DELETE Items/{id}` 最小可用：软删条目及其子孙（`is_deleted=true`），
+    /// 默认不删磁盘文件。`delete_files=true` 时尝试删除本地媒体文件路径（跳过
+    /// `fbz-storage://` / http(s) / strm 目标）；失败不阻断软删。
+    pub async fn soft_delete_item(
+        &self,
+        item_id: &str,
+        delete_files: bool,
+    ) -> Result<Option<SoftDeleteItemResult>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some(internal_id) = resolve_item_internal_id(&mut tx, item_id).await? else {
+            return Ok(None);
+        };
+
+        let public_id = sqlx::query_scalar::<_, String>(
+            r#"
+            select public_id::text
+            from media_items
+            where id = $1
+            "#,
+        )
+        .bind(internal_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        // 收集本条目 + 子孙的媒体文件路径（软删前）。
+        let path_rows = sqlx::query(
+            r#"
+            with recursive tree as (
+                select id
+                from media_items
+                where id = $1
+                union all
+                select child.id
+                from media_items child
+                join tree on child.parent_id = tree.id
+                where child.is_deleted = false
+            )
+            select distinct mf.path
+            from tree
+            join media_files mf on mf.media_item_id = tree.id
+            where mf.path is not null
+              and mf.path <> ''
+            order by mf.path
+            "#,
+        )
+        .bind(internal_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut paths = Vec::with_capacity(path_rows.len());
+        for row in path_rows {
+            let path: String = row.try_get("path")?;
+            paths.push(path);
+        }
+
+        let deleted = sqlx::query(
+            r#"
+            with recursive tree as (
+                select id
+                from media_items
+                where id = $1
+                union all
+                select child.id
+                from media_items child
+                join tree on child.parent_id = tree.id
+                where child.is_deleted = false
+            )
+            update media_items mi
+            set is_deleted = true,
+                updated_at = now()
+            from tree
+            where mi.id = tree.id
+              and mi.is_deleted = false
+            "#,
+        )
+        .bind(internal_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        tx.commit().await?;
+
+        if delete_files {
+            for path in &paths {
+                if should_attempt_local_file_delete(path) {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+            }
+        }
+
+        Ok(Some(SoftDeleteItemResult {
+            item_id: public_id,
+            deleted_item_count: deleted,
+            paths,
+        }))
+    }
+
+    /// `GET Items/{id}/DeleteInfo`：返回将受删除影响的媒体路径（不含已软删）。
+    pub async fn list_item_delete_paths(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<Vec<String>>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select mi.id
+            from media_items mi
+            where mi.public_id = case
+                when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $1::uuid
+                else null::uuid
+            end
+              and mi.is_deleted = false
+            "#,
+        )
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let internal_id: i64 = row.try_get("id")?;
+
+        let path_rows = sqlx::query(
+            r#"
+            with recursive tree as (
+                select id
+                from media_items
+                where id = $1
+                union all
+                select child.id
+                from media_items child
+                join tree on child.parent_id = tree.id
+                where child.is_deleted = false
+            )
+            select distinct mf.path
+            from tree
+            join media_files mf on mf.media_item_id = tree.id
+            where mf.path is not null
+              and mf.path <> ''
+            order by mf.path
+            "#,
+        )
+        .bind(internal_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut paths = Vec::with_capacity(path_rows.len());
+        for row in path_rows {
+            paths.push(row.try_get("path")?);
+        }
+        Ok(Some(paths))
+    }
+
     async fn find_playback_target(
         &self,
         user_id: i64,
@@ -1623,6 +1958,7 @@ impl PlaybackMediaStreamRecord {
             bitrate: row.try_get("bitrate")?,
             is_default: row.try_get("is_default")?,
             is_forced: row.try_get("is_forced")?,
+            is_external: row.try_get("is_external")?,
         })
     }
 }
@@ -1765,6 +2101,23 @@ async fn update_recent_playback_session(
 
 /// 图片写侧定位条目内部 id（UUID 守卫，不做库权限过滤——写入口已由路由层做
 /// admin + 可见性校验）。行锁串行化同一条目的并发图片写。
+
+fn should_attempt_local_file_delete(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("fbz-storage://") {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return false;
+    }
+    // 相对/绝对本地路径；.strm 本身可删，但不跟随 strm_target。
+    true
+}
+
 async fn resolve_item_internal_id(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     item_id: &str,
@@ -1834,5 +2187,50 @@ async fn upsert_user_playstate(
     .execute(&mut **tx)
     .await?;
 
+    Ok(())
+}
+
+#[cfg(test)]
+mod playback_source_bounds_tests {
+    use super::MAX_PLAYBACK_MEDIA_SOURCES;
+
+    #[test]
+    fn playback_source_caps_are_bounded() {
+        assert!(MAX_PLAYBACK_MEDIA_SOURCES > 0);
+        assert!(MAX_PLAYBACK_MEDIA_SOURCES <= 64);
+        let source = include_str!("repository.rs");
+        assert!(
+            source.contains("MAX_STREAMS_PER_MEDIA_FILE"),
+            "streams query must be capped"
+        );
+        assert!(
+            source.contains("list_playback_media_sources"),
+            "batch PlaybackInfo loader must exist"
+        );
+        assert!(
+            source.contains("row_number() over"),
+            "batch streams must use per-file row_number cap"
+        );
+    }
+}
+
+#[cfg(test)]
+mod soft_delete_helpers_tests {
+    use super::should_attempt_local_file_delete;
+
+    #[test]
+    fn should_attempt_local_file_delete_skips_remote_paths() {
+        assert!(should_attempt_local_file_delete("/media/Movie.mkv"));
+        assert!(should_attempt_local_file_delete("Movie.strm"));
+        assert!(!should_attempt_local_file_delete("fbz-storage://mount/a.mkv"));
+        assert!(!should_attempt_local_file_delete("https://cdn.example/a.mkv"));
+        assert!(!should_attempt_local_file_delete(""));
+    }
+}
+
+/// 手动图片操作（上传/删除/重排/改 URL）绕过图片锁触发器（0110 `trg_artwork_image_lock`）：
+/// JF 语义下锁只挡自动刷新/扫描，不挡管理员手动改图。仅事务内生效。
+async fn allow_manual_artwork_edit(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query("select set_config('fbz.metadata_edit', 'on', true)").execute(&mut **tx).await?;
     Ok(())
 }

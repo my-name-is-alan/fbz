@@ -1,0 +1,44 @@
+{
+  "id": "fbz.provider.tvdb",
+  "name": "TVDB Provider",
+  "version": "0.2.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19102/fbz-plugin",
+  "description": "Official TVDB metadata provider (BaseMatch). Real metadata.provider.query via TVDB v4 HTTP. Secrets in plugin config/env only — never in this manifest or core.",
+  "permissions": [
+    {
+      "key": "metadata.read",
+      "reason": "Receive metadata.provider.query lookups with recognition-layer context; contribute whitelist fields via sync response."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "metadata.provider.query",
+      "handler": "providers.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "api_key",
+      "label": "TVDB API Key",
+      "type": "secret",
+      "required": true,
+      "helpText": "TVDB v4 API key. Stored encrypted; never echoed."
+    },
+    {
+      "key": "api_base_url",
+      "label": "API base URL",
+      "type": "url",
+      "required": false,
+      "helpText": "Default https://api4.thetvdb.com/v4"
+    },
+    {
+      "key": "language",
+      "label": "Preferred language",
+      "type": "string",
+      "required": false,
+      "helpText": "Optional language preference for later detail enrichment"
+    }
+  ]
+}

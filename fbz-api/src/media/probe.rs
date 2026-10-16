@@ -113,9 +113,11 @@ pub fn spawn_probe_worker(
 }
 
 async fn run_available_jobs(service: &ProbeService) {
+    let mut probed_any = false;
     loop {
         match service.run_next_probe_job().await {
             Ok(Some(summary)) => {
+                probed_any = true;
                 info!(
                     job_id = %summary.job_id,
                     media_file_id = summary.media_file_id,
@@ -130,6 +132,10 @@ async fn run_available_jobs(service: &ProbeService) {
                 break;
             }
         }
+    }
+    // 扫描 → probe 批次排空后（时长/分辨率已知）触发 trickplay 增量生成（受 env 开关控制）。
+    if probed_any {
+        crate::media::trickplay::trigger_after_scan(service.pool.clone());
     }
 }
 

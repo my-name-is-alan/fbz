@@ -37,6 +37,8 @@ pub struct UserDetailRecord {
     pub enable_playback_transcoding: bool,
     pub enable_all_folders: bool,
     pub enabled_folders: Vec<String>,
+    pub max_parental_rating: Option<i32>,
+    pub block_unrated_items: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +73,10 @@ pub struct UserSettingRecord {
 }
 
 impl UsersRepository {
+    pub fn pool(&self) -> &DbPool {
+        &self.pool
+    }
+
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
@@ -123,7 +129,9 @@ impl UsersRepository {
                     or coalesce(accessible_libraries.accessible_count, 0)
                        = coalesce(visible_libraries.visible_count, 0)
                 ) as enable_all_folders,
-                coalesce(accessible_libraries.enabled_folders, array[]::text[]) as enabled_folders
+                coalesce(accessible_libraries.enabled_folders, array[]::text[]) as enabled_folders,
+                u.max_parental_rating,
+                coalesce(u.block_unrated_items, array[]::text[]) as block_unrated_items
             from users u
             join roles r on r.id = u.role_id
             left join lateral (
@@ -185,7 +193,9 @@ impl UsersRepository {
                     or coalesce(accessible_libraries.accessible_count, 0)
                        = coalesce(visible_libraries.visible_count, 0)
                 ) as enable_all_folders,
-                coalesce(accessible_libraries.enabled_folders, array[]::text[]) as enabled_folders
+                coalesce(accessible_libraries.enabled_folders, array[]::text[]) as enabled_folders,
+                u.max_parental_rating,
+                coalesce(u.block_unrated_items, array[]::text[]) as block_unrated_items
             from users u
             join roles r on r.id = u.role_id
             left join lateral (
@@ -673,6 +683,8 @@ impl UserDetailRecord {
             enable_playback_transcoding: row.try_get("enable_playback_transcoding")?,
             enable_all_folders: row.try_get("enable_all_folders")?,
             enabled_folders: row.try_get("enabled_folders")?,
+            max_parental_rating: row.try_get("max_parental_rating")?,
+            block_unrated_items: row.try_get("block_unrated_items")?,
         })
     }
 }

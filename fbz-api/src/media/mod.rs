@@ -1,5 +1,12 @@
 pub mod audio_tags;
+pub mod book_convert;
+pub mod book_meta;
+pub mod extras;
+pub mod container;
+pub mod marker_detect;
 pub mod photo;
 pub mod probe;
 pub mod repository;
+pub mod strm;
 pub mod tools;
+pub mod trickplay;

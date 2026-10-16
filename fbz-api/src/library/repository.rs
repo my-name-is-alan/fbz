@@ -3,13 +3,23 @@ use sqlx::{Row, postgres::PgRow};
 use crate::db::DbPool;
 
 const USER_VIEW_LIMIT: i64 = 1_000;
+/// 详情 People 列表上限，避免超大演职员表无界返回。
+const MAX_ITEM_PEOPLE: i64 = 200;
 /// 播放列表列表：playlists 表按属主过滤（播放列表是用户私有资产，不走库权限）。
 const LIST_USER_PLAYLISTS_SQL: &str = r#"
             select
                 p.public_id::text as id,
-                p.name
+                p.name,
+                0::bigint as total_record_count
             from playlists p
-            where p.owner_user_id = $1
+            where (
+                    p.owner_user_id = $1
+                 or p.open_access
+                 or exists (
+                        select 1 from playlist_shares ps
+                        where ps.playlist_id = p.id and ps.user_id = $1
+                    )
+              )
               and (
                     $4::text is null
                  or lower(p.name) like '%' || lower($4::text) || '%'
@@ -36,7 +46,14 @@ const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
                 from playlists p
                 cross join requested_playlist requested
                 where p.public_id = requested.public_id
-                  and p.owner_user_id = $1
+                  and (
+                    p.owner_user_id = $1
+                 or p.open_access
+                 or exists (
+                        select 1 from playlist_shares ps
+                        where ps.playlist_id = p.id and ps.user_id = $1
+                    )
+              )
             )
             select
                 mi.public_id::text as id,
@@ -51,6 +68,7 @@ const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
                 primary_file.is_strm as media_file_is_strm,
                 (u.allow_transcode and lp.can_transcode) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
@@ -61,6 +79,7 @@ const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
                     when $5::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 0::bigint as total_record_count
             from playlist_scope scope
             join playlist_entries pe on pe.playlist_id = scope.id
@@ -88,6 +107,12 @@ const LIST_USER_PLAYLIST_ITEMS_SQL: &str = r#"
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $5::boolean = true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
             where lp.user_id = $1
               and lp.can_view = true
               and mi.is_deleted = false
@@ -137,6 +162,7 @@ const LIST_USER_COLLECTION_ITEMS_SQL: &str = r#"
                 primary_file.is_strm as media_file_is_strm,
                 (u.allow_transcode and lp.can_transcode) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
@@ -146,6 +172,7 @@ const LIST_USER_COLLECTION_ITEMS_SQL: &str = r#"
                     when $5::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 0::bigint as total_record_count
             from playlist_scope scope
             join collection_items ci on ci.collection_id = scope.id
@@ -173,6 +200,12 @@ const LIST_USER_COLLECTION_ITEMS_SQL: &str = r#"
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $5::boolean = true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
             where lp.user_id = $1
               and lp.can_view = true
               and mi.is_deleted = false
@@ -428,6 +461,7 @@ pub enum ItemSortField {
     DateCreated,
     Runtime,
     ProductionYear,
+    CommunityRating,
     IndexNumber,
     /// 搜索相关度（仅在带 SearchTerm 的查询里作为默认排序使用）：
     /// 完整标题命中 > 前缀命中 > tsvector 词组命中 > 其余（子串/拼音命中）。
@@ -441,6 +475,7 @@ impl ItemSortField {
             Self::DateCreated => "date_created",
             Self::Runtime => "runtime",
             Self::ProductionYear => "production_year",
+            Self::CommunityRating => "community_rating",
             Self::IndexNumber => "index_number",
             Self::Relevance => "relevance",
         }
@@ -462,9 +497,18 @@ impl SortDirection {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ItemQueryOptions {
     pub type_filter: ItemTypeFilter,
+    /// Emby/JF `ExcludeItemTypes`（内部 item_type，与 type_filter 同词汇）。
+    pub exclude_type_filter: ItemTypeFilter,
+    /// Emby/JF `MinCommunityRating` / `MaxCommunityRating`。
+    pub min_community_rating: Option<f64>,
+    pub max_community_rating: Option<f64>,
+    /// Emby/JF Policy.MaxParentalRating；null = 不限。
+    pub max_parental_rating: Option<i32>,
+    /// 已规范化的内部 item_type 列表（见 `parental::normalize_block_unrated_items`）。
+    pub block_unrated_item_types: Vec<String>,
     pub scalar_filter: ItemScalarFilter,
     pub user_data_filter: ItemUserDataFilter,
     pub structure_filter: ItemStructureFilter,
@@ -476,10 +520,29 @@ pub struct ItemQueryOptions {
     pub sort_direction: SortDirection,
 }
 
+impl ItemQueryOptions {
+    pub fn has_community_rating_filter(&self) -> bool {
+        self.min_community_rating.is_some() || self.max_community_rating.is_some()
+    }
+
+    pub fn has_parental_control_filter(&self) -> bool {
+        self.max_parental_rating.is_some() || !self.block_unrated_item_types.is_empty()
+    }
+
+    pub fn has_exclude_type_filter(&self) -> bool {
+        self.exclude_type_filter.enabled
+    }
+}
+
 impl Default for ItemQueryOptions {
     fn default() -> Self {
         Self {
             type_filter: ItemTypeFilter::default(),
+            exclude_type_filter: ItemTypeFilter::default(),
+            min_community_rating: None,
+            max_community_rating: None,
+            max_parental_rating: None,
+            block_unrated_item_types: Vec::new(),
             scalar_filter: ItemScalarFilter::default(),
             user_data_filter: ItemUserDataFilter::default(),
             structure_filter: ItemStructureFilter::default(),
@@ -520,6 +583,7 @@ pub struct UserMediaFolderRecord {
     pub id: String,
     pub name: String,
     pub library_type: String,
+    pub enable_realtime_monitor: bool,
     pub subfolders: Vec<UserMediaSubFolderRecord>,
 }
 
@@ -529,7 +593,7 @@ pub struct UserMediaSubFolderRecord {
     pub path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BrowseItemsInput {
     pub user_id: i64,
     pub parent_id: Option<String>,
@@ -551,6 +615,9 @@ impl BrowseItemsInput {
             && !self.options.provider_filter.has_any_filter()
             && !self.options.image_filter.has_any_filter()
             && !self.options.association_filter.has_any_filter()
+            && !self.options.has_exclude_type_filter()
+            && !self.options.has_community_rating_filter()
+            && !self.options.has_parental_control_filter()
     }
 
     fn can_use_include_ids_fast_path(&self) -> bool {
@@ -579,6 +646,9 @@ impl BrowseItemsInput {
             && !self.options.provider_filter.has_any_filter()
             && !self.options.image_filter.has_any_filter()
             && !self.options.association_filter.has_any_filter()
+            && !self.options.has_exclude_type_filter()
+            && !self.options.has_community_rating_filter()
+            && !self.options.has_parental_control_filter()
     }
 
     fn can_use_provider_id_fast_path(&self) -> bool {
@@ -595,6 +665,9 @@ impl BrowseItemsInput {
             && !self.options.media_filter.has_any_filter()
             && !self.options.image_filter.has_any_filter()
             && !self.options.association_filter.has_any_filter()
+            && !self.options.has_exclude_type_filter()
+            && !self.options.has_community_rating_filter()
+            && !self.options.has_parental_control_filter()
     }
 }
 
@@ -613,7 +686,7 @@ fn is_uuid_text(value: &str) -> bool {
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MediaQueryInput {
     pub user_id: i64,
     pub parent_id: Option<String>,
@@ -622,7 +695,7 @@ pub struct MediaQueryInput {
     pub options: ItemQueryOptions,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SimilarItemsInput {
     pub user_id: i64,
     pub item_id: String,
@@ -688,6 +761,36 @@ pub struct ItemDetailExtrasRecord {
     pub official_rating: Option<String>,
     pub premiere_date: Option<String>,
     pub genres: Vec<String>,
+}
+
+/// 本地 Extra（trailer / theme_*）候选：同目录树已入库 sibling + ExtraType。
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalExtraItemRecord {
+    pub extra_type: String,
+    pub path: String,
+    pub item: MediaItemBrowseRecord,
+}
+
+/// `media_videos` 行（远程预告/主题曲外链）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemVideoRecord {
+    pub id: String,
+    pub video_type: String,
+    pub name: Option<String>,
+    pub site: Option<String>,
+    pub site_key: Option<String>,
+    pub url: Option<String>,
+    pub is_official: bool,
+    pub sort_order: i32,
+}
+
+/// 播放列表共享信息（JF PlaylistDto OpenAccess/Shares）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistSharing {
+    pub owner_user_id: i64,
+    pub open_access: bool,
+    /// (user public id, can_edit)
+    pub shares: Vec<(String, bool)>,
 }
 
 /// 播放列表写操作结果：目标缺失 / 非属主 / 已应用。
@@ -868,7 +971,7 @@ pub struct TechnicalFacetListInput {
     pub kind: TechnicalFacetKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShowItemsInput {
     pub user_id: i64,
     pub series_id: String,
@@ -878,7 +981,7 @@ pub struct ShowItemsInput {
     pub options: ItemQueryOptions,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NextUpInput {
     pub user_id: i64,
     pub series_id: Option<String>,
@@ -886,6 +989,14 @@ pub struct NextUpInput {
     pub start_index: i64,
     pub limit: i64,
     pub options: ItemQueryOptions,
+    /// JF `EnableRewatching`：锚点之后的已看集也可作为下一集。
+    pub enable_rewatching: bool,
+    /// JF `EnableResumable`（默认 true）：false 时排除进度中的集。
+    pub enable_resumable: bool,
+    /// JF `NextUpDateCutoff`：只保留最近观看时间不早于该时刻的剧集（RFC3339）。
+    pub date_cutoff: Option<String>,
+    /// JF `DisableFirstEpisode`：不推荐从未看过的剧的第一集。
+    pub disable_first_episode: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -918,9 +1029,14 @@ pub struct GenreRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ItemsFiltersResult {
     pub genres: Vec<String>,
+    /// 与 `genres` 一一对应的 genres.id（bigint），供 Filters2 NameLongIdPair 使用。
+    pub genre_ids: Vec<i64>,
     pub tags: Vec<String>,
     pub official_ratings: Vec<String>,
     pub years: Vec<i32>,
+    /// Studios：`(public_id, name)`；Filters2 用 NameLongIdPair 时取内部 bigint 见 studio_ids。
+    pub studio_names: Vec<String>,
+    pub studio_ids: Vec<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1077,6 +1193,8 @@ pub struct MediaItemBrowseRecord {
     pub media_file_is_strm: Option<bool>,
     pub supports_transcoding: bool,
     pub production_year: Option<i32>,
+    pub community_rating: Option<f64>,
+    pub genres: Vec<String>,
     pub index_number: Option<i32>,
     pub parent_index_number: Option<i32>,
     pub premiere_date: Option<String>,
@@ -1089,6 +1207,15 @@ pub struct MediaItemBrowseRecord {
     pub playlist_item_id: Option<String>,
     pub image_tags: Vec<String>,
     pub total_record_count: i64,
+}
+
+/// media_markers → Emby Chapters 映射行。
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaChapterRecord {
+    pub marker_type: String,
+    pub start_ticks: i64,
+    pub end_ticks: Option<i64>,
+    pub source: String,
 }
 
 /// 单条条目关联人物（详情接口用）：public_id + 名称 + 角色类型/角色名 + 排序。
@@ -1153,7 +1280,8 @@ impl LibraryRepository {
                     l.id,
                     l.public_id,
                     l.name,
-                    l.library_type
+                    l.library_type,
+                    l.enable_realtime_monitor
                 from libraries l
                 join library_permissions perm on perm.library_id = l.id
                 where perm.user_id = $1
@@ -1166,6 +1294,7 @@ impl LibraryRepository {
                 l.public_id::text as library_id,
                 l.name,
                 l.library_type,
+                l.enable_realtime_monitor,
                 lp.id::text as subfolder_id,
                 lp.path as subfolder_path
             from allowed_libraries l
@@ -1337,8 +1466,285 @@ impl LibraryRepository {
         .transpose()
     }
 
+
+    /// 列出与条目同目录树下、已入库且被 `media::extras` 判为 Extra 的 sibling。
+    /// `None` = 条目对用户不可见 / 不存在；`Some(vec![])` = 可见但无本地 Extra。
+    pub async fn list_local_extra_items(
+        &self,
+        user_id: i64,
+        item_id: &str,
+    ) -> Result<Option<Vec<LocalExtraItemRecord>>, sqlx::Error> {
+        let owner = sqlx::query(
+            r#"
+            select
+                mi.id as owner_id,
+                mi.library_id,
+                owner_file.path as owner_path
+            from media_items mi
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+            left join lateral (
+                select mf.path
+                from media_files mf
+                where mf.media_item_id = mi.id
+                order by mf.is_primary desc, mf.id
+                limit 1
+            ) owner_file on true
+            where lp.user_id = $1
+              and lp.can_view = true
+              and l.is_hidden = false
+              and mi.is_deleted = false
+              and mi.public_id = case
+                  when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $2::uuid
+                  else null::uuid
+              end
+            "#,
+        )
+        .bind(user_id)
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        let owner_id: i64 = owner.try_get("owner_id")?;
+        let library_id: i64 = owner.try_get("library_id")?;
+        let owner_path: Option<String> = owner.try_get("owner_path")?;
+        let Some(owner_path) = owner_path.filter(|p| !p.trim().is_empty()) else {
+            return Ok(Some(Vec::new()));
+        };
+
+        let parent_prefix = match std::path::Path::new(&owner_path).parent() {
+            Some(parent) => {
+                let mut s = parent.to_string_lossy().into_owned();
+                if !s.ends_with('/') && !s.ends_with('\\') {
+                    if owner_path.contains('\\') && !owner_path.contains('/') {
+                        s.push('\\');
+                    } else {
+                        s.push('/');
+                    }
+                }
+                s
+            }
+            None => return Ok(Some(Vec::new())),
+        };
+
+        let rows = sqlx::query(
+            r#"
+            select
+                mi.public_id::text as id,
+                mi.title as name,
+                mi.item_type,
+                parent.public_id::text as parent_id,
+                coalesce(mi.runtime_ticks, primary_file.duration_ticks) as runtime_ticks,
+                primary_file.media_file_id,
+                primary_file.file_size as media_file_size,
+                primary_file.container as media_file_container,
+                primary_file.bitrate as media_file_bitrate,
+                primary_file.is_strm as media_file_is_strm,
+                primary_file.path as media_path,
+                (u.allow_transcode and lp.can_transcode) as supports_transcoding,
+                mi.production_year,
+                mi.community_rating::double precision as community_rating,
+                coalesce(up.position_ticks, 0) as playback_position_ticks,
+                coalesce(up.play_count, 0) as play_count,
+                coalesce(up.is_favorite, false) as is_favorite,
+                up.rating::double precision as rating,
+                coalesce(up.played, false) as played,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
+                mi.index_number,
+                mi.parent_index_number,
+                mi.premiere_date::text as premiere_date,
+                coalesce(item_images.image_tags, array[]::text[]) as image_tags
+            from media_items mi
+            join libraries l on l.id = mi.library_id
+            join library_permissions lp on lp.library_id = mi.library_id
+            join users u on u.id = lp.user_id
+            left join media_items parent on parent.id = mi.parent_id
+            left join user_playstates up on up.user_id = $1 and up.media_item_id = mi.id
+            left join lateral (
+                select
+                    mf.id as media_file_id,
+                    mf.file_size,
+                    mf.container,
+                    mf.duration_ticks,
+                    mf.bitrate,
+                    mf.is_strm,
+                    mf.path
+                from media_files mf
+                where mf.media_item_id = mi.id
+                order by mf.is_primary desc, mf.id
+                limit 1
+            ) primary_file on true
+            left join lateral (
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
+                from artwork a
+                where a.media_item_id = mi.id
+            ) item_images on true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
+            where lp.user_id = $1
+              and lp.can_view = true
+              and l.is_hidden = false
+              and mi.is_deleted = false
+              and mi.library_id = $2
+              and mi.id <> $3
+              and primary_file.path is not null
+              and primary_file.path like $4 || '%'
+            order by primary_file.path asc, mi.id asc
+            limit 128
+            "#,
+        )
+        .bind(user_id)
+        .bind(library_id)
+        .bind(owner_id)
+        .bind(&parent_prefix)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut extras = Vec::new();
+        for row in rows {
+            let path: String = row.try_get("media_path")?;
+            let class = crate::media::extras::classify_scan_path(
+                std::path::Path::new(&path),
+                crate::media::extras::SampleDisposition::AsExtra,
+            );
+            let crate::media::extras::ScanPathClass::Extra(extra_type) = class else {
+                continue;
+            };
+            let item = MediaItemBrowseRecord {
+                id: row.try_get("id")?,
+                name: row.try_get("name")?,
+                item_type: row.try_get("item_type")?,
+                parent_id: row.try_get("parent_id")?,
+                run_time_ticks: row.try_get("runtime_ticks")?,
+                media_file_id: row.try_get("media_file_id")?,
+                media_file_size: row.try_get("media_file_size")?,
+                media_file_container: row.try_get("media_file_container")?,
+                media_file_bitrate: row.try_get("media_file_bitrate")?,
+                media_file_is_strm: row.try_get("media_file_is_strm")?,
+                supports_transcoding: row.try_get("supports_transcoding")?,
+                production_year: row.try_get("production_year")?,
+                community_rating: row.try_get("community_rating")?,
+                genres: row.try_get("genres")?,
+                index_number: row.try_get("index_number")?,
+                parent_index_number: row.try_get("parent_index_number")?,
+                premiere_date: row.try_get("premiere_date")?,
+                playback_position_ticks: row.try_get("playback_position_ticks")?,
+                play_count: row.try_get("play_count")?,
+                is_favorite: row.try_get("is_favorite")?,
+                rating: row.try_get("rating")?,
+                played: row.try_get("played")?,
+                playlist_item_id: None,
+                image_tags: row.try_get("image_tags")?,
+                total_record_count: 0,
+            };
+            extras.push(LocalExtraItemRecord {
+                extra_type: extra_type.as_str().to_owned(),
+                path,
+                item,
+            });
+        }
+        Ok(Some(extras))
+    }
+
+    /// 条目上的远程附属视频（TMDB trailers / themes 等，`media_videos`）。
+    pub async fn list_item_videos(
+        &self,
+        item_id: &str,
+    ) -> Result<Vec<ItemVideoRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                mv.public_id::text as id,
+                mv.video_type,
+                mv.name,
+                mv.site,
+                mv.site_key,
+                mv.url,
+                mv.is_official,
+                mv.sort_order
+            from media_items mi
+            join media_videos mv on mv.media_item_id = mi.id
+            where mi.is_deleted = false
+              and mi.public_id = case
+                  when $1::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+            order by mv.sort_order asc, mv.id asc
+            limit 128
+            "#,
+        )
+        .bind(item_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ItemVideoRecord {
+                    id: row.try_get("id")?,
+                    video_type: row.try_get("video_type")?,
+                    name: row.try_get("name")?,
+                    site: row.try_get("site")?,
+                    site_key: row.try_get("site_key")?,
+                    url: row.try_get("url")?,
+                    is_official: row.try_get("is_official")?,
+                    sort_order: row.try_get("sort_order")?,
+                })
+            })
+            .collect()
+    }
+
     /// 按 `public_id` 取单条条目的关联人物（演员/导演/编剧…），按 role_type 再 sort_order 排序。
     /// 供详情接口填充演职员与导演。绑参数 + UUID 正则防注入；非法/不存在 id 自然返回空。
+
+    /// 从 `media_markers` 映射 Emby `Chapters`（Intro/Credits/Chapter…）。
+    pub async fn fetch_item_markers_as_chapters(
+        &self,
+        public_id: &str,
+    ) -> Result<Vec<MediaChapterRecord>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            select
+                mm.marker_type,
+                mm.start_ticks,
+                mm.end_ticks,
+                mm.source
+            from media_items mi
+            join media_markers mm on mm.media_item_id = mi.id
+            where mi.is_deleted = false
+              and mi.public_id = case
+                  when $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then $1::uuid
+                  else null::uuid
+              end
+            order by mm.start_ticks asc, mm.marker_type asc, mm.source asc
+            limit 512
+            "#,
+        )
+        .bind(public_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut chapters = Vec::with_capacity(rows.len());
+        for row in rows {
+            chapters.push(MediaChapterRecord {
+                marker_type: row.try_get("marker_type")?,
+                start_ticks: row.try_get("start_ticks")?,
+                end_ticks: row.try_get("end_ticks")?,
+                source: row.try_get("source")?,
+            });
+        }
+        Ok(chapters)
+    }
+
     pub async fn fetch_item_people(
         &self,
         public_id: &str,
@@ -1373,13 +1779,76 @@ impl LibraryRepository {
                 end,
                 mip.sort_order,
                 p.name
+            limit $2
             "#,
         )
         .bind(public_id)
+        .bind(MAX_ITEM_PEOPLE)
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter().map(ItemPersonRecord::from_row).collect()
+    }
+
+    /// 列表 `Fields=People` 批量取人物：每个条目最多 `per_item` 人（同详情排序），一次查询。
+    pub async fn fetch_items_people(
+        &self,
+        public_ids: &[String],
+        per_item: i64,
+    ) -> Result<std::collections::HashMap<String, Vec<ItemPersonRecord>>, sqlx::Error> {
+        let mut out = std::collections::HashMap::<String, Vec<ItemPersonRecord>>::new();
+        if public_ids.is_empty() {
+            return Ok(out);
+        }
+        let rows = sqlx::query(
+            r#"
+            select item_id, id, name, role_type, role_name, sort_order, has_image from (
+                select
+                    mi.public_id::text as item_id,
+                    p.public_id::text as id,
+                    p.name,
+                    mip.role_type,
+                    mip.role_name,
+                    mip.sort_order,
+                    exists(
+                        select 1 from artwork a
+                        where a.person_id = p.id and a.artwork_type = 'primary'
+                    ) as has_image,
+                    row_number() over (
+                        partition by mi.id
+                        order by
+                            case mip.role_type
+                                when 'actor' then 0
+                                when 'director' then 1
+                                when 'writer' then 2
+                                else 3
+                            end,
+                            mip.sort_order,
+                            p.name
+                    ) as rn
+                from media_items mi
+                join media_item_people mip on mip.media_item_id = mi.id
+                join people p on p.id = mip.person_id
+                where mi.is_deleted = false
+                  and mi.public_id = any(
+                      select id::uuid
+                      from unnest($1::text[]) as id
+                      where id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  )
+            ) ranked
+            where rn <= $2
+            order by item_id, rn
+            "#,
+        )
+        .bind(public_ids)
+        .bind(per_item)
+        .fetch_all(&self.pool)
+        .await?;
+        for row in rows {
+            let item_id: String = row.try_get("item_id")?;
+            out.entry(item_id).or_default().push(ItemPersonRecord::from_row(row)?);
+        }
+        Ok(out)
     }
 
     /// 按 `public_id` 批量取条目「主文件」的画质标签，返回 `public_id → tags` 映射。
@@ -1637,6 +2106,140 @@ impl LibraryRepository {
         playlist_result_lower_bound_from_rows(rows, input.start_index, input.limit)
     }
 
+    /// 读播放列表共享信息（调用者须可见该列表）：(open_access, [(user public id, can_edit)])。
+    pub async fn playlist_sharing(
+        &self,
+        user_id: i64,
+        playlist_id: &str,
+    ) -> Result<Option<PlaylistSharing>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            select p.id, p.owner_user_id, p.open_access
+            from playlists p
+            where p.public_id = case
+                when $2::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                then $2::uuid
+                else null::uuid
+            end
+              and (
+                    p.owner_user_id = $1
+                 or p.open_access
+                 or exists (select 1 from playlist_shares ps where ps.playlist_id = p.id and ps.user_id = $1)
+              )
+            "#,
+        )
+        .bind(user_id)
+        .bind(playlist_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let internal_id: i64 = row.try_get("id")?;
+        let shares = sqlx::query(
+            r#"
+            select u.public_id::text as user_id, ps.can_edit
+            from playlist_shares ps
+            join users u on u.id = ps.user_id
+            where ps.playlist_id = $1
+            order by ps.created_at, u.id
+            "#,
+        )
+        .bind(internal_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|r| Ok::<_, sqlx::Error>((r.try_get::<String, _>("user_id")?, r.try_get::<bool, _>("can_edit")?)))
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(PlaylistSharing {
+            owner_user_id: row.try_get("owner_user_id")?,
+            open_access: row.try_get("open_access")?,
+            shares,
+        }))
+    }
+
+    /// 属主设置/更新某用户共享（target 为用户 public id）。
+    pub async fn upsert_playlist_share(
+        &self,
+        owner_id: i64,
+        playlist_id: &str,
+        target_user_public_id: &str,
+        can_edit: bool,
+    ) -> Result<PlaylistWriteOutcome<()>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let Some((internal_id, owner_user_id)) = lock_playlist_for_update(&mut tx, playlist_id).await? else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        if owner_user_id != owner_id {
+            return Ok(PlaylistWriteOutcome::Forbidden);
+        }
+        let inserted = sqlx::query(
+            r#"
+            insert into playlist_shares (playlist_id, user_id, can_edit)
+            select $1, u.id, $3
+            from users u
+            where u.public_id::text = lower($2) and u.id <> $4
+            on conflict (playlist_id, user_id) do update set can_edit = excluded.can_edit
+            "#,
+        )
+        .bind(internal_id)
+        .bind(target_user_public_id)
+        .bind(can_edit)
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(if inserted == 0 { PlaylistWriteOutcome::NotFound } else { PlaylistWriteOutcome::Applied(()) })
+    }
+
+    pub async fn delete_playlist_share(
+        &self,
+        owner_id: i64,
+        playlist_id: &str,
+        target_user_public_id: &str,
+    ) -> Result<PlaylistWriteOutcome<()>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let Some((internal_id, owner_user_id)) = lock_playlist_for_update(&mut tx, playlist_id).await? else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        if owner_user_id != owner_id {
+            return Ok(PlaylistWriteOutcome::Forbidden);
+        }
+        let removed = sqlx::query(
+            "delete from playlist_shares ps using users u where ps.playlist_id = $1 and ps.user_id = u.id and u.public_id::text = lower($2)",
+        )
+        .bind(internal_id)
+        .bind(target_user_public_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(if removed == 0 { PlaylistWriteOutcome::NotFound } else { PlaylistWriteOutcome::Applied(()) })
+    }
+
+    pub async fn set_playlist_open_access(
+        &self,
+        owner_id: i64,
+        playlist_id: &str,
+        open_access: bool,
+    ) -> Result<PlaylistWriteOutcome<()>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let Some((internal_id, owner_user_id)) = lock_playlist_for_update(&mut tx, playlist_id).await? else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        if owner_user_id != owner_id {
+            return Ok(PlaylistWriteOutcome::Forbidden);
+        }
+        sqlx::query("update playlists set open_access = $2, updated_at = now() where id = $1")
+            .bind(internal_id)
+            .bind(open_access)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(PlaylistWriteOutcome::Applied(()))
+    }
+
     pub async fn list_user_playlist_items(
         &self,
         input: PlaylistItemsInput,
@@ -1805,6 +2408,34 @@ impl LibraryRepository {
         })
     }
 
+    /// 重命名播放列表（属主限定）。Emby/JF `POST /Playlists/{id}?Name=` 兼容面。
+    pub async fn rename_playlist(
+        &self,
+        user_id: i64,
+        playlist_id: &str,
+        name: &str,
+    ) -> Result<PlaylistWriteOutcome<String>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some((internal_id, owner_user_id)) =
+            lock_playlist_for_update(&mut tx, playlist_id).await?
+        else {
+            return Ok(PlaylistWriteOutcome::NotFound);
+        };
+        if owner_user_id != user_id {
+            return Ok(PlaylistWriteOutcome::Forbidden);
+        }
+
+        sqlx::query("update playlists set name = $2, updated_at = now() where id = $1")
+            .bind(internal_id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(PlaylistWriteOutcome::Applied(name.to_owned()))
+    }
+
     /// 追加播放列表成员（属主限定）。锁 playlists 行序列化同一列表的并发写。
     pub async fn add_playlist_entries(
         &self,
@@ -1819,7 +2450,9 @@ impl LibraryRepository {
         else {
             return Ok(PlaylistWriteOutcome::NotFound);
         };
-        if owner_user_id != user_id {
+        if owner_user_id != user_id
+            && !playlist_share_can_edit(&mut tx, internal_id, user_id).await?
+        {
             return Ok(PlaylistWriteOutcome::Forbidden);
         }
 
@@ -1851,7 +2484,9 @@ impl LibraryRepository {
         else {
             return Ok(PlaylistWriteOutcome::NotFound);
         };
-        if owner_user_id != user_id {
+        if owner_user_id != user_id
+            && !playlist_share_can_edit(&mut tx, internal_id, user_id).await?
+        {
             return Ok(PlaylistWriteOutcome::Forbidden);
         }
 
@@ -1895,7 +2530,9 @@ impl LibraryRepository {
         else {
             return Ok(PlaylistWriteOutcome::NotFound);
         };
-        if owner_user_id != user_id {
+        if owner_user_id != user_id
+            && !playlist_share_can_edit(&mut tx, internal_id, user_id).await?
+        {
             return Ok(PlaylistWriteOutcome::Forbidden);
         }
 
@@ -2040,6 +2677,7 @@ impl LibraryRepository {
             ),
             genre_candidates as (
                 select distinct
+                    g.id,
                     g.name
                 from media_item_genres mig
                 join visible_items vi on vi.id = mig.media_item_id
@@ -2051,6 +2689,14 @@ impl LibraryRepository {
                 from media_item_tags mit
                 join visible_items vi on vi.id = mit.media_item_id
                 join tags t on t.id = mit.tag_id
+            ),
+            studio_candidates as (
+                select distinct
+                    s.id,
+                    s.name
+                from media_item_studios mis
+                join visible_items vi on vi.id = mis.media_item_id
+                join studios s on s.id = mis.studio_id
             ),
             rating_candidates as (
                 select distinct
@@ -2075,6 +2721,15 @@ impl LibraryRepository {
                         limit $8
                     ) selected_genres
                 ), array[]::text[]) as genres,
+                coalesce((
+                    select array_agg(id order by lower(name), name)
+                    from (
+                        select id, name
+                        from genre_candidates
+                        order by lower(name), name
+                        limit $8
+                    ) selected_genre_ids
+                ), array[]::bigint[]) as genre_ids,
                 coalesce((
                     select array_agg(name order by lower(name), name)
                     from (
@@ -2101,7 +2756,25 @@ impl LibraryRepository {
                         order by year desc
                         limit $8
                     ) selected_years
-                ), array[]::int[]) as years
+                ), array[]::int[]) as years,
+                coalesce((
+                    select array_agg(name order by lower(name), name)
+                    from (
+                        select name
+                        from studio_candidates
+                        order by lower(name), name
+                        limit $8
+                    ) selected_studios
+                ), array[]::text[]) as studio_names,
+                coalesce((
+                    select array_agg(id order by lower(name), name)
+                    from (
+                        select id, name
+                        from studio_candidates
+                        order by lower(name), name
+                        limit $8
+                    ) selected_studio_ids
+                ), array[]::bigint[]) as studio_ids
             "#,
         )
         .bind(input.user_id)
@@ -3438,9 +4111,10 @@ impl LibraryRepository {
                 where album_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
             ),
             requested_studio_ids as (
-                select distinct studio_id::uuid as public_id
-                from unnest($65::text[]) as studio_id
-                where studio_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                select distinct s.id
+                from studios s
+                where s.public_id::text = any($65::text[])
+                   or s.id::text = any($65::text[])
             ),
             parent_library as (
                 select l.id as library_id,
@@ -3496,6 +4170,7 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce(scope.supports_transcoding, false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
@@ -3505,6 +4180,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 0::bigint as total_record_count
             from media_items mi
             join browse_scope scope on scope.library_id = mi.library_id
@@ -3528,6 +4204,12 @@ impl LibraryRepository {
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
             where mi.is_deleted = false
               and ($7::boolean = false or mi.item_type = any($8::text[]))
               and (
@@ -3819,7 +4501,7 @@ impl LibraryRepository {
                               or exists (
                                   select 1
                                   from requested_studio_ids requested
-                                  where requested.public_id = s.public_id
+                                  where requested.id = s.id
                               )
                           )
                  )
@@ -3841,6 +4523,50 @@ impl LibraryRepository {
                         where filter_artwork.media_item_id = mi.id
                           and filter_artwork.artwork_type = any($69::text[])
                  )
+              )
+              and ($76::boolean = false or not (mi.item_type = any($77::text[])))
+              and ($78::float8 is null or mi.community_rating >= $78::float8)
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
+              and ($79::float8 is null or mi.community_rating <= $79::float8)
+              and (
+                    $80::int is null
+                 or (
+                        case lower(btrim(coalesce(mi.official_rating, '')))
+                            when 'g' then 1
+                            when 'tv-y' then 1
+                            when 'tv-g' then 1
+                            when 'tv-y7' then 3
+                            when 'tv-y7-fv' then 3
+                            when 'pg' then 5
+                            when 'tv-pg' then 5
+                            when 'pg-13' then 8
+                            when 'tv-14' then 8
+                            when 'r' then 9
+                            when 'tv-ma' then 9
+                            when 'nc-17' then 10
+                            else null
+                        end is null
+                     or case lower(btrim(coalesce(mi.official_rating, '')))
+                            when 'g' then 1
+                            when 'tv-y' then 1
+                            when 'tv-g' then 1
+                            when 'tv-y7' then 3
+                            when 'tv-y7-fv' then 3
+                            when 'pg' then 5
+                            when 'tv-pg' then 5
+                            when 'pg-13' then 8
+                            when 'tv-14' then 8
+                            when 'r' then 9
+                            when 'tv-ma' then 9
+                            when 'nc-17' then 10
+                            else null
+                        end <= $80::int
+                 )
+              )
+              and (
+                    cardinality($81::text[]) = 0
+                 or nullif(btrim(coalesce(mi.official_rating, '')), '') is not null
+                 or not (lower(mi.item_type) = any($81::text[]))
               )
               and (
                     (scope.is_library = true and (($5 = true) or mi.parent_id is null))
@@ -3865,6 +4591,8 @@ impl LibraryRepository {
                 case when $70 = 'runtime' and $71 = 'desc' then coalesce(mi.runtime_ticks, primary_file.duration_ticks) end desc nulls last,
                 case when $70 = 'production_year' and $71 = 'asc' then mi.production_year end asc nulls last,
                 case when $70 = 'production_year' and $71 = 'desc' then mi.production_year end desc nulls last,
+                case when $70 = 'community_rating' and $71 = 'asc' then mi.community_rating end asc nulls last,
+                case when $70 = 'community_rating' and $71 = 'desc' then mi.community_rating end desc nulls last,
                 case when $70 = 'index_number' and $71 = 'asc' then mi.parent_index_number end asc nulls last,
                 case when $70 = 'index_number' and $71 = 'asc' then mi.index_number end asc nulls last,
                 case when $70 = 'index_number' and $71 = 'desc' then mi.parent_index_number end desc nulls last,
@@ -3951,6 +4679,12 @@ impl LibraryRepository {
         .bind(&input.options.association_filter.album_names.values)
         .bind(input.options.association_filter.album_ids.enabled)
         .bind(&input.options.association_filter.album_ids.values)
+        .bind(input.options.exclude_type_filter.enabled)
+        .bind(&input.options.exclude_type_filter.item_types)
+        .bind(input.options.min_community_rating)
+        .bind(input.options.max_community_rating)
+        .bind(input.options.max_parental_rating)
+        .bind(&input.options.block_unrated_item_types)
         .fetch_all(&self.pool)
         .await?;
 
@@ -4040,6 +4774,7 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce(scope.supports_transcoding, false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 up.position_ticks as playback_position_ticks,
                 up.play_count,
                 up.is_favorite,
@@ -4049,6 +4784,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 0::bigint as total_record_count
             from state_items up
             join media_items mi on mi.id = up.media_item_id
@@ -4071,7 +4807,14 @@ impl LibraryRepository {
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
             where mi.is_deleted = false
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and ($7::boolean = false or mi.item_type = any($8::text[]))
               and (
                     (scope.is_library = true and (($5 = true) or mi.parent_id is null))
@@ -4086,6 +4829,8 @@ impl LibraryRepository {
                 case when $14 = 'runtime' and $15 = 'desc' then coalesce(mi.runtime_ticks, primary_file.duration_ticks) end desc nulls last,
                 case when $14 = 'production_year' and $15 = 'asc' then mi.production_year end asc nulls last,
                 case when $14 = 'production_year' and $15 = 'desc' then mi.production_year end desc nulls last,
+                case when $14 = 'community_rating' and $15 = 'asc' then mi.community_rating end asc nulls last,
+                case when $14 = 'community_rating' and $15 = 'desc' then mi.community_rating end desc nulls last,
                 case when $14 = 'index_number' and $15 = 'asc' then mi.parent_index_number end asc nulls last,
                 case when $14 = 'index_number' and $15 = 'asc' then mi.index_number end asc nulls last,
                 case when $14 = 'index_number' and $15 = 'desc' then mi.parent_index_number end desc nulls last,
@@ -4302,6 +5047,7 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce(scope.supports_transcoding, false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
@@ -4311,6 +5057,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 0::bigint as total_record_count
             from requested_ids requested
             join media_items mi on mi.public_id = requested.public_id
@@ -4335,7 +5082,14 @@ impl LibraryRepository {
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
             where mi.is_deleted = false
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and ($7::boolean = false or mi.item_type = any($8::text[]))
               and (
                     (scope.is_library = true and (($5 = true) or mi.parent_id is null))
@@ -4350,6 +5104,8 @@ impl LibraryRepository {
                 case when $10 = 'runtime' and $11 = 'desc' then coalesce(mi.runtime_ticks, primary_file.duration_ticks) end desc nulls last,
                 case when $10 = 'production_year' and $11 = 'asc' then mi.production_year end asc nulls last,
                 case when $10 = 'production_year' and $11 = 'desc' then mi.production_year end desc nulls last,
+                case when $10 = 'community_rating' and $11 = 'asc' then mi.community_rating end asc nulls last,
+                case when $10 = 'community_rating' and $11 = 'desc' then mi.community_rating end desc nulls last,
                 case when $10 = 'index_number' and $11 = 'asc' then mi.parent_index_number end asc nulls last,
                 case when $10 = 'index_number' and $11 = 'asc' then mi.index_number end asc nulls last,
                 case when $10 = 'index_number' and $11 = 'desc' then mi.parent_index_number end desc nulls last,
@@ -4451,6 +5207,7 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce(scope.supports_transcoding, false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
@@ -4460,6 +5217,7 @@ impl LibraryRepository {
                     when $6::boolean = true then coalesce(item_images.image_tags, array[]::text[])
                     else array[]::text[]
                 end as image_tags,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 0::bigint as total_record_count
             from provider_items provider_match
             join media_items mi on mi.id = provider_match.media_item_id
@@ -4484,7 +5242,14 @@ impl LibraryRepository {
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on $6::boolean = true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
             where mi.is_deleted = false
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and ($7::boolean = false or mi.item_type = any($8::text[]))
               and (
                     (scope.is_library = true and (($5 = true) or mi.parent_id is null))
@@ -4499,6 +5264,8 @@ impl LibraryRepository {
                 case when $10 = 'runtime' and $11 = 'desc' then coalesce(mi.runtime_ticks, primary_file.duration_ticks) end desc nulls last,
                 case when $10 = 'production_year' and $11 = 'asc' then mi.production_year end asc nulls last,
                 case when $10 = 'production_year' and $11 = 'desc' then mi.production_year end desc nulls last,
+                case when $10 = 'community_rating' and $11 = 'asc' then mi.community_rating end asc nulls last,
+                case when $10 = 'community_rating' and $11 = 'desc' then mi.community_rating end desc nulls last,
                 case when $10 = 'index_number' and $11 = 'asc' then mi.parent_index_number end asc nulls last,
                 case when $10 = 'index_number' and $11 = 'asc' then mi.index_number end asc nulls last,
                 case when $10 = 'index_number' and $11 = 'desc' then mi.parent_index_number end desc nulls last,
@@ -4555,11 +5322,13 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 up.position_ticks as playback_position_ticks,
                 up.play_count,
                 up.is_favorite,
                 up.rating::double precision as rating,
                 up.played,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 coalesce(item_images.image_tags, array[]::text[]) as image_tags,
                 0::bigint as total_record_count
             from user_playstates up
@@ -4586,7 +5355,14 @@ impl LibraryRepository {
                 from artwork a
                 where a.media_item_id = mi.id
             ) item_images on true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = mi.id
+            ) genre_list on true
             where up.user_id = $1
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and lp.user_id = $1
               and lp.can_view = true
               and up.played = false
@@ -4643,11 +5419,13 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
+                array[]::text[] as genres,
                 array[]::text[] as image_tags,
                 0::bigint as total_record_count
             from media_items mi
@@ -4672,6 +5450,7 @@ impl LibraryRepository {
                 and up.media_item_id = mi.id
             where lp.user_id = $1
               and lp.can_view = true
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and mi.is_deleted = false
               and l.is_hidden = false
               and mi.item_type in ('movie', 'series', 'episode', 'track')
@@ -4690,6 +5469,8 @@ impl LibraryRepository {
                 case when $7 = 'runtime' and $8 = 'desc' then coalesce(mi.runtime_ticks, primary_file.duration_ticks) end desc nulls last,
                 case when $7 = 'production_year' and $8 = 'asc' then mi.production_year end asc nulls last,
                 case when $7 = 'production_year' and $8 = 'desc' then mi.production_year end desc nulls last,
+                case when $7 = 'community_rating' and $8 = 'asc' then mi.community_rating end asc nulls last,
+                case when $7 = 'community_rating' and $8 = 'desc' then mi.community_rating end desc nulls last,
                 case when $7 = 'index_number' and $8 = 'asc' then mi.parent_index_number end asc nulls last,
                 case when $7 = 'index_number' and $8 = 'asc' then mi.index_number end asc nulls last,
                 case when $7 = 'index_number' and $8 = 'desc' then mi.parent_index_number end desc nulls last,
@@ -4754,6 +5535,7 @@ impl LibraryRepository {
                     primary_file.is_strm as media_file_is_strm,
                     coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                     mi.production_year,
+                    mi.community_rating::double precision as community_rating,
                     coalesce(up.position_ticks, 0) as playback_position_ticks,
                     coalesce(up.play_count, 0) as play_count,
                     coalesce(up.is_favorite, false) as is_favorite,
@@ -4764,6 +5546,7 @@ impl LibraryRepository {
                         when target.production_year is null or mi.production_year is null then null
                     else abs(mi.production_year - target.production_year)
                     end as year_distance,
+                    array[]::text[] as genres,
                     array[]::text[] as image_tags,
                     0::bigint as total_record_count
                 from target_item target
@@ -4790,6 +5573,7 @@ impl LibraryRepository {
                     and up.media_item_id = mi.id
                 where lp.user_id = $1
                   and lp.can_view = true
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
                   and mi.is_deleted = false
                   and l.is_hidden = false
                   and ($5::boolean = false or mi.item_type = any($6::text[]))
@@ -4904,6 +5688,7 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                 season.production_year,
+                season.community_rating::double precision as community_rating,
                 season.index_number as index_number,
                 season.parent_index_number as parent_index_number,
                 season.premiere_date::text as premiere_date,
@@ -4912,6 +5697,7 @@ impl LibraryRepository {
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 coalesce(item_images.image_tags, array[]::text[]) as image_tags,
                 0::bigint as total_record_count
             from media_items series
@@ -4936,6 +5722,12 @@ impl LibraryRepository {
                 from artwork a
                 where a.media_item_id = season.id
             ) item_images on true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = season.id
+            ) genre_list on true
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = season.id
             where series.public_id = case
@@ -4945,6 +5737,7 @@ impl LibraryRepository {
               end
               and series.item_type = 'series'
               and season.item_type = 'season'
+              and fbz_item_visible_to_user($1, season.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and lp.user_id = $1
               and lp.can_view = true
               and series.is_deleted = false
@@ -5030,6 +5823,7 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce(access.supports_transcoding, false) as supports_transcoding,
                 episode.production_year,
+                episode.community_rating::double precision as community_rating,
                 episode.index_number as index_number,
                 episode.parent_index_number as parent_index_number,
                 episode.premiere_date::text as premiere_date,
@@ -5038,6 +5832,7 @@ impl LibraryRepository {
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
+                coalesce(genre_list.genres, array[]::text[]) as genres,
                 coalesce(item_images.image_tags, array[]::text[]) as image_tags,
                 0::bigint as total_record_count
             from episode_parent_scope episode_parent
@@ -5061,9 +5856,16 @@ impl LibraryRepository {
                 from artwork a
                 where a.media_item_id = episode.id
             ) item_images on true
+            left join lateral (
+                select array_agg(g.name order by g.name) as genres
+                from media_item_genres mig
+                join genres g on g.id = mig.genre_id
+                where mig.media_item_id = episode.id
+            ) genre_list on true
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = episode.id
             where episode.item_type = 'episode'
+              and fbz_item_visible_to_user($1, episode.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and episode.is_deleted = false
               and ($6::boolean = false or episode.item_type = any($7::text[]))
             order by parent.index_number nulls last,
@@ -5139,11 +5941,13 @@ impl LibraryRepository {
                     primary_file.is_strm as media_file_is_strm,
                     coalesce(series.supports_transcoding, false) as supports_transcoding,
                     episode.production_year,
+                    episode.community_rating::double precision as community_rating,
                     coalesce(up.position_ticks, 0) as playback_position_ticks,
                     coalesce(up.play_count, 0) as play_count,
                     coalesce(up.is_favorite, false) as is_favorite,
                     up.rating::double precision as rating,
                     coalesce(up.played, false) as played,
+                    up.last_played_at,
                     series.id as series_id,
                     parent.index_number as parent_sort_index,
                     episode.index_number as episode_sort_index,
@@ -5170,8 +5974,8 @@ impl LibraryRepository {
                 ) primary_file on true
                 left join user_playstates up on up.user_id = $1
                     and up.media_item_id = episode.id
-                where coalesce(up.played, false) = false
-                  and ($6::boolean = false or episode.item_type = any($7::text[]))
+                where ($6::boolean = false or episode.item_type = any($7::text[]))
+              and fbz_item_visible_to_user($1, episode.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
                 union all
                 select
                     episode.id,
@@ -5187,11 +5991,13 @@ impl LibraryRepository {
                     primary_file.is_strm as media_file_is_strm,
                     coalesce(series.supports_transcoding, false) as supports_transcoding,
                     episode.production_year,
+                    episode.community_rating::double precision as community_rating,
                     coalesce(up.position_ticks, 0) as playback_position_ticks,
                     coalesce(up.play_count, 0) as play_count,
                     coalesce(up.is_favorite, false) as is_favorite,
                     up.rating::double precision as rating,
                     coalesce(up.played, false) as played,
+                    up.last_played_at,
                     series.id as series_id,
                     episode.parent_index_number as parent_sort_index,
                     episode.index_number as episode_sort_index,
@@ -5215,10 +6021,10 @@ impl LibraryRepository {
                 ) primary_file on true
                 left join user_playstates up on up.user_id = $1
                     and up.media_item_id = episode.id
-                where coalesce(up.played, false) = false
-                  and ($6::boolean = false or episode.item_type = any($7::text[]))
+                where ($6::boolean = false or episode.item_type = any($7::text[]))
+              and fbz_item_visible_to_user($1, episode.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
             ),
-            ranked as (
+            ordered as (
                 select *,
                        row_number() over (
                            partition by series_id
@@ -5226,32 +6032,66 @@ impl LibraryRepository {
                                     episode_sort_index nulls last,
                                     sort_title,
                                     id
-                       ) as series_rank
+                       ) as ep_order
                 from candidate_episodes
+            ),
+            -- JF：每部剧以「最近一次看完的集」为锚点（无锚点 = 未开始）。
+            series_anchor as (
+                select distinct on (series_id)
+                       series_id,
+                       ep_order as anchor_order,
+                       last_played_at as anchor_at
+                from ordered
+                where played and last_played_at is not null
+                order by series_id, last_played_at desc, ep_order desc
+            ),
+            ranked as (
+                select ordered.*,
+                       anchor.anchor_at,
+                       row_number() over (
+                           partition by ordered.series_id
+                           order by ordered.ep_order
+                       ) as series_rank
+                from ordered
+                left join series_anchor anchor on anchor.series_id = ordered.series_id
+                where ordered.ep_order > coalesce(anchor.anchor_order, 0)
+                  and ($8::boolean or ordered.played = false)
+                  and ($9::boolean or ordered.playback_position_ticks = 0)
+                  and ($10::timestamptz is null or anchor.anchor_at >= $10::timestamptz)
+                  and (not $11::boolean or anchor.anchor_order is not null)
             )
             select
-                id_text as id,
-                name,
-                item_type,
-                parent_id,
-                runtime_ticks,
-                media_file_id,
-                media_file_size,
-                media_file_container,
-                media_file_bitrate,
-                media_file_is_strm,
-                supports_transcoding,
-                production_year,
-                playback_position_ticks,
-                play_count,
-                is_favorite,
-                rating,
-                played,
-                array[]::text[] as image_tags,
+                ranked.id_text as id,
+                ranked.name,
+                ranked.item_type,
+                ranked.parent_id,
+                ranked.runtime_ticks,
+                ranked.media_file_id,
+                ranked.media_file_size,
+                ranked.media_file_container,
+                ranked.media_file_bitrate,
+                ranked.media_file_is_strm,
+                ranked.supports_transcoding,
+                ranked.production_year,
+                ranked.community_rating,
+                ranked.episode_sort_index as index_number,
+                ranked.parent_sort_index as parent_index_number,
+                ranked.playback_position_ticks,
+                ranked.play_count,
+                ranked.is_favorite,
+                ranked.rating,
+                ranked.played,
+                array[]::text[] as genres,
+                coalesce(item_images.image_tags, array[]::text[]) as image_tags,
                 0::bigint as total_record_count
             from ranked
-            where series_rank = 1
-            order by sort_title, id
+            left join lateral (
+                select array_agg(a.artwork_type || '=' || a.id::text order by a.artwork_type, a.is_primary desc, a.sort_order, a.id) as image_tags
+                from artwork a
+                where a.media_item_id = ranked.id
+            ) item_images on true
+            where ranked.series_rank = 1
+            order by ranked.anchor_at desc nulls last, ranked.sort_title, ranked.id
             limit $2
             offset $3
             "#,
@@ -5263,6 +6103,10 @@ impl LibraryRepository {
         .bind(input.parent_id)
         .bind(input.options.type_filter.enabled)
         .bind(&input.options.type_filter.item_types)
+        .bind(input.enable_rewatching)
+        .bind(input.enable_resumable)
+        .bind(input.date_cutoff)
+        .bind(input.disable_first_episode)
         .fetch_all(&self.pool)
         .await?;
 
@@ -5292,11 +6136,13 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                 episode.production_year,
+                episode.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
+                array[]::text[] as genres,
                 array[]::text[] as image_tags,
                 0::bigint as total_record_count
             from media_items episode
@@ -5319,6 +6165,7 @@ impl LibraryRepository {
             left join user_playstates up on up.user_id = $1
                 and up.media_item_id = episode.id
             where episode.item_type = 'episode'
+              and fbz_item_visible_to_user($1, episode.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and episode.is_deleted = false
               and episode.premiere_date is not null
               and episode.premiere_date > current_date
@@ -5372,11 +6219,13 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
+                array[]::text[] as genres,
                 array[]::text[] as image_tags,
                 1::bigint as total_record_count
             from media_items mi
@@ -5405,6 +6254,7 @@ impl LibraryRepository {
             end
               and lp.user_id = $1
               and lp.can_view = true
+              and fbz_item_visible_to_user($1, mi.id)  -- 家长控制：MaxParentalRating + BlockedTags（0110）
               and mi.is_deleted = false
               and l.is_hidden = false
             "#,
@@ -5488,11 +6338,13 @@ impl LibraryRepository {
                 primary_file.is_strm as media_file_is_strm,
                 coalesce((u.allow_transcode and lp.can_transcode), false) as supports_transcoding,
                 mi.production_year,
+                mi.community_rating::double precision as community_rating,
                 coalesce(up.position_ticks, 0) as playback_position_ticks,
                 coalesce(up.play_count, 0) as play_count,
                 coalesce(up.is_favorite, false) as is_favorite,
                 up.rating::double precision as rating,
                 coalesce(up.played, false) as played,
+                array[]::text[] as genres,
                 array[]::text[] as image_tags,
                 1::bigint as total_record_count
             from ancestor_items ancestor
@@ -5616,9 +6468,12 @@ fn browse_result_lower_bound_from_rows(
 fn items_filters_result_from_row(row: PgRow) -> Result<ItemsFiltersResult, sqlx::Error> {
     Ok(ItemsFiltersResult {
         genres: row.try_get::<Vec<String>, _>("genres")?,
+        genre_ids: row.try_get::<Vec<i64>, _>("genre_ids")?,
         tags: row.try_get::<Vec<String>, _>("tags")?,
         official_ratings: row.try_get::<Vec<String>, _>("official_ratings")?,
         years: row.try_get::<Vec<i32>, _>("years")?,
+        studio_names: row.try_get::<Vec<String>, _>("studio_names")?,
+        studio_ids: row.try_get::<Vec<i64>, _>("studio_ids")?,
     })
 }
 
@@ -5892,6 +6747,22 @@ async fn touch_collection(
     Ok(())
 }
 
+/// 共享给该用户且 CanEdit 的播放列表可改成员（JF 10.9 共享语义）。
+async fn playlist_share_can_edit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    playlist_id: i64,
+    user_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let can_edit: Option<bool> = sqlx::query_scalar(
+        "select can_edit from playlist_shares where playlist_id = $1 and user_id = $2",
+    )
+    .bind(playlist_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(can_edit.unwrap_or(false))
+}
+
 /// 行锁定位播放列表（UUID 守卫），返回 (内部 id, 属主 user id)。用于串行化同一
 /// 播放列表的并发写：并发 add/remove/move 在此排队，保证 sort_order 重排原子。
 async fn lock_playlist_for_update(
@@ -5999,6 +6870,7 @@ fn media_folders_from_rows(rows: Vec<PgRow>) -> Result<Vec<UserMediaFolderRecord
                     id: folder_id,
                     name: row.try_get("name")?,
                     library_type: row.try_get("library_type")?,
+                    enable_realtime_monitor: row.try_get("enable_realtime_monitor")?,
                     subfolders: Vec::new(),
                 });
                 folders.len() - 1
@@ -6188,6 +7060,8 @@ impl MediaItemBrowseRecord {
             media_file_is_strm: row.try_get("media_file_is_strm")?,
             supports_transcoding: row.try_get("supports_transcoding")?,
             production_year: row.try_get("production_year")?,
+            community_rating: row.try_get("community_rating").unwrap_or(None),
+            genres: row.try_get("genres").unwrap_or_default(),
             index_number: row.try_get("index_number").unwrap_or(None),
             parent_index_number: row.try_get("parent_index_number").unwrap_or(None),
             premiere_date: row.try_get("premiere_date").unwrap_or(None),
@@ -6513,7 +7387,7 @@ mod tests {
         let bad_person_filter = format!("{}{}", "p.public_id::text = any(", "$26");
         let bad_artist_filter = format!("{}{}", "p.public_id::text = any(", "$32");
         let bad_artist_item_filter = format!("{}{}", "artist_item.public_id::text = any(", "$32");
-        let bad_studio_filter = format!("{}{}", "s.public_id::text = any(", "$65");
+        let bad_studio_filter = format!("{}{}", "mis.studio_id::text = any(", "$65");
         let bad_album_filter = format!("{}{}", "mi.public_id::text = any(", "$75");
         let bad_parent_album_filter = format!("{}{}", "parent.public_id::text = any(", "$75");
 
@@ -6528,7 +7402,7 @@ mod tests {
         assert!(main_query.contains("from unnest($26::text[]) as person_id"));
         assert!(main_query.contains("from unnest($32::text[]) as artist_id"));
         assert!(main_query.contains("from unnest($75::text[]) as album_id"));
-        assert!(main_query.contains("from unnest($65::text[]) as studio_id"));
+        assert!(main_query.contains("s.public_id::text = any($65::text[])"));
         assert!(main_query.contains("from requested_genre_ids requested"));
         assert!(main_query.contains("where requested.id = mig.genre_id"));
         assert!(main_query.contains("from requested_person_ids requested"));
@@ -6539,7 +7413,7 @@ mod tests {
         assert!(main_query.contains("where requested.public_id = mi.public_id"));
         assert!(main_query.contains("where requested.public_id = parent.public_id"));
         assert!(main_query.contains("on requested.public_id = artist_item.public_id"));
-        assert!(main_query.contains("where requested.public_id = s.public_id"));
+        assert!(main_query.contains("where requested.id = s.id"));
         assert!(!main_query.contains(&bad_genre_filter));
         assert!(!main_query.contains(&bad_person_filter));
         assert!(!main_query.contains(&bad_artist_filter));
@@ -6697,6 +7571,9 @@ mod tests {
         assert!(items_query.contains("with requested_playlist as"));
         assert!(items_query.contains("then $2::uuid"));
         assert!(items_query.contains("p.owner_user_id = $1"));
+        assert!(items_query.contains("or p.open_access"));
+        assert!(list_query.contains("select 1 from playlist_shares ps"));
+        assert!(repository.contains("playlist_share_can_edit(&mut tx, internal_id, user_id)"));
         assert!(items_query.contains("join playlist_entries pe on pe.playlist_id = scope.id"));
         assert!(
             items_query.contains("join library_permissions lp on lp.library_id = mi.library_id")
@@ -7574,6 +8451,27 @@ mod tests {
     }
 
     #[test]
+    fn next_up_query_honors_jellyfin_flags() {
+        let repository = include_str!("repository.rs");
+        let q = repository
+            .split("pub async fn list_next_up_items")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn list_upcoming_episodes")
+            .next()
+            .unwrap();
+        assert!(q.contains("series_anchor as"));
+        assert!(q.contains("($8::boolean or ordered.played = false)"));
+        assert!(q.contains("($9::boolean or ordered.playback_position_ticks = 0)"));
+        assert!(q.contains("anchor.anchor_at >= $10::timestamptz"));
+        assert!(q.contains("(not $11::boolean or anchor.anchor_order is not null)"));
+        assert!(q.contains("order by ranked.anchor_at desc nulls last"));
+        for bind in ["enable_rewatching", "enable_resumable", "date_cutoff", "disable_first_episode"] {
+            assert!(q.contains(&format!(".bind(input.{bind})")));
+        }
+    }
+
+    #[test]
     fn next_up_query_uses_limit_probe_without_exact_total_count() {
         let repository = include_str!("repository.rs");
         let next_up_query = repository
@@ -7673,6 +8571,35 @@ mod tests {
             })
             .await
             .expect("upcoming query with ParentId scope should execute");
+    }
+
+
+    #[test]
+    fn item_visibility_function_guards_user_item_queries() {
+        let source = include_str!("repository.rs");
+        // 列表/续播/最新/相似/季/集/NextUp/即将播出/详情：条目级家长控制（0110）。
+        assert!(source.matches("fbz_item_visible_to_user($1, mi.id)").count() >= 8);
+        assert!(source.contains("fbz_item_visible_to_user($1, season.id)"));
+        assert!(source.matches("fbz_item_visible_to_user($1, episode.id)").count() >= 4);
+    }
+
+    #[test]
+    fn parental_control_filter_is_wired_into_main_items_query() {
+        let repository = include_str!("repository.rs").replace("\r\n", "\n");
+        let query_start = repository
+            .find("pub async fn list_user_items(")
+            .expect("list_user_items should exist");
+        let query_end = repository[query_start..]
+            .find("async fn list_user_items_from_playstates")
+            .map(|offset| query_start + offset)
+            .expect("playstates path should follow main list");
+        let query = &repository[query_start..query_end];
+        assert!(query.contains("$80::int is null"));
+        assert!(query.contains("cardinality($81::text[]) = 0"));
+        assert!(query.contains(".bind(input.options.max_parental_rating)"));
+        assert!(query.contains(".bind(&input.options.block_unrated_item_types)"));
+        assert!(repository.contains("fn has_parental_control_filter"));
+        assert!(repository.contains("&& !self.options.has_parental_control_filter()"));
     }
 
     #[test]

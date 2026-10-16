@@ -237,6 +237,8 @@ mod tests {
             media_file_is_strm: None,
             supports_transcoding: false,
             production_year: Some(1975),
+            community_rating: None,
+            genres: Vec::new(),
             index_number: None,
             parent_index_number: None,
             premiere_date: None,

@@ -1,28 +1,94 @@
 <script setup lang="ts">
 import type { CollectionDetail, MediaItem } from "@/types/media.ts";
-import { loadCollectionDetail } from "@/service/modules/detail.ts";
+import { fetchPlaybackSource, loadCollectionDetail } from "@/service/modules/detail.ts";
+import { usePlaybackStore } from "@/stores/playback.ts";
+import { useUiStore } from "@/stores/ui.ts";
 
 const route = useRoute();
+const router = useRouter();
+const playback = usePlaybackStore();
+const uiStore = useUiStore();
+
 const id = computed(() => String(route.params.id ?? ""));
 const collection = ref<CollectionDetail>();
 const parts = ref<MediaItem[]>([]);
+const loading = ref(true);
+const playing = ref(false);
+
+const meta = computed(() => (collection.value ? [`${parts.value.length} 部作品`] : []));
+
+/** 可直接起播的电影类成员（剧集进详情由续看逻辑接管）。 */
+const firstPlayableMovie = computed(() =>
+  parts.value.find((p) => (p.detailType ?? "movie") === "movie"),
+);
 
 watch(
   id,
   async (v) => {
+    loading.value = true;
+    collection.value = undefined;
+    parts.value = [];
+    if (!v) {
+      loading.value = false;
+      return;
+    }
     const detail = await loadCollectionDetail(v);
     collection.value = detail?.collection;
     parts.value = detail?.parts ?? [];
+    loading.value = false;
   },
   { immediate: true },
 );
 
-const meta = computed(() => (collection.value ? [`${parts.value.length} 部作品`] : []));
+/** Hero「播放」：优先播第一部电影；若仅有剧集则打开第一部剧集详情。 */
+async function playCollection() {
+  if (playing.value) return;
+  const movie = firstPlayableMovie.value;
+  if (movie) {
+    playing.value = true;
+    try {
+      const source = await fetchPlaybackSource(String(movie.id));
+      if (!source?.uri) {
+        uiStore.showToast("该条目暂无可播放媒体源。", "warning");
+        return;
+      }
+      playback.open({
+        type: "movie",
+        id: String(movie.id),
+        title: movie.title,
+        subtitle: movie.meta,
+        poster: movie.poster,
+        duration: source.duration,
+        startPositionSeconds: 0,
+        source,
+        server: source.server,
+        mediaSources: source.mediaSources,
+        chapters: source.chapters,
+      });
+    } catch {
+      uiStore.showToast("无法开始播放，请稍后重试。", "error");
+    } finally {
+      playing.value = false;
+    }
+    return;
+  }
+  const first = parts.value[0];
+  if (first) {
+    const kind = first.detailType ?? "movie";
+    void router.push(`/${kind}/${first.id}`);
+    return;
+  }
+  uiStore.showToast("合集中暂无可播放成员。", "warning");
+}
 </script>
 
 <template>
-  <main v-if="collection" class="detail-view">
-    <PageHeader :title="collection.title" fallback="/library/movie" />
+  <main v-if="loading" class="detail-missing">
+    <p>正在打开合集…</p>
+  </main>
+
+  <main v-else-if="collection" class="detail-view">
+    <PageHeader :title="collection.title" fallback="/collections" />
 
     <DetailHero
       :title="collection.title"
@@ -30,7 +96,8 @@ const meta = computed(() => (collection.value ? [`${parts.value.length} 部作�
       :backdrop="collection.backdrop_path ?? undefined"
       :meta="meta"
       :overview="collection.overview"
-      :show-actions="false"
+      :show-actions="parts.length > 0"
+      @play="playCollection"
     />
 
     <section class="parts">
@@ -50,7 +117,7 @@ const meta = computed(() => (collection.value ? [`${parts.value.length} 部作�
 
   <main v-else class="detail-missing">
     <p>未找到该合集，或后端尚未提供该合集详情。</p>
-    <RouterLink to="/" class="link">返回首页</RouterLink>
+    <RouterLink to="/collections" class="link">返回合集列表</RouterLink>
   </main>
 </template>
 

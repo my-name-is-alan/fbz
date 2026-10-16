@@ -8,7 +8,14 @@
  * （单一事实源：fbz-api `src/media_types.rs` 的 `LibraryType`，与 Emby CollectionType 对齐）。
  * 改动时务必与后端同步，否则建库会被后端 422 拒绝。
  */
-export type AdminLibraryType = "movies" | "tvshows" | "music" | "homevideos" | "mixed" | "livetv";
+export type AdminLibraryType =
+  | "movies"
+  | "tvshows"
+  | "music"
+  | "homevideos"
+  | "mixed"
+  | "livetv"
+  | "books";
 
 /** 建库/筛选下拉用的库类型选项（label 面向用户，value 即后端契约值）。 */
 export const LIBRARY_TYPE_OPTIONS: { label: string; value: AdminLibraryType }[] = [
@@ -18,6 +25,7 @@ export const LIBRARY_TYPE_OPTIONS: { label: string; value: AdminLibraryType }[] 
   { label: "家庭视频 (Home Videos)", value: "homevideos" },
   { label: "混合影视 (Mixed)", value: "mixed" },
   { label: "直播 (Live TV)", value: "livetv" },
+  { label: "书籍 / 有声书 (Books)", value: "books" },
 ];
 
 /** 创建媒体库返回的精简记录（`ManagedLibraryDto`）。 */

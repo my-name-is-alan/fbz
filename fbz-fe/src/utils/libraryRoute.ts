@@ -6,5 +6,7 @@ import type { MediaLibrary } from "@/types/media.ts";
  * header 下拉）各自判断 kind 导致漂移。
  */
 export function libraryRoute(library: Pick<MediaLibrary, "id" | "kind">): string {
-  return library.kind === "music" ? `/music/${library.id}` : `/library/${library.id}`;
+  if (library.kind === "music") return `/music/${library.id}`;
+  if (library.kind === "book") return `/books/${library.id}`;
+  return `/library/${library.id}`;
 }

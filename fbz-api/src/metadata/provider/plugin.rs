@@ -107,8 +107,8 @@ impl MetadataProvider for PluginMetadataProvider {
         ctx: &ProviderContext,
         input: &MetadataLookup,
     ) -> Result<ProviderMatchOutcome, MetadataProviderError> {
-        // 兜底 base match：registry 只在全部内置 BaseMatch provider 未命中后
-        // 才调用到这里（内置优先原则不变），插件此时可以用自己的数据源兜底。
+        // Base match：registry 在「插件优先」编排下会先调这里；若返回空贡献，
+        // 再回落内置客户端（过渡期 fallback）。
         match self.querier.query(ctx, input, None).await? {
             Some(contribution) => match contribution_to_base_match(&self.id, input, contribution) {
                 Some(found) => Ok(ProviderMatchOutcome::Matched(Box::new(found))),
@@ -148,9 +148,8 @@ impl MetadataProvider for PluginMetadataProvider {
     }
 }
 
-/// Builds a base [`MetadataMatch`] from a plugin contribution（兜底 base match，
-/// 仅当内置 provider 全部未命中时由 registry 调用）。要求贡献里有可用标题，
-/// 否则不成立。artwork 全部落在 `plugin:{id}` scoped source 下。
+/// Builds a base [`MetadataMatch`] from a plugin contribution（插件优先路径）。
+/// 要求贡献里有可用标题，否则不成立。artwork 全部落在 `plugin:{id}` scoped source 下。
 ///
 /// 插件未提供外部 ID 时，用 lookup 上下文合成一个**条目级唯一**的兜底 ID：
 /// `media_external_ids` 有全局 `(provider, external_id)` 唯一约束，纯标题
@@ -474,6 +473,7 @@ mod tests {
             image_language: None,
             image_prefer_original: false,
             image_fallback_languages: Vec::new(),
+            primary_path: None,
         }
     }
 

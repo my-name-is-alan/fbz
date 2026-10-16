@@ -56,6 +56,8 @@ pub struct MetadataLookup {
     /// Ordered image-language fallbacks. The special value `none`/`xx` selects
     /// textless artwork (TMDB empty `iso_639_1`).
     pub image_fallback_languages: Vec<String>,
+    /// 主媒体文件本地路径（供 NFO Match sidecar 发现）；云盘 `fbz-storage://` 时跳过本地 NFO。
+    pub primary_path: Option<String>,
 }
 
 impl MetadataLookup {
@@ -639,6 +641,7 @@ mod tests {
             image_language: None,
             image_prefer_original: false,
             image_fallback_languages: Vec::new(),
+            primary_path: None,
         };
         assert_eq!(lookup.effective_image_language(), Some("zh-CN"));
     }

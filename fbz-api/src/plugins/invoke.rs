@@ -453,9 +453,17 @@ impl PluginSyncInvoker {
     }
 
     fn next_invocation_key(&self) -> String {
-        let count = self.invocation_counter.fetch_add(1, Ordering::Relaxed);
-        format!("sync-{}-{}", unix_timestamp_seconds(), count)
+        let _ = self.invocation_counter.fetch_add(1, Ordering::Relaxed);
+        next_sync_invocation_key()
     }
+}
+
+/// 同步调用幂等键。进程级计数器：路由按请求新建 invoker，若用实例计数器则每次从 0 开始，
+/// 同一秒内两次调用撞同一个键，被插件 SDK 当成重放丢弃（返回 `{deduped:true}`）。
+fn next_sync_invocation_key() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("sync-{}-{}-{}", unix_timestamp_seconds(), std::process::id(), count)
 }
 
 /// 同步调用请求体：插件按 `invocation == "sync"` 区分同步查询与异步 hook 派发。
@@ -542,6 +550,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn sync_invocation_keys_are_unique_across_invokers() {
+        let a = next_sync_invocation_key();
+        let b = next_sync_invocation_key();
+        assert_ne!(a, b);
+    }
 
     fn subscriber() -> PluginSyncSubscriber {
         PluginSyncSubscriber {

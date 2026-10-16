@@ -120,6 +120,21 @@ impl SchedulerService {
             })
             .await?;
 
+        // Trickplay 生成（JF「生成 Trickplay 图像」）：TRICKPLAY_AUTO_GENERATE 控制启用。
+        if let Some(rt) = crate::media::trickplay::runtime() {
+            let plan = parse_core_schedule(&rt.schedule)?;
+            self.repository
+                .upsert_core_task(CoreScheduledTaskInput {
+                    task_key: crate::media::trickplay::TRICKPLAY_TASK_KEY,
+                    task_type: crate::media::trickplay::TRICKPLAY_TASK_TYPE,
+                    enabled: worker_config.enabled && rt.auto_generate,
+                    schedule_kind: plan.kind,
+                    schedule_value: rt.schedule.trim().to_owned(),
+                    interval_seconds: plan.interval_seconds,
+                })
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -214,6 +229,19 @@ impl SchedulerService {
                     task_key: task.task_key.clone(),
                     task_type: task.task_type.clone(),
                     queued_jobs,
+                })
+            }
+            crate::media::trickplay::TRICKPLAY_TASK_TYPE => {
+                let generated = match crate::media::trickplay::runtime() {
+                    Some(rt) => crate::media::trickplay::run_scheduled(self.repository.pool(), rt)
+                        .await
+                        .map_err(|message| SchedulerError::Database(sqlx::Error::Protocol(message)))?,
+                    None => 0,
+                };
+                Ok(SchedulerRunSummary {
+                    task_key: task.task_key.clone(),
+                    task_type: task.task_type.clone(),
+                    queued_jobs: generated,
                 })
             }
             CORE_TRANSCODE_CLEANUP_TASK_TYPE => {

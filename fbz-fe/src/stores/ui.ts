@@ -27,6 +27,11 @@ export interface MetadataManagerState {
   item: MediaItem | null;
 }
 
+export interface IdentifyManagerState {
+  open: boolean;
+  item: MediaItem | null;
+}
+
 export interface FilePickerState {
   open: boolean;
   currentPath: string;
@@ -69,6 +74,12 @@ export const useUiStore = defineStore("ui", () => {
 
   // Metadata manager modal state
   const metadataManager = ref<MetadataManagerState>({
+    open: false,
+    item: null,
+  });
+
+  // 识别（RemoteSearch）弹层
+  const identifyManager = ref<IdentifyManagerState>({
     open: false,
     item: null,
   });
@@ -154,6 +165,16 @@ export const useUiStore = defineStore("ui", () => {
     metadataManager.value.item = null;
   }
 
+  function openIdentifyManager(item: MediaItem) {
+    identifyManager.value = { open: true, item };
+    closeContextMenu();
+  }
+
+  function closeIdentifyManager() {
+    identifyManager.value.open = false;
+    identifyManager.value.item = null;
+  }
+
   function openFilePicker(): Promise<string> {
     return new Promise((resolve) => {
       filePicker.value = {
@@ -214,6 +235,7 @@ export const useUiStore = defineStore("ui", () => {
     contextMenu,
     libraryContextMenu,
     metadataManager,
+    identifyManager,
     filePicker,
     libraryEditor,
     toasts,
@@ -226,6 +248,8 @@ export const useUiStore = defineStore("ui", () => {
     closeLibraryContextMenu,
     openMetadataManager,
     closeMetadataManager,
+    openIdentifyManager,
+    closeIdentifyManager,
     openFilePicker,
     closeFilePicker,
     openLibraryEditor,

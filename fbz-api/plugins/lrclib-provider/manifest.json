@@ -1,0 +1,37 @@
+{
+  "id": "fbz.lyrics.lrclib",
+  "name": "LRCLIB Lyrics Provider",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19109/fbz-plugin",
+  "description": "Official remote lyrics provider. Subscribes to lyrics.provider.query (search + download) backed by the keyless public LRCLIB API (lrclib.net). Synced (LRC) lyrics preferred, plain text as fallback.",
+  "permissions": [
+    {
+      "key": "media.read",
+      "reason": "Receive track title/artist/album/duration for lyrics search; return lyric text for core to save as a sidecar."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "lyrics.provider.query",
+      "handler": "lyrics.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "base_url",
+      "label": "LRCLIB base URL",
+      "type": "string",
+      "required": false,
+      "helpText": "Default https://lrclib.net (self-hosted LRCLIB mirrors work too)."
+    },
+    {
+      "key": "max_results",
+      "label": "Max results",
+      "type": "number",
+      "required": false,
+      "helpText": "Default 10."
+    }
+  ]
+}

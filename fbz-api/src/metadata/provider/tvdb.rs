@@ -4,6 +4,16 @@
 //! detail enrichment yet — genres/people/studios stay empty; this is tracked as
 //! a phase 4 follow-up). Holds a process-lifetime bearer-token cache keyed by
 //! API key. Migrated from the legacy `provider.rs` with no behavioral change.
+//!
+//! # Migration freeze (P1)
+//!
+//! Official installable packages live under `plugins/*-provider/` and speak
+//! `metadata.provider.query`. **Do not deepen** this built-in client (no new
+//! upstream endpoints, SDK deps, or core-only API-key paths). Transition: core
+//! may keep running; cutover deletes this module after the official package
+//! carries the real upstream calls. See `plugins/README.md` and
+//! `docs/plans/official-metadata-providers-migration.md`.
+
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};

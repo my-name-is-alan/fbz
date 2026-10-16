@@ -20,6 +20,7 @@ use crate::{
     media::probe::MEDIA_PROBE_JOB_TYPE,
     media_types::{ItemType, LibraryType, MediaCategory},
     metadata::service::METADATA_REFRESH_JOB_TYPE,
+    notifications::system::enqueue_event_notification,
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
     recognition::{
         recognize,
@@ -284,6 +285,7 @@ impl ScanService {
     async fn dispatch_scan_hook(&self, event: PluginHookEvent) {
         let event_key = event.event_key.clone();
         let library_id = event.aggregate_id.clone();
+        let payload = event.payload.clone();
         if let Err(err) = PluginHookDispatcher::new(self.pool.clone())
             .dispatch(event)
             .await
@@ -293,6 +295,35 @@ impl ScanService {
                 event_key = %event_key,
                 library_id = %library_id,
                 "failed to dispatch plugin scan hooks"
+            );
+        }
+
+        // 最小 webhook 投递：admin 登记 channel=library.scan.* 的 webhook 目标即可收到 POST JSON。
+        let (title, level) = match event_key.as_str() {
+            LIBRARY_SCAN_STARTED_EVENT => ("Library scan started", "info"),
+            LIBRARY_SCAN_COMPLETED_EVENT => ("Library scan completed", "info"),
+            LIBRARY_SCAN_FAILED_EVENT => ("Library scan failed", "error"),
+            _ => ("Library scan event", "info"),
+        };
+        let message = match payload.get("error").and_then(|v| v.as_str()) {
+            Some(err) => format!("library {library_id}: {err}"),
+            None => format!("library {library_id}"),
+        };
+        if let Err(err) = enqueue_event_notification(
+            &self.pool,
+            &event_key,
+            title,
+            message,
+            level,
+            payload,
+        )
+        .await
+        {
+            warn!(
+                error = %err,
+                event_key = %event_key,
+                library_id = %library_id,
+                "failed to enqueue scan webhook notification"
             );
         }
     }
@@ -408,7 +439,7 @@ impl ScanService {
             let item_type = recognized.item_type;
             // 音乐 track：读文件自带标签（ID3/Vorbis/MP4），用标签覆盖文件名识别结果，
             // 并据此 find-or-create artist→album 容器。非 track 不读（省 IO）。
-            let audio_tags = if recognized.kind == ItemType::Track {
+            let audio_tags = if matches!(recognized.kind, ItemType::Track | ItemType::AudioBook) {
                 read_audio_tags(file.path.clone()).await?
             } else {
                 AudioTags::default()
@@ -441,10 +472,23 @@ impl ScanService {
             .transpose()
             .map_err(ScanError::Database)?;
 
+            // 电子书：仅新建条目时解析 OPF/ComicInfo/首页封面（阻塞 IO 放 blocking 池）。
+            let mut new_book_meta: Option<crate::media::book_meta::BookMeta> = None;
             let media_item_id = if let Some(existing) = existing_file.as_ref() {
                 existing.media_item_id
             } else {
                 summary.created_items += 1;
+                if recognized.kind == ItemType::Book {
+                    let book_path = file.path.clone();
+                    new_book_meta = tokio::task::spawn_blocking(move || crate::media::book_meta::extract(&book_path))
+                        .await
+                        .ok();
+                }
+                let title = new_book_meta
+                    .as_ref()
+                    .and_then(|meta| meta.title.clone())
+                    .unwrap_or_else(|| title.clone());
+                let book_year = new_book_meta.as_ref().and_then(|meta| meta.year);
                 // 层级归组（design §8）：episode 落库前 find-or-create series→season 容器，
                 // parent_id 指向 season（无季号时指向 series）。非 episode 无父链。
                 let parent_id = if recognized.kind == ItemType::Episode {
@@ -463,17 +507,24 @@ impl ScanService {
                         Self::ensure_music_parent(&mut tx, target.library_id, &audio_tags).await?;
                     music_container_ids.extend(parent.container_ids());
                     Some(parent.track_parent_id())
+                } else if matches!(recognized.kind, ItemType::AudioBook | ItemType::Book) {
+                    // 有声书/电子书：库根下子目录 = 一本有声书（多段音频）或一个书系/文件夹，
+                    // 挂 folder 容器；根目录散文件无父。
+                    match audiobook_folder_title(&file.path, matched_root.map(|p| p.path.as_path())) {
+                        Some(folder) => Some(Self::find_or_create_folder(&mut tx, target.library_id, &folder).await?),
+                        None => None,
+                    }
                 } else {
                     None
                 };
                 // track：年份/序号取自标签（缺失回退识别结果）。track 号→index_number，
                 // 碟号→parent_index_number，episode_number 留空。非 track 维持原行为
                 // （index_number 复用 episode 号，零回归）。
-                let is_track = recognized.kind == ItemType::Track;
+                let is_track = matches!(recognized.kind, ItemType::Track | ItemType::AudioBook);
                 let production_year = if is_track {
                     audio_tags.year.or(recognized.year)
                 } else {
-                    recognized.year
+                    book_year.or(recognized.year)
                 };
                 let episode_number = if is_track { None } else { recognized.episode };
                 let index_number = if is_track {
@@ -639,10 +690,17 @@ impl ScanService {
             .map_err(ScanError::Database)?;
 
             tx.commit().await.map_err(ScanError::Database)?;
+            if let Some(meta) = new_book_meta.take() {
+                if let Err(err) = self.apply_book_metadata(media_item_id, meta).await {
+                    tracing::warn!(media_item_id, error = %err, "book metadata apply failed");
+                }
+            }
             touched_media_item_ids.push(media_item_id);
             // 图片走 EXIF/缩略图提取队列；视频/音频走 ffprobe。strm 两者都不进。
             if recognized.kind == ItemType::Photo {
                 photo_media_item_ids.push(media_item_id);
+            } else if recognized.kind == ItemType::Book {
+                // 电子书不走 ffprobe（无音视频流）。
             } else if !file.is_strm {
                 probe_media_file_ids.push(media_file_id);
             }
@@ -1172,6 +1230,55 @@ impl ScanService {
             artist_id,
             album_id: Some(album_id),
         })
+    }
+
+    /// 有声书目录容器（item_type `folder`，库内按标题去重）。
+    /// 电子书元数据落库：简介/年份、作者（people role=writer）、封面（artwork primary，
+    /// source=embedded，`book-covers/{id}.jpg`）。失败不阻断扫描。
+    async fn apply_book_metadata(
+        &self,
+        media_item_id: i64,
+        meta: crate::media::book_meta::BookMeta,
+    ) -> Result<(), ScanError> {
+        crate::media::book_meta::apply_to_db(&self.pool, media_item_id, meta, "embedded", false)
+            .await
+            .map(|_| ())
+            .map_err(ScanError::Database)
+    }
+
+    async fn find_or_create_folder(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        library_id: i64,
+        title: &str,
+    ) -> Result<i64, ScanError> {
+        let existing = sqlx::query_scalar::<_, i64>(
+            r#"
+            select id from media_items
+            where library_id = $1 and item_type = 'folder' and parent_id is null
+              and is_deleted = false and title = $2
+            order by id limit 1
+            "#,
+        )
+        .bind(library_id)
+        .bind(title)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(ScanError::Database)?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            insert into media_items (library_id, item_type, title, sort_title, is_virtual, metadata_status, scan_status)
+            values ($1, 'folder', $2, $2, true, 'pending', 'scanned')
+            returning id
+            "#,
+        )
+        .bind(library_id)
+        .bind(title)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(ScanError::Database)
     }
 
     async fn find_or_create_artist(
@@ -1824,8 +1931,25 @@ fn is_supported_media_file(path: &Path, library_type: LibraryType) -> bool {
     match MediaCategory::from_path(path) {
         Some(MediaCategory::Video | MediaCategory::Audio) => true,
         Some(MediaCategory::Photo) => library_type == LibraryType::HomeVideos,
+        Some(MediaCategory::Book) => library_type == LibraryType::Books,
         None => false,
     }
+}
+
+/// 有声书所在书目录名：文件父目录（须位于库根之下、且不是库根本身）。
+fn audiobook_folder_title(path: &Path, library_root: Option<&Path>) -> Option<String> {
+    let parent = path.parent()?;
+    if let Some(root) = library_root {
+        if parent == root || !parent.starts_with(root) {
+            return None;
+        }
+    }
+    parent
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
 }
 
 fn title_from_path(path: &Path) -> String {
@@ -2246,6 +2370,33 @@ mod tests {
         assert_eq!(event.payload["missingMarkSkipped"], false);
         assert_eq!(event.payload["hasMore"], true);
         assert_eq!(event.payload["continuationJobId"], "job-2");
+    }
+
+    #[test]
+    fn audiobook_folder_is_parent_dir_below_root() {
+        let root = Path::new("/b");
+        assert_eq!(audiobook_folder_title(Path::new("/b/Hobbit/01.m4b"), Some(root)).as_deref(), Some("Hobbit"));
+        assert_eq!(audiobook_folder_title(Path::new("/b/01.m4b"), Some(root)), None);
+        assert_eq!(audiobook_folder_title(Path::new("/x/Y/01.m4b"), Some(root)), None);
+        assert!(is_supported_media_file(Path::new("/b/a.epub"), LibraryType::Books));
+        assert!(!is_supported_media_file(Path::new("/m/a.epub"), LibraryType::Movies));
+    }
+
+    #[test]
+    fn scan_hooks_enqueue_webhook_notifications() {
+        let source = include_str!("service.rs");
+        let impl_src = source
+            .split("mod tests {")
+            .next()
+            .expect("scan service impl before tests");
+        assert!(
+            impl_src.contains("enqueue_event_notification"),
+            "scan lifecycle hooks should enqueue webhook notifications"
+        );
+        assert!(
+            impl_src.contains("failed to enqueue scan webhook notification"),
+            "scan webhook enqueue failures must be non-fatal"
+        );
     }
 
     #[test]

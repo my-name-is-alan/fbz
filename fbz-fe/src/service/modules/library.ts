@@ -12,7 +12,8 @@ import type { MediaItem } from "@/types/media.ts";
 
 /**
  * 后端 `BaseItemDto` 的关键子集（仅取列表网格需要的字段）。
- * `CommunityRating` 当前 DTO 未下发，作可选保留：后端补齐后无需改动消费方。
+ * `CommunityRating` / `Genres` 由 Items 列表回填；缺省时省略。
+ * 题材筛选项仍优先走 {@link fetchLibraryFilters}。
  */
 interface BaseItemDto {
   Id: string;
@@ -22,6 +23,8 @@ interface BaseItemDto {
   ProductionYear?: number | null;
   CommunityRating?: number | null;
   RunTimeTicks?: number | null;
+  /** 题材列表；取首个供客户端筛选展示。 */
+  Genres?: string[] | null;
   /** 图片标签表，含 Primary 时表示该条目有主海报。 */
   ImageTags?: Record<string, string> | null;
   UserData?: {
@@ -38,6 +41,14 @@ interface ItemsResultDto {
   StartIndex: number;
 }
 
+/** `GET /Items/Filters` 响应（PascalCase）。 */
+interface ItemsFiltersDto {
+  Genres?: string[];
+  Tags?: string[];
+  OfficialRatings?: string[];
+  Years?: number[];
+}
+
 /** 单库条目查询入参。 */
 export interface LibraryItemsQuery {
   /** 当前登录用户 public_id（来自 auth store）。 */
@@ -51,8 +62,26 @@ export interface LibraryItemsQuery {
   sortOrder?: "Ascending" | "Descending";
   /** 限定条目类型，如 "Movie,Series"；缺省时由 parentId 圈定整库。 */
   includeItemTypes?: string;
-  /** 题材名（逗号分隔），交后端按题材过滤。 */
+  /** 题材名（`|` 或单值），交后端按题材过滤。 */
   genres?: string;
+  /** 发行年份（逗号分隔），透传 Emby `Years`。 */
+  years?: string;
+  /** 包含标签（`|` 分隔），透传 Emby `Tags`。 */
+  tags?: string;
+  /**
+   * 排除标签（`|` 分隔），透传 Emby `ExcludeTags`。
+   * 后端已支持；无标签数据时 UI 仍保留参数位便于扩展。
+   */
+  excludeTags?: string;
+  /**
+   * Emby `Filters` 复合串，如 `IsPlayed` / `IsUnplayed` / `IsFavorite`。
+   * 与 {@link isPlayed}/{@link isFavorite} 布尔参可并存；布尔参更精确时优先用它们。
+   */
+  filters?: string;
+  /** 按已看/未看过滤（映射 `IsPlayed`）。 */
+  isPlayed?: boolean;
+  /** 按收藏过滤（映射 `IsFavorite`）。 */
+  isFavorite?: boolean;
 }
 
 /** 映射后的单库条目结果。 */
@@ -62,36 +91,62 @@ export interface LibraryItemsResult {
   startIndex: number;
 }
 
-/** 后端 Type → 详情路由类型（剧集系/集归 tv，其余归 movie）。 */
-function detailTypeFor(type: string): "movie" | "tv" {
-  return type === "Series" || type === "Episode" || type === "Season" ? "tv" : "movie";
+/** 库内可用筛选项（题材等）。 */
+export interface LibraryFiltersResult {
+  genres: string[];
+  years: number[];
+  tags: string[];
+  officialRatings: string[];
 }
 
-/** 单条 `BaseItemDto` → 前端 `MediaItem`（拼绝对海报地址）。 */
-function toMediaItem(dto: BaseItemDto, libraryId: string): MediaItem {
+/** 后端 Type → 详情路由类型（剧集系/集归 tv，BoxSet 归 collection，其余归 movie）。 */
+function detailTypeFor(type: string): "movie" | "tv" | "collection" {
+  if (type === "Series" || type === "Episode" || type === "Season") return "tv";
+  if (type === "BoxSet" || type === "Collection") return "collection";
+  return "movie";
+}
+
+/** 单条 `BaseItemDto` → 前端 `MediaItem`（拼绝对海报地址；无 Primary 标签不盲拼）。 */
+export function toMediaItem(dto: BaseItemDto, libraryId: string): MediaItem {
   const detailType = detailTypeFor(dto.Type);
   const year = dto.ProductionYear ?? undefined;
   const hasPrimary = Boolean(dto.ImageTags?.Primary);
+  const genres = (dto.Genres ?? []).filter((g) => Boolean(g?.trim()));
+  const played = dto.UserData?.Played ?? false;
+  const position = dto.UserData?.PlaybackPositionTicks ?? 0;
+  const runtime = dto.RunTimeTicks ?? 0;
+  const progress =
+    !played && position > 0 && runtime > 0
+      ? Math.min(100, Math.max(0, (position / runtime) * 100))
+      : undefined;
+  const typeLabel = detailType === "tv" ? "剧集" : detailType === "collection" ? "合集" : "电影";
   return {
     id: dto.Id,
-    libraryId,
+    libraryId: detailType === "collection" ? "collection" : libraryId,
     title: dto.Name,
-    meta: `${year ?? "—"} · ${detailType === "tv" ? "剧集" : "电影"}`,
+    meta: `${year ?? "—"} · ${typeLabel}`,
     detailType,
     poster: hasPrimary ? mediaImageUrl(`/Items/${dto.Id}/Images/Primary`) : undefined,
     year,
+    genre: genres[0],
     rating: dto.CommunityRating ?? undefined,
     isFavorite: dto.UserData?.IsFavorite ?? false,
+    isPlayed: played,
+    progress,
   };
 }
 
-/** 单库默认抓取上限：对齐后端 `MAX_ITEMS_LIMIT`，一次性取满供前端分组/排序。 */
-const DEFAULT_LIBRARY_ITEMS_LIMIT = 200;
+/**
+ * 库内条目分页默认页大小。
+ * 不再一次取满后端 `MAX_ITEMS_LIMIT`(200) 假全量；页面用 StartIndex/Limit 翻页。
+ */
+export const LIBRARY_PAGE_SIZE = 36;
 
 /**
  * 拉取某库内条目并映射为 `MediaItem[]`。
- * 默认递归整库、按 SortName 升序、取满 200 条（后端硬上限），让页面沿用现有的
- * 客户端排序/分组逻辑而无需感知后端形状。
+ * 默认递归、按 SortName 升序、一页 {@link LIBRARY_PAGE_SIZE} 条；
+ * 排序 / 题材 / 标签排阻 / 已看 / 收藏尽量透传服务端，避免前端假筛。
+ * 显式 `EnableImages`，否则后端不下发 ImageTags，海报会全空。
  */
 export async function fetchLibraryItems(query: LibraryItemsQuery): Promise<LibraryItemsResult> {
   const { data } = await embyRequest.get<ItemsResultDto>(
@@ -101,11 +156,20 @@ export async function fetchLibraryItems(query: LibraryItemsQuery): Promise<Libra
         parentId: query.libraryId,
         recursive: true,
         startIndex: query.startIndex ?? 0,
-        limit: query.limit ?? DEFAULT_LIBRARY_ITEMS_LIMIT,
+        limit: query.limit ?? LIBRARY_PAGE_SIZE,
         sortBy: query.sortBy ?? "SortName",
         sortOrder: query.sortOrder ?? "Ascending",
         includeItemTypes: query.includeItemTypes,
-        genres: query.genres,
+        genres: query.genres || undefined,
+        years: query.years || undefined,
+        tags: query.tags || undefined,
+        excludeTags: query.excludeTags || undefined,
+        filters: query.filters || undefined,
+        isPlayed: query.isPlayed,
+        isFavorite: query.isFavorite,
+        fields: "UserData,RunTimeTicks,PrimaryImageAspectRatio,Genres,CommunityRating",
+        enableImages: true,
+        enableImageTypes: "Primary",
       },
     },
   );
@@ -114,5 +178,48 @@ export async function fetchLibraryItems(query: LibraryItemsQuery): Promise<Libra
     items: data.Items.map((dto) => toMediaItem(dto, query.libraryId)),
     total: data.TotalRecordCount,
     startIndex: data.StartIndex,
+  };
+}
+
+/**
+ * 为库总览取一张真实封面：抓最新 1 条带 Primary ImageTags 的条目海报。
+ * 无图标签时返回 undefined，交视图层继续用占位块。
+ */
+export async function fetchLibraryCover(
+  userId: string,
+  libraryId: string,
+): Promise<string | undefined> {
+  const result = await fetchLibraryItems({
+    userId,
+    libraryId,
+    startIndex: 0,
+    limit: 1,
+    sortBy: "DateCreated",
+    sortOrder: "Descending",
+    includeItemTypes: "Movie,Series,MusicAlbum",
+  });
+  return result.items[0]?.poster;
+}
+
+/**
+ * 拉取库内可用筛选项（题材 / 年份等），对接 `GET /Items/Filters`。
+ * 比从列表条目聚合更完整（筛选项覆盖整库，不限当前页）。
+ */
+export async function fetchLibraryFilters(
+  userId: string,
+  libraryId?: string,
+): Promise<LibraryFiltersResult> {
+  const { data } = await embyRequest.get<ItemsFiltersDto>("/Items/Filters", {
+    params: {
+      userId,
+      parentId: libraryId || undefined,
+      includeItemTypes: "Movie,Series",
+    },
+  });
+  return {
+    genres: data.Genres ?? [],
+    years: data.Years ?? [],
+    tags: data.Tags ?? [],
+    officialRatings: data.OfficialRatings ?? [],
   };
 }

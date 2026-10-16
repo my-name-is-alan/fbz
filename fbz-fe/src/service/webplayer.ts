@@ -29,6 +29,12 @@ export interface SubtitleController {
   select(index: number): Promise<unknown>;
   destroy(): Promise<void>;
 }
+export type AttachSrtFn = (
+  video: HTMLVideoElement,
+  srt: string,
+  options?: { label?: string; language?: string; asDefault?: boolean },
+) => HTMLTrackElement;
+
 export async function loadWebPlayer() {
   const root = `${import.meta.env.BASE_URL}webplayer/`;
   const [engine, subtitles] = await Promise.all([
@@ -41,6 +47,7 @@ export async function loadWebPlayer() {
       player: WebPlayer,
       options: { vendor: string },
     ) => SubtitleController,
+    attachSrt: subtitles.attachSrt as AttachSrtFn,
     vendor: `${root}vendor/`,
   };
 }

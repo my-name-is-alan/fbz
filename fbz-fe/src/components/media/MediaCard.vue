@@ -47,8 +47,8 @@ function goDetail() {
 }
 
 async function goPlayback() {
-  // 剧集卡片：播放目标是具体分集，进详情页由「继续观看」逻辑接管。
-  if (detailType.value === "tv") {
+  // 剧集 / 合集卡片：进详情页（合集无直接起播）。
+  if (detailType.value === "tv" || detailType.value === "collection") {
     goDetail();
     return;
   }
@@ -56,6 +56,7 @@ async function goPlayback() {
   // 电影卡片：先取真实流地址再开播放器，避免空播放器。
   const { fetchPlaybackSource } = await import("@/service/modules/detail.ts");
   const source = await fetchPlaybackSource(String(props.item.id));
+  const resume = !props.item.isPlayed && props.item.progress != null && props.item.progress > 0;
   playback.open({
     type: detailType.value,
     id: String(props.item.id),
@@ -63,8 +64,13 @@ async function goPlayback() {
     subtitle: subtitle.value,
     poster: props.item.poster,
     tags: resolution.value ? [resolution.value] : undefined,
+    duration: source?.duration,
+    // 有进度则交给 server.startTicks 续播；否则显式从头。
+    startPositionSeconds: resume ? undefined : 0,
     source: source ?? undefined,
     server: source?.server,
+    mediaSources: source?.mediaSources,
+    chapters: source?.chapters,
   });
 }
 
@@ -96,7 +102,7 @@ function onContextMenu(e: MouseEvent) {
       <button
         class="play-overlay"
         type="button"
-        :aria-label="`播放 ${props.item.title}`"
+        :aria-label="`${!props.item.isPlayed && props.item.progress ? '继续播放' : '播放'} ${props.item.title}`"
         @click.stop="goPlayback"
       >
         <svg class="play-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
@@ -108,6 +114,7 @@ function onContextMenu(e: MouseEvent) {
       <span v-if="props.showResolution && resolution" class="res-badge">
         {{ resolution }}
       </span>
+      <span v-if="props.item.isPlayed" class="played-badge" title="已看完">✓</span>
       <div v-if="props.item.progress != null" class="progress">
         <span :style="{ width: `${props.item.progress}%` }" />
       </div>
@@ -225,6 +232,23 @@ function onContextMenu(e: MouseEvent) {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0;
+}
+
+.played-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 800;
+  color: #04110a;
+  background: color-mix(in srgb, var(--fbz-color-brand-500, #5eead4) 88%, white);
+  box-shadow: 0 4px 12px #0006;
 }
 
 .progress {

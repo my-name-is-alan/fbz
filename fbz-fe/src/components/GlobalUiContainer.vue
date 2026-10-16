@@ -7,6 +7,7 @@
   <FilePickerModal />
   <LibrarySettingsModal />
   <MetadataManagerModal />
+  <IdentifyModal />
   <ContextMenu />
   <LibraryContextMenu />
   <GlobalToast />

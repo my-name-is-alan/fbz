@@ -1,4 +1,12 @@
-# AetherNAS 家庭影音库原型
+# demo/ — 非产品
+
+早期静态 Web 原型（AetherNAS 设计稿迁移）。**不是** FBZ 产品运行时，不参与 `fbz-api` / `fbz-fe` 构建或部署。
+
+可直接打开 `index.html` 查看历史界面探索；产品架构以仓库根 README 中的 `fbz-api/`、`fbz-fe/`、`docs/` 为准。
+
+---
+
+# AetherNAS 家庭影音库原型（归档）
 
 这是从设计稿迁移过来的静态 Web 原型，可直接打开 `index.html` 查看。
 

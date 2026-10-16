@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useUiStore } from "@/stores/ui.ts";
 import { useLibraryStore } from "@/stores/library.ts";
+import { useAuthStore } from "@/stores/auth.ts";
 import {
   deleteLibrary,
   queueLibraryMetadataRefresh,
@@ -9,7 +10,9 @@ import {
 
 const uiStore = useUiStore();
 const libraryStore = useLibraryStore();
+const authStore = useAuthStore();
 const { libraryContextMenu } = storeToRefs(uiStore);
+const { isAdmin } = storeToRefs(authStore);
 
 const menuRef = ref<HTMLElement>();
 const showDeleteConfirm = ref(false);
@@ -25,6 +28,11 @@ watch(
     if (!open) {
       showDeleteConfirm.value = false;
       busyAction.value = null;
+      return;
+    }
+    // 管理项仅 admin 可见；非管理员误开时直接关掉。
+    if (!isAdmin.value) {
+      uiStore.closeLibraryContextMenu();
     }
   },
 );
@@ -91,7 +99,7 @@ useEventListener(window, "keydown", (e) => {
 
 <template>
   <div
-    v-if="libraryContextMenu.open"
+    v-if="libraryContextMenu.open && isAdmin"
     ref="menuRef"
     class="context-menu"
     role="menu"

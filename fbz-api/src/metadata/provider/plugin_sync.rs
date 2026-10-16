@@ -381,6 +381,7 @@ mod tests {
             image_language: None,
             image_prefer_original: false,
             image_fallback_languages: Vec::new(),
+            primary_path: None,
         };
 
         let payload = lookup_payload(&lookup, None);

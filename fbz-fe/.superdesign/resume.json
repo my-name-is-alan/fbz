@@ -1,0 +1,48 @@
+{
+  "projectId": "8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc",
+  "projectTitle": "FBZ C-end Redesign (HDHive)",
+  "projectUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc",
+  "canvasUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc?live=1",
+  "updatedAt": "2026-10-16T02:30:00Z",
+  "designSystem": ".superdesign/design-system.md",
+  "styleRefs": {
+    "hdhiveTokens": "docs/hdhive-tokens.css",
+    "brief": "docs/FBZ-C端重设计-HDHive对齐.md"
+  },
+  "model": "gemini-3.1-pro",
+  "targets": {
+    "home": {
+      "draftId": "1491d4f1-787e-431f-b9d2-4dd29beaa775",
+      "title": "FBZ Media Client - Home",
+      "previewUrl": "https://p.superdesign.dev/draft/1491d4f1-787e-431f-b9d2-4dd29beaa775",
+      "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc?node=draft-variant-1491d4f1-787e-431f-b9d2-4dd29beaa775",
+      "role": "primary Home redesign (HDHive)"
+    },
+    "library": {
+      "draftId": "24e35234-24eb-4b82-a895-5c60f05049c1",
+      "title": "Library Grid — HDHive",
+      "previewUrl": "https://p.superdesign.dev/draft/24e35234-24eb-4b82-a895-5c60f05049c1",
+      "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc?node=draft-variant-24e35234-24eb-4b82-a895-5c60f05049c1"
+    },
+    "movie-detail": {
+      "draftId": "fe3573d2-4281-449d-8bf5-6919bc38adc1",
+      "title": "Movie Detail — HDHive",
+      "previewUrl": "https://p.superdesign.dev/draft/fe3573d2-4281-449d-8bf5-6919bc38adc1",
+      "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc?node=draft-variant-fe3573d2-4281-449d-8bf5-6919bc38adc1"
+    },
+    "player": {
+      "draftId": "5b9a8ede-0208-4f97-b84a-767e2aa7d483",
+      "title": "Player Overlay — HDHive",
+      "previewUrl": "https://p.superdesign.dev/draft/5b9a8ede-0208-4f97-b84a-767e2aa7d483",
+      "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc?node=draft-variant-5b9a8ede-0208-4f97-b84a-767e2aa7d483"
+    },
+    "playlists": {
+      "draftId": "6bffef99-f1ba-43ba-8e4f-ea0306eae824",
+      "title": "Playlists — HDHive",
+      "previewUrl": "https://p.superdesign.dev/draft/6bffef99-f1ba-43ba-8e4f-ea0306eae824",
+      "nodeUrl": "https://superdesign.dev/teams/62d6898e-5c68-4a83-a81f-e51eb60fbb7a/projects/8d6d84eb-a0b9-451a-9a55-c2d28bb14cdc?node=draft-variant-6bffef99-f1ba-43ba-8e4f-ea0306eae824"
+    }
+  },
+  "activeDraftId": "1491d4f1-787e-431f-b9d2-4dd29beaa775",
+  "note": "Admin prior work preserved in resume-admin-backup.json and design-system-admin-backup.md. No Vue implementation until user approves."
+}

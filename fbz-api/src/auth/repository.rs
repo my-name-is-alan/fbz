@@ -85,6 +85,8 @@ pub struct SessionInfoRecord {
     pub device_name: Option<String>,
     pub application_version: Option<String>,
     pub is_active: bool,
+    pub last_activity_date: Option<String>,
+    pub remote_end_point: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -531,7 +533,9 @@ impl AuthRepository {
                 d.device_id,
                 d.device_name,
                 d.client_version as application_version,
-                true as is_active
+                true as is_active,
+                coalesce(s.last_seen_at, s.created_at)::text as last_activity_date,
+                host(s.remote_addr) as remote_end_point
             from sessions s
             join users u on u.id = s.user_id
             left join devices d on d.id = s.device_id
@@ -572,7 +576,9 @@ impl AuthRepository {
                 d.device_id,
                 d.device_name,
                 d.client_version as application_version,
-                true as is_active
+                true as is_active,
+                coalesce(s.last_seen_at, s.created_at)::text as last_activity_date,
+                host(s.remote_addr) as remote_end_point
             from sessions s
             join users u on u.id = s.user_id
             left join devices d on d.id = s.device_id
@@ -641,7 +647,9 @@ impl AuthRepository {
                 d.device_id,
                 d.device_name,
                 d.client_version as application_version,
-                true as is_active
+                true as is_active,
+                coalesce(s.last_seen_at, s.created_at)::text as last_activity_date,
+                host(s.remote_addr) as remote_end_point
             from sessions s
             join users u on u.id = s.user_id
             left join devices d on d.id = s.device_id
@@ -683,7 +691,9 @@ impl AuthRepository {
                 d.device_id,
                 d.device_name,
                 d.client_version as application_version,
-                true as is_active
+                true as is_active,
+                coalesce(s.last_seen_at, s.created_at)::text as last_activity_date,
+                host(s.remote_addr) as remote_end_point
             from sessions s
             join users u on u.id = s.user_id
             left join devices d on d.id = s.device_id
@@ -1094,6 +1104,8 @@ impl SessionInfoRecord {
             device_name: row.try_get("device_name")?,
             application_version: row.try_get("application_version")?,
             is_active: row.try_get("is_active")?,
+            last_activity_date: row.try_get("last_activity_date")?,
+            remote_end_point: row.try_get("remote_end_point")?,
         })
     }
 }

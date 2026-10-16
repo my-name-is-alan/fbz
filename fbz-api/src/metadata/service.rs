@@ -84,6 +84,7 @@ const METADATA_CLAIM_JOB_SQL: &str = r#"
 const METADATA_LOAD_TARGET_SQL: &str = r#"
             select mi.id,
                    mi.public_id::text as public_id,
+                   l.public_id::text as library_id,
                    mi.item_type,
                    mi.title,
                    mi.original_title,
@@ -100,7 +101,11 @@ const METADATA_LOAD_TARGET_SQL: &str = r#"
                    (select external_id from media_external_ids
                       where media_item_id = mi.id and provider = 'imdb') as imdb_id,
                    (select external_id from media_external_ids
-                      where media_item_id = mi.id and provider = 'tvdb') as tvdb_id
+                      where media_item_id = mi.id and provider = 'tvdb') as tvdb_id,
+                   (select mf.path from media_files mf
+                      where mf.media_item_id = mi.id
+                      order by mf.is_primary desc, mf.id
+                      limit 1) as primary_path
             from media_items mi
             join libraries l
               on l.id = mi.library_id
@@ -121,7 +126,7 @@ pub struct MetadataService {
     /// 查询响应缓存（TTL）：相同逻辑条目重复刷新时跳过联网。
     cache: Arc<crate::metadata::cache::MetadataCache>,
     /// 插件同步调用器：按 job 发现订阅 `metadata.provider.query` 的插件并
-    /// 作为兜底/补空 provider 附加进 registry。`None` = 不启用插件刮削。
+    /// **优先**经 SyncInvoker 参与 Match（内置客户端 fallback）。`None` = 不启用插件刮削。
     plugin_invoker: Option<crate::plugins::invoke::PluginSyncInvoker>,
 }
 
@@ -174,6 +179,7 @@ struct ClaimedMetadataJob {
 struct MetadataTarget {
     id: i64,
     public_id: String,
+    library_id: String,
     item_type: String,
     title: String,
     original_title: Option<String>,
@@ -190,6 +196,8 @@ struct MetadataTarget {
     tmdb_id: Option<String>,
     imdb_id: Option<String>,
     tvdb_id: Option<String>,
+    /// 主媒体文件路径（NFO Match）；可能为本地绝对路径或 `fbz-storage://…`。
+    primary_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,8 +277,10 @@ impl MetadataService {
     /// this reads the DB-backed settings, folds them over the env baseline, and
     /// reuses the cached registry when the effective config is unchanged
     /// (preserving per-provider caches).
-    async fn registry(
+    /// 按库附加插件 SyncInvoker + 库级源链（插件优先、内置 fallback；NFO pending）。
+    async fn registry_for_library(
         &self,
+        library_public_id: &str,
     ) -> Result<(MetadataProviderRegistry, Option<MetadataGlobalSettings>), MetadataError> {
         let (registry, global) = self.base_registry().await?;
         // 插件 provider 按当前订阅动态附加：不参与 registry 缓存键，
@@ -280,6 +290,36 @@ impl MetadataService {
                 crate::metadata::provider::plugin_sync::discover_plugin_providers(invoker).await,
             ),
             None => registry,
+        };
+
+        let registry = if library_public_id.trim().is_empty() {
+            registry
+        } else {
+            match crate::library::metadata_sources::load_chain_plan_for_match(
+                &self.pool,
+                library_public_id,
+            )
+            .await
+            {
+                Ok(Some(plan)) => {
+                    let steps =
+                        crate::library::metadata_sources::match_steps_from_chain(&plan);
+                    if steps.is_empty() {
+                        registry
+                    } else {
+                        registry.with_match_chain(steps)
+                    }
+                }
+                Ok(None) => registry,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        library_id = %library_public_id,
+                        "failed to load library metadata source chain; using default order"
+                    );
+                    registry
+                }
+            }
         };
         Ok((registry, global))
     }
@@ -453,7 +493,22 @@ impl MetadataService {
 
     async fn refresh_item(&self, item_id: &str) -> Result<MetadataRefreshSummary, MetadataError> {
         let target = self.load_target(item_id).await?;
-        let (registry, global) = self.registry().await?;
+        // JF LockData：锁定条目刷新不联网、不改任何元数据（库层触发器另有兜底）。
+        if self.item_locks(target.id).await?.0 {
+            return Ok(MetadataRefreshSummary {
+                job_id: String::new(),
+                item_id: target.public_id,
+                status: "locked".to_owned(),
+                matched: false,
+                provider: None,
+                external_id: None,
+                provider_attempts: vec![MetadataProviderAttempt::skipped("lock", "item metadata is locked (LockData)")],
+            });
+        }
+        if target.item_type == "book" {
+            return self.refresh_book(target).await;
+        }
+        let (registry, global) = self.registry_for_library(&target.library_id).await?;
         let lookup = build_lookup(&target, global.as_ref());
 
         // 响应缓存：相同逻辑条目（标题/年份/季集/语言）在 TTL 内复用上次结果，跳过联网。
@@ -482,6 +537,10 @@ impl MetadataService {
                 let provider = found.provider.clone();
                 let external_id = found.external_id.clone();
                 self.apply_match(target.id, &found).await?;
+                // JF「刷新后保存 NFO」：库开启 SaveLocalMetadata（或全局 NFO_SAVER_ENABLED）时写回。
+                if let Err(err) = crate::metadata::nfo_write::save_item_nfo(&self.pool, &target.public_id).await {
+                    tracing::warn!(item_id = %target.public_id, error = %err, "nfo save after refresh failed");
+                }
                 Ok(MetadataRefreshSummary {
                     job_id: String::new(),
                     item_id: target.public_id,
@@ -494,6 +553,10 @@ impl MetadataService {
             }
             None => {
                 self.mark_item_failed(target.id).await?;
+                // JF 语义：刷新结束即运行保存器（未匹配也把当前库内元数据落盘为 NFO）。
+                if let Err(err) = crate::metadata::nfo_write::save_item_nfo(&self.pool, &target.public_id).await {
+                    tracing::warn!(item_id = %target.public_id, error = %err, "nfo save after refresh failed");
+                }
                 Ok(MetadataRefreshSummary {
                     job_id: String::new(),
                     item_id: target.public_id,
@@ -505,6 +568,172 @@ impl MetadataService {
                 })
             }
         }
+    }
+
+    /// 书籍刷新（JF「刷新元数据」）：先重读本地文件（OPF/ComicInfo/封面，覆盖），
+    /// 再问订阅 `metadata.provider.query` 的书籍插件（lookup.itemType="book"）补空：
+    /// 简介/年份/作者/ISBN 等外部 id/封面（仅当无本地封面）。只接受带书籍外部 id
+    /// （isbn/openlibrary/googlebooks）的贡献，避免影视 provider 的误命中。
+    async fn refresh_book(&self, target: MetadataTarget) -> Result<MetadataRefreshSummary, MetadataError> {
+        let mut attempts = Vec::new();
+        let mut matched_provider: Option<(String, String)> = None;
+        let local_path = target
+            .primary_path
+            .clone()
+            .filter(|p| !p.starts_with("fbz-storage://") && std::path::Path::new(p.trim()).is_file());
+        let mut local = crate::media::book_meta::BookMeta::default();
+        if let Some(path) = local_path {
+            local = tokio::task::spawn_blocking(move || crate::media::book_meta::extract(std::path::Path::new(path.trim())))
+                .await
+                .unwrap_or_default();
+            let has_local_cover = local.cover.is_some();
+            let applied = crate::media::book_meta::apply_to_db(&self.pool, target.id, local.clone(), "embedded", true)
+                .await
+                .map_err(MetadataError::Database)?;
+            if applied {
+                attempts.push(MetadataProviderAttempt::matched("local", "file"));
+                matched_provider = Some(("local".to_owned(), "file".to_owned()));
+            } else {
+                attempts.push(MetadataProviderAttempt::not_matched("local", "no embedded metadata"));
+            }
+            local.cover = has_local_cover.then(Vec::new);
+        } else {
+            attempts.push(MetadataProviderAttempt::skipped("local", "book file is not locally readable"));
+        }
+
+        if let Some(invoker) = self.plugin_invoker.as_ref() {
+            let authors: Vec<String> = sqlx::query_scalar(
+                "select p.name from media_item_people mip join people p on p.id = mip.person_id where mip.media_item_id = $1 and mip.role_type = 'writer' order by mip.sort_order, p.name limit 5",
+            )
+            .bind(target.id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(MetadataError::Database)?;
+            let isbn: Option<String> = sqlx::query_scalar("select external_id from media_external_ids where media_item_id = $1 and provider = 'isbn'")
+                .bind(target.id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(MetadataError::Database)?;
+            let title: String = sqlx::query_scalar("select title from media_items where id = $1")
+                .bind(target.id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(MetadataError::Database)?;
+            let payload = book_lookup_payload(&title, &authors, isbn.as_deref(), target.production_year.or(local.year), target.language.as_deref().or(local.language.as_deref()));
+            let subscribers = invoker
+                .list_subscribers(crate::metadata::provider::plugin_sync::METADATA_PROVIDER_QUERY_EVENT)
+                .await
+                .unwrap_or_default();
+            for subscriber in &subscribers {
+                let outcome = invoker
+                    .invoke(subscriber, crate::metadata::provider::plugin_sync::METADATA_PROVIDER_QUERY_EVENT, &payload, crate::plugins::invoke::SyncAuditMode::FailuresOnly)
+                    .await;
+                let provider = format!("plugin:{}", outcome.plugin_id);
+                let value = match outcome.result {
+                    Ok(value) => value,
+                    Err(err) => {
+                        attempts.push(MetadataProviderAttempt::failed(provider, format!("{err:?}")));
+                        continue;
+                    }
+                };
+                let Some(contribution) = crate::metadata::provider::plugin_sync::parse_plugin_metadata_response(&value) else {
+                    attempts.push(MetadataProviderAttempt::not_matched(provider, "no contribution"));
+                    continue;
+                };
+                let Some(book_id) = contribution
+                    .external_ids
+                    .iter()
+                    .find(|id| BOOK_EXTERNAL_PROVIDERS.contains(&id.provider.as_str()))
+                    .cloned()
+                else {
+                    attempts.push(MetadataProviderAttempt::skipped(provider, "contribution carries no book external id"));
+                    continue;
+                };
+                self.apply_book_contribution(target.id, &contribution, local.cover.is_some()).await?;
+                attempts.push(MetadataProviderAttempt::matched(provider.clone(), book_id.external_id.clone()));
+                matched_provider = Some((provider, format!("{}:{}", book_id.provider, book_id.external_id)));
+                break;
+            }
+        }
+
+        let matched = matched_provider.is_some();
+        sqlx::query("update media_items set metadata_status = $2, updated_at = now() where id = $1")
+            .bind(target.id)
+            .bind(if matched { "matched" } else { "failed" })
+            .execute(&self.pool)
+            .await
+            .map_err(MetadataError::Database)?;
+        Ok(MetadataRefreshSummary {
+            job_id: String::new(),
+            item_id: target.public_id,
+            status: if matched { "matched" } else { "no_match" }.to_owned(),
+            matched,
+            provider: matched_provider.as_ref().map(|(p, _)| p.clone()),
+            external_id: matched_provider.map(|(_, id)| id),
+            provider_attempts: attempts,
+        })
+    }
+
+    /// 插件书籍贡献落库：只补空（本地文件优先），外部 id 全写，封面仅在无本地封面时下载。
+    async fn apply_book_contribution(
+        &self,
+        media_item_id: i64,
+        contribution: &crate::metadata::provider::plugin::PluginMetadataContribution,
+        has_local_cover: bool,
+    ) -> Result<(), MetadataError> {
+        let meta = crate::media::book_meta::BookMeta {
+            title: None,
+            authors: contribution
+                .people
+                .iter()
+                .filter(|p| p.role_type == "writer")
+                .map(|p| p.name.clone())
+                .collect(),
+            overview: contribution.overview.clone().and_then(|o| {
+                let text = crate::media::book_meta::strip_tags(&o).split_whitespace().collect::<Vec<_>>().join(" ");
+                (!text.is_empty()).then_some(text)
+            }),
+            year: contribution.production_year,
+            ..Default::default()
+        };
+        crate::media::book_meta::apply_to_db(&self.pool, media_item_id, meta, "plugin", false)
+            .await
+            .map_err(MetadataError::Database)?;
+        for id in contribution.external_ids.iter().take(8) {
+            sqlx::query("insert into media_external_ids (media_item_id, provider, external_id) values ($1, $2, $3) on conflict do nothing")
+                .bind(media_item_id)
+                .bind(&id.provider)
+                .bind(&id.external_id)
+                .execute(&self.pool)
+                .await
+                .map_err(MetadataError::Database)?;
+        }
+        if has_local_cover {
+            return Ok(());
+        }
+        let Some(url) = contribution.artwork.first().map(|a| a.remote_url.clone()) else {
+            return Ok(());
+        };
+        match download_artwork_bytes(&url).await {
+            Ok(bytes) => {
+                let cover = crate::media::book_meta::BookMeta { cover: Some(bytes), ..Default::default() };
+                crate::media::book_meta::apply_to_db(&self.pool, media_item_id, cover, "plugin", false)
+                    .await
+                    .map_err(MetadataError::Database)?;
+            }
+            Err(err) => warn!(media_item_id, error = %err, "book cover download failed"),
+        }
+        Ok(())
+    }
+
+    /// (lock_data, locked_fields)
+    async fn item_locks(&self, media_item_id: i64) -> Result<(bool, Vec<String>), MetadataError> {
+        sqlx::query_as::<_, (bool, Vec<String>)>("select lock_data, locked_fields from media_items where id = $1")
+            .bind(media_item_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(MetadataError::Database)
+            .map(Option::unwrap_or_default)
     }
 
     async fn load_target(&self, item_id: &str) -> Result<MetadataTarget, MetadataError> {
@@ -529,6 +758,8 @@ impl MetadataService {
         let title_pinyin = crate::text::pinyin::pinyin_keys(found.title.trim());
         let cached_artwork = self.cache_match_artwork(media_item_id, found).await;
 
+        let (_, locked_fields) = self.item_locks(media_item_id).await?;
+        let child_locked = |field: &str| locked_fields.iter().any(|f| f.eq_ignore_ascii_case(field));
         let mut tx = self.pool.begin().await.map_err(MetadataError::Database)?;
         sqlx::query(
             r#"
@@ -631,19 +862,19 @@ impl MetadataService {
             }
         }
 
-        if !found.genres.is_empty() {
+        if !found.genres.is_empty() && !child_locked("Genres") {
             replace_item_genres(&mut tx, media_item_id, &found.genres)
                 .await
                 .map_err(MetadataError::Database)?;
         }
 
-        if !found.studios.is_empty() {
+        if !found.studios.is_empty() && !child_locked("Studios") {
             replace_item_studios(&mut tx, media_item_id, &found.studios)
                 .await
                 .map_err(MetadataError::Database)?;
         }
 
-        if !found.people.is_empty() {
+        if !found.people.is_empty() && !child_locked("Cast") {
             replace_item_people(&mut tx, media_item_id, &found.people)
                 .await
                 .map_err(MetadataError::Database)?;
@@ -1017,6 +1248,25 @@ impl MetadataService {
     }
 }
 
+/// 书籍插件贡献须带其中之一的外部 id（防影视 provider 误命中）。
+const BOOK_EXTERNAL_PROVIDERS: [&str; 3] = ["isbn", "openlibrary", "googlebooks"];
+
+/// 书籍查询载荷：沿用 `metadata.provider.query` 的 `{lookup, current}` 形态，
+/// `lookup.itemType = "book"`，附 `authors` / `isbn`。
+fn book_lookup_payload(title: &str, authors: &[String], isbn: Option<&str>, year: Option<i32>, language: Option<&str>) -> Value {
+    json!({
+        "lookup": {
+            "itemType": "book",
+            "title": title,
+            "authors": authors,
+            "isbn": isbn,
+            "productionYear": year,
+            "language": language,
+        },
+        "current": null,
+    })
+}
+
 /// Builds the provider lookup, layering library-level fields over the global
 /// defaults (§6 text language/region, §7 image-language policy). Library values
 /// win; absent ones fall back to the global row; absent there, the provider's
@@ -1065,6 +1315,7 @@ fn build_lookup(
         image_language,
         image_prefer_original,
         image_fallback_languages,
+        primary_path: target.primary_path.clone(),
     }
 }
 
@@ -1134,6 +1385,7 @@ impl MetadataTarget {
         Ok(Self {
             id: row.try_get("id")?,
             public_id: row.try_get("public_id")?,
+            library_id: row.try_get("library_id")?,
             item_type: row.try_get("item_type")?,
             title: row.try_get("title")?,
             original_title: row.try_get("original_title")?,
@@ -1148,6 +1400,7 @@ impl MetadataTarget {
             tmdb_id: row.try_get("tmdb_id")?,
             imdb_id: row.try_get("imdb_id")?,
             tvdb_id: row.try_get("tvdb_id")?,
+            primary_path: row.try_get("primary_path")?,
         })
     }
 }
@@ -1348,6 +1601,16 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn book_lookup_payload_shape() {
+        let v = book_lookup_payload("Hobbit", &["J. R. R. Tolkien".to_owned()], Some("9780261102217"), Some(1937), None);
+        assert_eq!(v["lookup"]["itemType"], "book");
+        assert_eq!(v["lookup"]["authors"][0], "J. R. R. Tolkien");
+        assert_eq!(v["lookup"]["isbn"], "9780261102217");
+        assert!(v["current"].is_null());
+        assert!(BOOK_EXTERNAL_PROVIDERS.contains(&"openlibrary"));
+    }
 
     #[test]
     fn metadata_error_messages_are_client_safe() {
@@ -1566,6 +1829,7 @@ mod tests {
         MetadataTarget {
             id: 1,
             public_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            library_id: "lib-test".to_owned(),
             item_type: "movie".to_owned(),
             title: "Movie".to_owned(),
             original_title: None,
@@ -1580,6 +1844,7 @@ mod tests {
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
+            primary_path: None,
         }
     }
 

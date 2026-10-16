@@ -1,0 +1,52 @@
+{
+  "id": "fbz.marker.detect",
+  "name": "Marker Detect",
+  "version": "0.2.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19106/fbz-plugin",
+  "description": "Official intro/outro/credits marker detector. Subscribes to media.marker.detect; maps Host probeSummary (chapters + head/tail silence/black windows from FFmpeg) into core media_markers candidates. No bare storage paths.",
+  "permissions": [
+    {
+      "key": "media.analyze",
+      "reason": "Receive media.marker.detect sync jobs and probe summaries for intro/credits heuristics."
+    },
+    {
+      "key": "media.read",
+      "reason": "Optional Host item reads when debugging detect results."
+    },
+    {
+      "key": "metadata.write",
+      "reason": "Optional Host PUT markers path for async follow-ups; sync path returns markers to core."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "media.marker.detect",
+      "handler": "markers.detect"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "min_confidence",
+      "label": "Minimum confidence",
+      "type": "number",
+      "required": false,
+      "helpText": "Drop candidates below this 0-1 threshold (default 0.5)."
+    },
+    {
+      "key": "detect_mode",
+      "label": "Detect mode",
+      "type": "string",
+      "required": false,
+      "helpText": "chapters | silence | all (default all)."
+    },
+    {
+      "key": "emit_plain_chapters",
+      "label": "Emit plain chapters",
+      "type": "boolean",
+      "required": false,
+      "helpText": "When true, also emit markerType=chapter for untitled/non-intro chapters (default false)."
+    }
+  ]
+}

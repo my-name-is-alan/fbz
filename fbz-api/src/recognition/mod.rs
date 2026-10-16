@@ -504,7 +504,7 @@ fn classify_kind(library_type: LibraryType, has_episode: bool) -> RecognizedKind
             }
         }
         LibraryType::HomeVideos => RecognizedKind::Video,
-        LibraryType::LiveTv => RecognizedKind::Unknown,
+        LibraryType::LiveTv | LibraryType::Books => RecognizedKind::Unknown,
     }
 }
 

@@ -419,6 +419,7 @@ fn server_info_source(state: &AppState) -> ServerInfoSource {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         local_address: state.config().server.public_base_url.clone(),
         operating_system: std::env::consts::OS.to_owned(),
+        supports_library_monitor: state.config().library_monitor.enabled,
     }
 }
 

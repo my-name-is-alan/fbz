@@ -47,6 +47,9 @@ struct ItemRefreshInput {
     reason: String,
 }
 
+/// 库级刷新单次最多入队条目数（与后台库刷新同量级）。
+const LIBRARY_REFRESH_LIMIT: i64 = 500;
+
 pub async fn refresh_item(
     State(state): State<AppState>,
     Path(item_id): Path<String>,
@@ -63,21 +66,33 @@ pub async fn refresh_item(
     let Some(database) = state.database() else {
         return Err(AppError::internal("database is not configured"));
     };
-    let Some(job) = AdminRepository::new(database.clone())
+    let repository = AdminRepository::new(database.clone());
+    let job = repository
         .queue_metadata_refresh_for_item(
             &input.item_id,
             QueueMetadataRefreshInput {
                 requested_by_user_id: user.id,
-                reason: Some(input.reason),
+                reason: Some(input.reason.clone()),
             },
         )
         .await
-        .map_err(|err| AppError::internal(format!("failed to queue metadata refresh: {err}")))?
-    else {
-        return Err(AppError::not_found("media item not found"));
-    };
-
-    let _ = job;
+        .map_err(|err| AppError::internal(format!("failed to queue metadata refresh: {err}")))?;
+    if job.is_none() {
+        // JF 客户端对媒体库（CollectionFolder）也调 `/Items/{libraryId}/Refresh`：
+        // 退回按库批量入队（待刮削/失败的条目，含书籍）。
+        let queued = repository
+            .queue_metadata_refresh_for_library(crate::admin::repository::QueueLibraryMetadataRefreshInput {
+                library_id: input.item_id.clone(),
+                requested_by_user_id: user.id,
+                reason: Some(input.reason),
+                limit: LIBRARY_REFRESH_LIMIT,
+            })
+            .await
+            .map_err(|err| AppError::internal(format!("failed to queue library metadata refresh: {err}")))?;
+        if queued.is_none() {
+            return Err(AppError::not_found("media item not found"));
+        }
+    }
     Ok((StatusCode::OK, "").into_response())
 }
 

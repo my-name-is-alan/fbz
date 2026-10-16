@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { searchHints } from "@/service/modules/search.ts";
+import { SEARCH_TYPE_OPTIONS, searchHints } from "@/service/modules/search.ts";
+import { useAuthStore } from "@/stores/auth.ts";
 import type { SearchKind, SearchResultItem } from "@/service/modules/search.ts";
 
 /**
@@ -10,11 +11,32 @@ import type { SearchKind, SearchResultItem } from "@/service/modules/search.ts";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 
 /** 关键词的唯一事实源是路由 query；输入框只是它的受控镜像。 */
 function queryFromRoute(): string {
   const q = route.query.q;
   return Array.isArray(q) ? (q[0] ?? "") : (q ?? "");
+}
+
+function typeFromRoute(): string {
+  const t = route.query.type;
+  const raw = Array.isArray(t) ? (t[0] ?? "") : (t ?? "");
+  const known = SEARCH_TYPE_OPTIONS.some((o) => o.value === raw);
+  return known ? raw : "";
+}
+
+function excludeFromRoute(): string {
+  const t = route.query.excludeTags;
+  return Array.isArray(t) ? (t[0] ?? "") : (t ?? "");
+}
+
+function normalizeExcludeTags(raw: string): string | undefined {
+  const parts = raw
+    .split(/[|,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length ? parts.join("|") : undefined;
 }
 
 const keyword = ref(queryFromRoute());
@@ -24,6 +46,22 @@ const failed = ref(false);
 /** 已发起过至少一次有效搜索（用于区分「未搜索引导态」与「无结果空态」）。 */
 const searched = ref(false);
 const inputEl = ref<HTMLInputElement | null>(null);
+
+/** 类型筛选（透传 includeItemTypes；空 = 默认全类型）。 */
+const typeFilter = ref(typeFromRoute());
+/** 排除标签原始输入（`|` 或逗号分隔）；透传 excludeTags。 */
+const excludeTagsInput = ref(excludeFromRoute());
+const typeOptions = SEARCH_TYPE_OPTIONS;
+
+function currentQuery(): Record<string, string> {
+  const q: Record<string, string> = {};
+  const term = keyword.value.trim();
+  if (term) q.q = term;
+  if (typeFilter.value) q.type = typeFilter.value;
+  const ex = normalizeExcludeTags(excludeTagsInput.value);
+  if (ex) q.excludeTags = ex;
+  return q;
+}
 
 /** 当前进行中的请求控制器，切换关键词时中止上一请求。 */
 let controller: AbortController | undefined;
@@ -60,7 +98,12 @@ async function runSearch(term: string) {
   loading.value = true;
   failed.value = false;
   try {
-    results.value = await searchHints(trimmed, { signal: controller.signal });
+    results.value = await searchHints(trimmed, {
+      userId: authStore.userId,
+      includeItemTypes: typeFilter.value || undefined,
+      excludeTags: normalizeExcludeTags(excludeTagsInput.value),
+      signal: controller.signal,
+    });
     searched.value = true;
   } catch (error) {
     // 请求被新的关键词取消：忽略，保留加载态交给后续请求收敛。
@@ -73,35 +116,54 @@ async function runSearch(term: string) {
   }
 }
 
-/** 输入防抖：仅更新 URL（?q=），真正的搜索由对 route.query 的 watch 驱动，保证可分享/前进后退。 */
-const pushQuery = debounce((value: string) => {
-  const next = value.trim();
-  if (next === queryFromRoute()) return;
-  void router.replace({ name: "search", query: next ? { q: next } : {} });
+/** 输入防抖：回写 URL（q/type/excludeTags），真正的搜索由 route.query watch 驱动。 */
+const pushQuery = debounce(() => {
+  const next = currentQuery();
+  const cur = {
+    q: queryFromRoute() || undefined,
+    type: typeFromRoute() || undefined,
+    excludeTags: excludeFromRoute() || undefined,
+  };
+  const same =
+    (next.q || undefined) === cur.q &&
+    (next.type || undefined) === cur.type &&
+    (next.excludeTags || undefined) === cur.excludeTags;
+  if (same) return;
+  void router.replace({ name: "search", query: next });
 }, 320);
 
 function onInput() {
-  pushQuery(keyword.value);
+  pushQuery();
 }
 
-/** 回车立即提交：取消防抖并同步 URL（若关键词未变则直接重搜一次）。 */
+function onFiltersChange() {
+  pushQuery.cancel();
+  void router.replace({ name: "search", query: currentQuery() });
+}
+
+/** 回车立即提交：取消防抖并同步 URL（若查询未变则直接重搜一次）。 */
 function onSubmit() {
   pushQuery.cancel();
-  const next = keyword.value.trim();
-  if (next === queryFromRoute()) {
-    void runSearch(next);
+  const next = currentQuery();
+  const same =
+    (next.q || "") === queryFromRoute() &&
+    (next.type || "") === typeFromRoute() &&
+    (next.excludeTags || "") === (normalizeExcludeTags(excludeFromRoute()) || "");
+  if (same) {
+    void runSearch(keyword.value);
     return;
   }
-  void router.replace({ name: "search", query: next ? { q: next } : {} });
+  void router.replace({ name: "search", query: next });
 }
 
-// 路由 query 是关键词的事实源：直接／通过输入回写后统一在此触发搜索。
+// 路由 query 是事实源：关键词 / 类型 / 排阻变化统一在此触发搜索。
 watch(
-  () => route.query.q,
+  () => [route.query.q, route.query.type, route.query.excludeTags],
   () => {
-    const q = queryFromRoute();
-    keyword.value = q;
-    void runSearch(q);
+    keyword.value = queryFromRoute();
+    typeFilter.value = typeFromRoute();
+    excludeTagsInput.value = excludeFromRoute();
+    void runSearch(keyword.value);
   },
   { immediate: true },
 );
@@ -129,6 +191,29 @@ onBeforeUnmount(() => {
         @input="onInput"
       />
     </form>
+
+    <div class="search-filters">
+      <BaseSelect
+        v-model="typeFilter"
+        :options="typeOptions"
+        aria-label="按类型筛选"
+        @update:model-value="onFiltersChange"
+      />
+      <label class="exclude-field">
+        <span class="exclude-label">排除标签</span>
+        <input
+          v-model="excludeTagsInput"
+          class="exclude-input"
+          type="text"
+          name="excludeTags"
+          placeholder="可选，| 分隔"
+          autocomplete="off"
+          aria-label="排除标签"
+          @change="onFiltersChange"
+          @keydown.enter.prevent="onFiltersChange"
+        />
+      </label>
+    </div>
 
     <p v-if="loading" class="hint">搜索中…</p>
     <p v-else-if="failed" class="hint">搜索失败，请检查网络或登录状态后重试。</p>
@@ -214,6 +299,58 @@ onBeforeUnmount(() => {
   // 去掉浏览器 type=search 自带的清除按钮，保持视觉统一
   &::-webkit-search-cancel-button {
     appearance: none;
+  }
+}
+
+.search-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--fbz-space-3);
+  max-width: 640px;
+  margin: calc(-1 * var(--fbz-space-4)) 0 var(--fbz-space-6);
+
+  :deep(.base-select) {
+    width: auto;
+    min-width: 124px;
+    max-width: 168px;
+  }
+}
+
+.exclude-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fbz-space-2);
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.exclude-label {
+  flex: 0 0 auto;
+  font-size: var(--fbz-font-size-sm);
+  color: var(--fbz-color-text-muted);
+  white-space: nowrap;
+}
+
+.exclude-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--fbz-radius-control);
+  border: 1px solid var(--fbz-color-line);
+  background: var(--fbz-color-panel);
+  color: var(--fbz-color-text);
+  font-size: var(--fbz-font-size-sm);
+  outline: none;
+  transition: border-color var(--fbz-motion-fast);
+
+  &::placeholder {
+    color: var(--fbz-color-text-muted);
+  }
+
+  &:focus {
+    border-color: var(--fbz-color-brand-500);
   }
 }
 

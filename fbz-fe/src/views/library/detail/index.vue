@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import type { MediaItem, SortKey, SortOption } from "@/types/media.ts";
-import { fetchLibraryItems } from "@/service/modules/library.ts";
+import {
+  fetchLibraryFilters,
+  fetchLibraryItems,
+  LIBRARY_PAGE_SIZE,
+} from "@/service/modules/library.ts";
 import { queueLibraryScan } from "@/service/modules/admin.ts";
 import { useLibraryStore } from "@/stores/library.ts";
 import { useAuthStore } from "@/stores/auth.ts";
@@ -15,9 +19,17 @@ const libraryId = computed(() => String(route.params.id));
 const library = computed(() => libraryStore.getById(libraryId.value));
 
 const allItems = ref<MediaItem[]>([]);
+const totalFromServer = ref(0);
+const startIndex = ref(0);
+const page = ref(0);
 const loading = ref(false);
 const error = ref<string | null>(null);
 const scanning = ref(false);
+
+/** 服务端题材 / 标签选项（/Items/Filters）；失败时回退到条目上已有的 genre。 */
+const serverGenres = ref<string[]>([]);
+const serverTags = ref<string[]>([]);
+const serverYears = ref<number[]>([]);
 
 async function triggerScan() {
   if (scanning.value) return;
@@ -32,42 +44,39 @@ async function triggerScan() {
   }
 }
 
-/** 拉取当前库的真实条目；后端空结果即展示空库。 */
-async function loadLibraryItems(id: string) {
-  if (!authStore.userId) {
-    allItems.value = [];
-    error.value = "请先登录后再浏览媒体库。";
-    return;
-  }
-  loading.value = true;
-  error.value = null;
-  try {
-    const result = await fetchLibraryItems({ userId: authStore.userId, libraryId: id });
-    allItems.value = result.items;
-  } catch {
-    allItems.value = [];
-    error.value = "媒体库条目加载失败，请检查网络、登录状态或库权限。";
-  } finally {
-    loading.value = false;
-  }
-}
+/** 前端排序 key → Emby SortBy。评分后端暂不支持，透传 CommunityRating 以便日后对齐。 */
+const SORT_BY_MAP: Record<SortKey, string> = {
+  title: "SortName",
+  year: "ProductionYear",
+  rating: "CommunityRating",
+};
 
-onMounted(() => loadLibraryItems(libraryId.value));
-// 在库之间切换（同一组件复用）时按新库重新拉取。
-watch(libraryId, (id) => {
-  void loadLibraryItems(id);
-});
-
-/* ---------- 筛选 ---------- */
+/* ---------- 筛选 / 排序（透传服务端） ---------- */
 const genreFilter = ref<string>("");
+/** "" | "played" | "unplayed" → Filters=IsPlayed / IsUnplayed */
+const playedFilter = ref<string>("");
+/** "" | "favorite" → Filters=IsFavorite */
+const favoriteFilter = ref<string>("");
+/** 排除标签（透传 excludeTags；空 = 不排阻）。 */
+const excludeTagFilter = ref<string>("");
+/** 包含标签（透传 tags）。 */
+const tagFilter = ref<string>("");
+/** 年份（透传 years）。 */
+const yearFilter = ref<string>("");
+const sortKey = ref<SortKey>("title");
+const sortDesc = ref(false);
 
 function clearFilters() {
   genreFilter.value = "";
+  playedFilter.value = "";
+  favoriteFilter.value = "";
+  excludeTagFilter.value = "";
+  tagFilter.value = "";
+  yearFilter.value = "";
 }
 
-// 题材选项从当前库的真实条目动态汇总；无则回退到占位题材池。含「全部题材」项（值为空）
 const genreOptions = computed(() => {
-  const set = new Set<string>();
+  const set = new Set<string>(serverGenres.value);
   for (const it of allItems.value) {
     if (it.genre) set.add(it.genre);
   }
@@ -75,42 +84,197 @@ const genreOptions = computed(() => {
   return [{ label: "全部题材", value: "" }, ...genres.map((g) => ({ label: g, value: g }))];
 });
 
-const filtered = computed(() =>
-  allItems.value.filter((it) => !genreFilter.value || it.genre === genreFilter.value),
-);
+const playedOptions = [
+  { label: "全部状态", value: "" },
+  { label: "已看", value: "played" },
+  { label: "未看", value: "unplayed" },
+];
 
-/* ---------- 排序 ---------- */
+const favoriteOptions = [
+  { label: "全部收藏", value: "" },
+  { label: "已收藏", value: "favorite" },
+];
+
+const excludeTagOptions = computed(() => [
+  { label: "不排除标签", value: "" },
+  ...serverTags.value.map((t) => ({ label: `排除：${t}`, value: t })),
+]);
+
+const tagOptions = computed(() => [
+  { label: "全部标签", value: "" },
+  ...serverTags.value.map((t) => ({ label: t, value: t })),
+]);
+
+const yearOptions = computed(() => {
+  const set = new Set<number>(serverYears.value);
+  for (const it of allItems.value) {
+    if (it.year != null) set.add(it.year);
+  }
+  const years = [...set].sort((a, b) => b - a);
+  return [
+    { label: "全部年份", value: "" },
+    ...years.map((y) => ({ label: String(y), value: String(y) })),
+  ];
+});
+
+const totalPages = computed(() =>
+  Math.max(1, Math.ceil(totalFromServer.value / LIBRARY_PAGE_SIZE)),
+);
+const hasMore = computed(() => startIndex.value + allItems.value.length < totalFromServer.value);
+const rangeLabel = computed(() => {
+  if (!allItems.value.length) return "0";
+  const from = startIndex.value + 1;
+  const to = startIndex.value + allItems.value.length;
+  return `${from}–${to}`;
+});
+
 const sortOptions: SortOption[] = [
-  { key: "rating", label: "评分" },
   { key: "title", label: "名称" },
   { key: "year", label: "年份" },
+  { key: "rating", label: "评分" },
 ];
-const sortKey = ref<SortKey>("rating");
-const sortDesc = ref(true);
 
 function toggleDir() {
   sortDesc.value = !sortDesc.value;
 }
 
-const sorted = computed(() => {
-  const list = [...filtered.value];
-  list.sort((a, b) => {
-    let r = 0;
-    switch (sortKey.value) {
-      case "title":
-        r = a.title.localeCompare(b.title, "zh");
-        break;
-      case "year":
-        r = (a.year ?? 0) - (b.year ?? 0);
-        break;
-      case "rating":
-        r = (a.rating ?? 0) - (b.rating ?? 0);
-        break;
-    }
-    return sortDesc.value ? -r : r;
-  });
-  return list;
+function filtersParam(): string | undefined {
+  const parts: string[] = [];
+  if (playedFilter.value === "played") parts.push("IsPlayed");
+  if (playedFilter.value === "unplayed") parts.push("IsUnplayed");
+  if (favoriteFilter.value === "favorite") parts.push("IsFavorite");
+  return parts.length ? parts.join(",") : undefined;
+}
+
+/** 拉取当前库的真实条目；排序/筛选项透传服务端。 */
+async function loadLibraryItems(id: string) {
+  if (!authStore.userId) {
+    allItems.value = [];
+    totalFromServer.value = 0;
+    startIndex.value = 0;
+    error.value = "请先登录后再浏览媒体库。";
+    return;
+  }
+  loading.value = true;
+  error.value = null;
+  try {
+    const result = await fetchLibraryItems({
+      userId: authStore.userId,
+      libraryId: id,
+      startIndex: page.value * LIBRARY_PAGE_SIZE,
+      limit: LIBRARY_PAGE_SIZE,
+      sortBy: SORT_BY_MAP[sortKey.value],
+      sortOrder: sortDesc.value ? "Descending" : "Ascending",
+      includeItemTypes: "Movie,Series",
+      genres: genreFilter.value || undefined,
+      years: yearFilter.value || undefined,
+      tags: tagFilter.value || undefined,
+      excludeTags: excludeTagFilter.value || undefined,
+      filters: filtersParam(),
+      isPlayed:
+        playedFilter.value === "played"
+          ? true
+          : playedFilter.value === "unplayed"
+            ? false
+            : undefined,
+      isFavorite: favoriteFilter.value === "favorite" ? true : undefined,
+    });
+    allItems.value = result.items;
+    totalFromServer.value = result.total;
+    startIndex.value = result.startIndex;
+  } catch {
+    allItems.value = [];
+    totalFromServer.value = 0;
+    startIndex.value = 0;
+    error.value = "媒体库条目加载失败，请检查网络、登录状态或库权限。";
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function loadFilterOptions(id: string) {
+  if (!authStore.userId) {
+    serverGenres.value = [];
+    serverTags.value = [];
+    serverYears.value = [];
+    return;
+  }
+  try {
+    const filters = await fetchLibraryFilters(authStore.userId, id);
+    serverGenres.value = filters.genres;
+    serverTags.value = filters.tags;
+    serverYears.value = filters.years;
+  } catch {
+    serverGenres.value = [];
+    serverTags.value = [];
+    serverYears.value = [];
+  }
+}
+
+function goPage(next: number) {
+  const clamped = Math.max(0, Math.min(next, totalPages.value - 1));
+  if (clamped === page.value && allItems.value.length) {
+    void loadLibraryItems(libraryId.value);
+    return;
+  }
+  page.value = clamped;
+  void loadLibraryItems(libraryId.value);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+// 库切换时清空筛选并刷新题材/标签选项。
+watch(
+  libraryId,
+  (id) => {
+    genreFilter.value = "";
+    playedFilter.value = "";
+    favoriteFilter.value = "";
+    excludeTagFilter.value = "";
+    tagFilter.value = "";
+    yearFilter.value = "";
+    page.value = 0;
+    void loadFilterOptions(id);
+  },
+  { immediate: true },
+);
+
+/** 排序/筛选变化：回到第 0 页并透传服务端重拉；含首次挂载。 */
+watch(
+  [
+    libraryId,
+    genreFilter,
+    playedFilter,
+    favoriteFilter,
+    excludeTagFilter,
+    tagFilter,
+    yearFilter,
+    sortKey,
+    sortDesc,
+  ],
+  ([id]) => {
+    page.value = 0;
+    void loadLibraryItems(String(id));
+  },
+  { immediate: true },
+);
+
+/** 播放器进度回传后刷新进度条 / 已看状态（与 PlayedItems / Sessions 联动）。 */
+useEventListener(window, "fbz-playback-saved", () => {
+  void loadLibraryItems(libraryId.value);
 });
+
+useEventListener(window, "fbz:item-deleted", ((event: CustomEvent<{ id: string }>) => {
+  const id = event.detail?.id;
+  if (!id) return;
+  const before = allItems.value.length;
+  allItems.value = allItems.value.filter((item) => item.id !== id);
+  if (allItems.value.length < before) {
+    totalFromServer.value = Math.max(0, totalFromServer.value - 1);
+  }
+}) as EventListener);
+
+/** 服务端已排好序；此处仅做分组展示，不再二次筛选。 */
+const sorted = computed(() => allItems.value);
 
 /* ---------- 分组（电梯导航按当前排序维度分段） ---------- */
 function sectionLabel(item: MediaItem): string {
@@ -181,15 +345,46 @@ onBeforeUnmount(() => observer?.disconnect());
       <RouterLink to="/library" class="back">← 媒体库</RouterLink>
       <div class="title-row">
         <h1>{{ library?.name ?? "未知媒体库" }}</h1>
-        <span class="result-count">{{ sorted.length }} / {{ allItems.length }}</span>
+        <span class="result-count">{{ rangeLabel }} / {{ totalFromServer }}</span>
       </div>
     </header>
 
-    <!-- 工具条：筛选 + 排序 -->
+    <!-- 工具条：筛选 + 排序（透传服务端 SortBy / Filters） -->
     <div class="toolbar">
       <div class="filters">
         <BaseSelect v-model="genreFilter" :options="genreOptions" aria-label="按题材筛选" />
-        <button v-if="genreFilter" class="clear" type="button" @click="clearFilters">
+        <BaseSelect v-model="yearFilter" :options="yearOptions" aria-label="按年份筛选" />
+        <BaseSelect v-model="playedFilter" :options="playedOptions" aria-label="按观看状态筛选" />
+        <BaseSelect
+          v-model="favoriteFilter"
+          :options="favoriteOptions"
+          aria-label="按收藏状态筛选"
+        />
+        <BaseSelect
+          v-if="tagOptions.length > 1"
+          v-model="tagFilter"
+          :options="tagOptions"
+          aria-label="按标签筛选"
+        />
+        <BaseSelect
+          v-if="excludeTagOptions.length > 1"
+          v-model="excludeTagFilter"
+          :options="excludeTagOptions"
+          aria-label="排除标签"
+        />
+        <button
+          v-if="
+            genreFilter ||
+            yearFilter ||
+            playedFilter ||
+            favoriteFilter ||
+            tagFilter ||
+            excludeTagFilter
+          "
+          class="clear"
+          type="button"
+          @click="clearFilters"
+        >
           清除筛选
         </button>
       </div>
@@ -236,18 +431,20 @@ onBeforeUnmount(() => observer?.disconnect());
 
         <template v-if="!sorted.length">
           <BaseEmptyState
-            v-if="allItems.length"
+            v-if="
+              genreFilter ||
+              yearFilter ||
+              playedFilter ||
+              favoriteFilter ||
+              tagFilter ||
+              excludeTagFilter
+            "
             compact
             icon="🔎"
             title="没有符合条件的条目"
             description="当前筛选条件下没有匹配的内容，换个题材或清除筛选再试。"
           >
-            <button
-              v-if="genreFilter"
-              class="empty-cta secondary"
-              type="button"
-              @click="clearFilters"
-            >
+            <button class="empty-cta secondary" type="button" @click="clearFilters">
               清除筛选
             </button>
           </BaseEmptyState>
@@ -278,6 +475,16 @@ onBeforeUnmount(() => observer?.disconnect());
         </button>
       </nav>
     </div>
+
+    <nav v-if="!loading && !error && totalPages > 1" class="pagination" aria-label="分页">
+      <button type="button" :disabled="page === 0 || loading" @click="goPage(page - 1)">
+        上一页
+      </button>
+      <span>第 {{ page + 1 }} / {{ totalPages }} 页</span>
+      <button type="button" :disabled="!hasMore || loading" @click="goPage(page + 1)">
+        下一页
+      </button>
+    </nav>
   </main>
 </template>
 
@@ -514,6 +721,44 @@ onBeforeUnmount(() => observer?.disconnect());
   &.active {
     color: var(--fbz-color-brand-500);
     font-weight: 700;
+  }
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--fbz-space-3);
+  margin-top: var(--fbz-space-6);
+  padding-top: var(--fbz-space-4);
+  border-top: 1px solid var(--fbz-color-line-soft);
+
+  button {
+    height: 34px;
+    padding: 0 14px;
+    border-radius: var(--fbz-radius-control);
+    border: 1px solid var(--fbz-color-line);
+    background: var(--fbz-color-panel);
+    color: var(--fbz-color-text);
+    font-size: var(--fbz-font-size-sm);
+    transition:
+      background var(--fbz-motion-fast),
+      border-color var(--fbz-motion-fast);
+
+    &:hover:not(:disabled) {
+      background: var(--fbz-color-panel-strong);
+      border-color: var(--fbz-color-line-bright);
+    }
+
+    &:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+  }
+
+  span {
+    font-size: var(--fbz-font-size-sm);
+    color: var(--fbz-color-text-muted);
   }
 }
 

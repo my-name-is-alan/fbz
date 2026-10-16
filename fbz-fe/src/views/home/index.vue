@@ -24,7 +24,7 @@ const emptyStateDescription = computed(() =>
     : "先创建一个媒体库，选择 Rust 后端可访问的服务器目录，然后让后端扫描真实媒体文件。",
 );
 
-onMounted(async () => {
+async function refreshHome() {
   try {
     const [data] = await Promise.all([
       fetchHomeData(),
@@ -32,11 +32,24 @@ onMounted(async () => {
     ]);
     rows.value = data.rows;
     featured.value = data.featured;
-    loaded.value = true;
+    error.value = null;
   } catch {
     error.value = "首页数据加载失败，请检查网络、登录状态或服务器运行状态。";
+  } finally {
     loaded.value = true;
   }
+}
+
+onMounted(() => {
+  void refreshHome();
+});
+
+useEventListener(window, "fbz-playback-saved", () => {
+  void refreshHome();
+});
+
+useEventListener(window, "fbz:item-deleted", () => {
+  void refreshHome();
 });
 </script>
 

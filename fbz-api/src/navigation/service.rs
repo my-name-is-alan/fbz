@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-/// 首页各行默认拉取的条目数。
+/// 首页各行默认拉取的条目数（导航 BFF 固定窗，不接受客户端无限 Limit）。
 const SECTION_LIMIT: i64 = 16;
 /// hero 主打项数量（取自最新入库前几条）。
 const FEATURED_LIMIT: usize = 5;
@@ -48,6 +48,7 @@ pub async fn load_navigation(
     let repository = LibraryRepository::new(database);
 
     let views = repository.list_user_views(user.id).await?;
+    // 已知热点：view_counts 仍为按库 exact count（库数受 USER_VIEW_LIMIT 约束）；大库优化可改为 bounded probe。
     let view_counts = repository.list_user_view_counts(user.id).await?;
     let counts_by_library: HashMap<String, u32> = view_counts
         .into_iter()
@@ -195,6 +196,7 @@ fn library_type_to_frontend_kind(library_type: &str) -> String {
         Some(LibraryType::Music) => "music",
         Some(LibraryType::HomeVideos | LibraryType::Mixed) => "mixed",
         Some(LibraryType::LiveTv) => "livetv",
+        Some(LibraryType::Books) => "books",
         None => return library_type.to_owned(),
     }
     .to_owned()
@@ -340,6 +342,8 @@ mod tests {
             media_file_is_strm: None,
             supports_transcoding: false,
             production_year: Some(2025),
+            community_rating: None,
+            genres: Vec::new(),
             index_number: None,
             parent_index_number: None,
             premiere_date: None,

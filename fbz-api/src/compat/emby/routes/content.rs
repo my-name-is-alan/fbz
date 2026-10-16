@@ -9,6 +9,7 @@ use crate::{
     compat::emby::dto::{BaseItemDto, QueryResultDto},
     error::AppError,
     state::AppState,
+    users::repository::UsersRepository,
 };
 
 use super::{
@@ -79,9 +80,15 @@ pub async fn home_sections(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<Vec<ContentSectionDto>>, AppError> {
-    authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let user = authenticate_route_user(&state, &user_id, &headers, &uri).await?;
+    let defaults = default_home_sections();
+    let Some(database) = state.database() else {
+        return Ok(Json(defaults));
+    };
 
-    Ok(Json(default_home_sections()))
+    let repository = UsersRepository::new(database.clone());
+    let preferred_ids = preferred_home_section_ids(&repository, user.id).await;
+    Ok(Json(order_home_sections(defaults, preferred_ids)))
 }
 
 pub async fn section_items(
@@ -251,6 +258,122 @@ fn append_filter(existing: Option<String>, filter: &str) -> String {
     }
 }
 
+async fn preferred_home_section_ids(
+    repository: &UsersRepository,
+    user_internal_id: i64,
+) -> Vec<String> {
+    // Emby Web：DisplayPreferences/usersettings?client=emby 的 CustomPrefs.homesectionN
+    for client in ["emby", "Unknown", "FBZ"] {
+        if let Ok(Some(stored)) = repository
+            .find_display_preferences(user_internal_id, client, "usersettings")
+            .await
+        {
+            let prefs = stored.custom_prefs.as_object();
+            if let Some(object) = prefs {
+                let mut ordered = Vec::new();
+                for index in 0..32 {
+                    let key = format!("homesection{index}");
+                    let Some(value) = object.get(&key).and_then(|value| value.as_str()) else {
+                        break;
+                    };
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                        continue;
+                    }
+                    ordered.push(normalize_home_section_pref(trimmed));
+                }
+                if !ordered.is_empty() {
+                    return ordered;
+                }
+            }
+        }
+    }
+
+    // 回退：UserConfiguration.OrderedViews 若含已知首页分区 id 则按其序。
+    if let Ok(Some(value)) = repository
+        .find_user_setting(user_internal_id, "emby.user.configuration")
+        .await
+    {
+        if let Some(views) = value
+            .get("OrderedViews")
+            .or_else(|| value.get("orderedViews"))
+            .and_then(|value| value.as_array())
+        {
+            let ordered: Vec<String> = views
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(normalize_home_section_pref)
+                .filter(|id| known_home_section_id(id))
+                .collect();
+            if !ordered.is_empty() {
+                return ordered;
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+fn normalize_home_section_pref(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "")
+        .replace('-', "")
+}
+
+fn known_home_section_id(id: &str) -> bool {
+    matches!(
+        id,
+        "latestmedia"
+            | "latest"
+            | "recentlyadded"
+            | "resume"
+            | "continuewatching"
+            | "favorites"
+            | "favourites"
+            | "movies"
+            | "series"
+            | "tvshows"
+            | "music"
+            | "librarybuttons"
+            | "smalllibrarytiles"
+    )
+}
+
+fn order_home_sections(
+    defaults: Vec<ContentSectionDto>,
+    preferred_ids: Vec<String>,
+) -> Vec<ContentSectionDto> {
+    if preferred_ids.is_empty() {
+        return defaults;
+    }
+
+    let mut by_id: std::collections::BTreeMap<String, ContentSectionDto> = defaults
+        .into_iter()
+        .map(|section| (normalize_home_section_pref(&section.id), section))
+        .collect();
+
+    let mut ordered = Vec::new();
+    for pref in preferred_ids {
+        let key = match pref.as_str() {
+            "latest" | "recentlyadded" => "latestmedia".to_owned(),
+            "continuewatching" => "resume".to_owned(),
+            "favourites" => "favorites".to_owned(),
+            "tvshows" => "series".to_owned(),
+            "librarybuttons" | "smalllibrarytiles" => continue,
+            other => other.to_owned(),
+        };
+        if let Some(section) = by_id.remove(&key) {
+            ordered.push(section);
+        }
+    }
+    for leftover in by_id.into_values() {
+        ordered.push(leftover);
+    }
+    ordered
+}
+
 fn normalized_section_id(value: &str) -> Result<String, AppError> {
     let value = value.trim();
     if value.is_empty() {
@@ -272,6 +395,22 @@ fn normalized_section_id(value: &str) -> Result<String, AppError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn order_home_sections_applies_preferred_ids_then_leftovers() {
+        let ordered = order_home_sections(
+            default_home_sections(),
+            vec![
+                "resume".to_owned(),
+                "favorites".to_owned(),
+                "librarybuttons".to_owned(),
+            ],
+        );
+        assert_eq!(ordered[0].id, "resume");
+        assert_eq!(ordered[1].id, "favorites");
+        assert!(ordered.iter().any(|section| section.id == "latestmedia"));
+        assert_eq!(ordered.len(), default_home_sections().len());
+    }
 
     #[test]
     fn home_sections_serialize_official_content_section_shape() {

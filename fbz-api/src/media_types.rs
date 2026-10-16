@@ -33,17 +33,20 @@ pub enum LibraryType {
     Mixed,
     /// 直播电视入口（频道/EPG/录制的数据模型另立子系统，此处仅占类型位）。
     LiveTv,
+    /// 书籍/有声书库（对齐 Jellyfin `books`）：电子书 → `book`，音频 → `audiobook`。
+    Books,
 }
 
 impl LibraryType {
     /// 全部库类型，顺序即 UI/文档展示顺序；DB CHECK 取值集合以此为准。
-    pub const ALL: [LibraryType; 6] = [
+    pub const ALL: [LibraryType; 7] = [
         LibraryType::Movies,
         LibraryType::TvShows,
         LibraryType::Music,
         LibraryType::HomeVideos,
         LibraryType::Mixed,
         LibraryType::LiveTv,
+        LibraryType::Books,
     ];
 
     /// 存储/传输用的规范字符串（与 Emby `CollectionType` 词汇一致）。
@@ -55,6 +58,7 @@ impl LibraryType {
             LibraryType::HomeVideos => "homevideos",
             LibraryType::Mixed => "mixed",
             LibraryType::LiveTv => "livetv",
+            LibraryType::Books => "books",
         }
     }
 
@@ -82,6 +86,7 @@ impl LibraryType {
             LibraryType::HomeVideos => ItemType::Video,
             LibraryType::Mixed => ItemType::Movie,
             LibraryType::LiveTv => ItemType::TvChannel,
+            LibraryType::Books => ItemType::Book,
         }
     }
 }
@@ -117,11 +122,15 @@ pub enum ItemType {
     Program,
     /// 录制节目（livetv，预留）。
     Recording,
+    /// 电子书（epub/pdf/cbz/cbr/mobi/azw3）。
+    Book,
+    /// 有声书（书籍库中的音频）。
+    AudioBook,
 }
 
 impl ItemType {
     /// 全部条目类型；DB CHECK 取值集合以此为准。
-    pub const ALL: [ItemType; 14] = [
+    pub const ALL: [ItemType; 16] = [
         ItemType::Folder,
         ItemType::Movie,
         ItemType::Series,
@@ -136,6 +145,8 @@ impl ItemType {
         ItemType::TvChannel,
         ItemType::Program,
         ItemType::Recording,
+        ItemType::Book,
+        ItemType::AudioBook,
     ];
 
     /// 存储用的规范字符串。
@@ -155,6 +166,8 @@ impl ItemType {
             ItemType::TvChannel => "tvchannel",
             ItemType::Program => "program",
             ItemType::Recording => "recording",
+            ItemType::Book => "book",
+            ItemType::AudioBook => "audiobook",
         }
     }
 
@@ -176,6 +189,9 @@ impl ItemType {
         let category = MediaCategory::from_path(path);
         match (library_type, category) {
             (LibraryType::Music, _) => ItemType::Track,
+            (LibraryType::Books, Some(MediaCategory::Audio)) => ItemType::AudioBook,
+            (LibraryType::Books, _) => ItemType::Book,
+            (_, Some(MediaCategory::Book)) => ItemType::Book,
             (_, Some(MediaCategory::Audio)) => ItemType::Track,
             (LibraryType::HomeVideos, Some(MediaCategory::Photo)) => ItemType::Photo,
             (LibraryType::HomeVideos, _) => ItemType::Video,
@@ -194,6 +210,8 @@ pub enum MediaCategory {
     Video,
     /// 图片。
     Photo,
+    /// 电子书/漫画。
+    Book,
 }
 
 impl MediaCategory {
@@ -211,6 +229,8 @@ impl MediaCategory {
             Some(MediaCategory::Audio)
         } else if PHOTO_EXTENSIONS.contains(&ext) {
             Some(MediaCategory::Photo)
+        } else if BOOK_EXTENSIONS.contains(&ext) {
+            Some(MediaCategory::Book)
         } else {
             None
         }
@@ -221,7 +241,10 @@ impl MediaCategory {
 pub const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "mov", "m4v", "ts", "strm"];
 
 /// 受支持的音频扩展名。
-pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "m4a", "wav", "ogg"];
+pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "m4a", "m4b", "wav", "ogg"];
+
+/// 受支持的电子书/漫画扩展名（仅 `books` 库收录）。
+pub const BOOK_EXTENSIONS: &[&str] = &["epub", "pdf", "cbz", "cbr", "mobi", "azw3"];
 
 /// 受支持的图片扩展名（家庭库照片）。
 pub const PHOTO_EXTENSIONS: &[&str] = &[
@@ -260,7 +283,8 @@ mod tests {
                 "music",
                 "homevideos",
                 "mixed",
-                "livetv"
+                "livetv",
+                "books"
             ]
         );
     }
@@ -284,7 +308,9 @@ mod tests {
                 "video",
                 "tvchannel",
                 "program",
-                "recording"
+                "recording",
+                "book",
+                "audiobook"
             ]
         );
     }
@@ -294,7 +320,7 @@ mod tests {
         for kind in LibraryType::ALL {
             assert_eq!(LibraryType::parse(kind.as_str()), Some(kind));
         }
-        assert_eq!(LibraryType::parse("books"), None);
+        assert_eq!(LibraryType::parse("comics"), None);
         assert_eq!(
             LibraryType::parse("tv"),
             None,
@@ -348,6 +374,24 @@ mod tests {
             ItemType::classify(LibraryType::TvShows, Path::new("show.s01e01.mkv")),
             ItemType::Episode
         );
+    }
+
+    #[test]
+    fn classify_books_library() {
+        assert_eq!(
+            ItemType::classify(LibraryType::Books, Path::new("Dune.epub")),
+            ItemType::Book
+        );
+        assert_eq!(
+            ItemType::classify(LibraryType::Books, Path::new("Dune/01.m4b")),
+            ItemType::AudioBook
+        );
+        assert_eq!(
+            ItemType::classify(LibraryType::Books, Path::new("ch1.mp3")),
+            ItemType::AudioBook
+        );
+        assert_eq!(MediaCategory::from_extension("cbz"), Some(MediaCategory::Book));
+        assert_eq!(LibraryType::Books.collection_type(), "books");
     }
 
     #[test]

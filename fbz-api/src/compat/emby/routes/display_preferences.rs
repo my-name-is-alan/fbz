@@ -40,12 +40,30 @@ pub struct DisplayPreferencesQuery {
 pub struct DisplayPreferencesUpdateDto {
     #[serde(alias = "id")]
     pub id: Option<String>,
+    #[serde(alias = "viewType", alias = "view_type")]
+    pub view_type: Option<String>,
     #[serde(alias = "sortBy", alias = "sort_by")]
     pub sort_by: Option<String>,
-    #[serde(alias = "sortOrder", alias = "sort_order")]
-    pub sort_order: Option<String>,
+    #[serde(alias = "indexBy", alias = "index_by")]
+    pub index_by: Option<String>,
+    #[serde(alias = "rememberIndexing", alias = "remember_indexing")]
+    pub remember_indexing: Option<bool>,
+    #[serde(alias = "primaryImageHeight", alias = "primary_image_height")]
+    pub primary_image_height: Option<i32>,
+    #[serde(alias = "primaryImageWidth", alias = "primary_image_width")]
+    pub primary_image_width: Option<i32>,
     #[serde(alias = "customPrefs", alias = "custom_prefs")]
     pub custom_prefs: Option<BTreeMap<String, String>>,
+    #[serde(alias = "scrollDirection", alias = "scroll_direction")]
+    pub scroll_direction: Option<String>,
+    #[serde(alias = "showBackdrop", alias = "show_backdrop")]
+    pub show_backdrop: Option<bool>,
+    #[serde(alias = "rememberSorting", alias = "remember_sorting")]
+    pub remember_sorting: Option<bool>,
+    #[serde(alias = "sortOrder", alias = "sort_order")]
+    pub sort_order: Option<String>,
+    #[serde(alias = "showSidebar", alias = "show_sidebar")]
+    pub show_sidebar: Option<bool>,
     #[serde(alias = "client")]
     pub client: Option<String>,
 }
@@ -70,6 +88,17 @@ struct DisplayPreferencesUpdateInput {
     sort_order: Option<String>,
     custom_prefs: BTreeMap<String, String>,
 }
+
+/// 一等 DisplayPreferences 字段落在 CustomPrefs 里的保留键（无额外 migration）。
+const META_VIEW_TYPE: &str = "_ViewType";
+const META_INDEX_BY: &str = "_IndexBy";
+const META_REMEMBER_INDEXING: &str = "_RememberIndexing";
+const META_PRIMARY_IMAGE_HEIGHT: &str = "_PrimaryImageHeight";
+const META_PRIMARY_IMAGE_WIDTH: &str = "_PrimaryImageWidth";
+const META_SCROLL_DIRECTION: &str = "_ScrollDirection";
+const META_SHOW_BACKDROP: &str = "_ShowBackdrop";
+const META_REMEMBER_SORTING: &str = "_RememberSorting";
+const META_SHOW_SIDEBAR: &str = "_ShowSidebar";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct UserSettingsUpdateInput {
@@ -131,6 +160,7 @@ pub async fn display_preferences(
             dto.sort_order = sort_order;
         }
         dto.custom_prefs = json_object_to_string_map(&stored.custom_prefs);
+        apply_display_meta_from_custom_prefs(&mut dto);
     }
 
     Ok(Json(dto))
@@ -354,13 +384,27 @@ fn display_preferences_update_input(
     let client = normalized_client(request.client.or(query.client));
     let sort_order = normalized_sort_order(request.sort_order)?;
 
+    let mut custom_prefs = normalized_custom_prefs(request.custom_prefs);
+    merge_display_meta_into_custom_prefs(
+        &mut custom_prefs,
+        request.view_type,
+        request.index_by,
+        request.remember_indexing,
+        request.primary_image_height,
+        request.primary_image_width,
+        request.scroll_direction,
+        request.show_backdrop,
+        request.remember_sorting,
+        request.show_sidebar,
+    );
+
     Ok(DisplayPreferencesUpdateInput {
         display_preferences_id,
         user_id: normalized_optional_text(query.user_id, MAX_DISPLAY_PREF_TEXT_LEN),
         client,
         sort_by: normalized_optional_text(request.sort_by, MAX_DISPLAY_PREF_TEXT_LEN),
         sort_order,
-        custom_prefs: normalized_custom_prefs(request.custom_prefs),
+        custom_prefs,
     })
 }
 
@@ -477,6 +521,81 @@ fn normalized_optional_text(value: Option<String>, max_len: usize) -> Option<Str
     })
 }
 
+fn apply_display_meta_from_custom_prefs(dto: &mut DisplayPreferencesDto) {
+    if let Some(value) = dto.custom_prefs.remove(META_VIEW_TYPE) {
+        dto.view_type = Some(value);
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_INDEX_BY) {
+        dto.index_by = Some(value);
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_REMEMBER_INDEXING) {
+        dto.remember_indexing = value.eq_ignore_ascii_case("true");
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_PRIMARY_IMAGE_HEIGHT) {
+        if let Ok(parsed) = value.parse::<i32>() {
+            dto.primary_image_height = parsed;
+        }
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_PRIMARY_IMAGE_WIDTH) {
+        if let Ok(parsed) = value.parse::<i32>() {
+            dto.primary_image_width = parsed;
+        }
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_SCROLL_DIRECTION) {
+        dto.scroll_direction = value;
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_SHOW_BACKDROP) {
+        dto.show_backdrop = !value.eq_ignore_ascii_case("false");
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_REMEMBER_SORTING) {
+        dto.remember_sorting = value.eq_ignore_ascii_case("true");
+    }
+    if let Some(value) = dto.custom_prefs.remove(META_SHOW_SIDEBAR) {
+        dto.show_sidebar = value.eq_ignore_ascii_case("true");
+    }
+}
+
+fn merge_display_meta_into_custom_prefs(
+    custom_prefs: &mut BTreeMap<String, String>,
+    view_type: Option<String>,
+    index_by: Option<String>,
+    remember_indexing: Option<bool>,
+    primary_image_height: Option<i32>,
+    primary_image_width: Option<i32>,
+    scroll_direction: Option<String>,
+    show_backdrop: Option<bool>,
+    remember_sorting: Option<bool>,
+    show_sidebar: Option<bool>,
+) {
+    if let Some(value) = normalized_optional_text(view_type, MAX_DISPLAY_PREF_TEXT_LEN) {
+        custom_prefs.insert(META_VIEW_TYPE.to_owned(), value);
+    }
+    if let Some(value) = normalized_optional_text(index_by, MAX_DISPLAY_PREF_TEXT_LEN) {
+        custom_prefs.insert(META_INDEX_BY.to_owned(), value);
+    }
+    if let Some(value) = remember_indexing {
+        custom_prefs.insert(META_REMEMBER_INDEXING.to_owned(), value.to_string());
+    }
+    if let Some(value) = primary_image_height {
+        custom_prefs.insert(META_PRIMARY_IMAGE_HEIGHT.to_owned(), value.to_string());
+    }
+    if let Some(value) = primary_image_width {
+        custom_prefs.insert(META_PRIMARY_IMAGE_WIDTH.to_owned(), value.to_string());
+    }
+    if let Some(value) = normalized_optional_text(scroll_direction, MAX_DISPLAY_PREF_TEXT_LEN) {
+        custom_prefs.insert(META_SCROLL_DIRECTION.to_owned(), value);
+    }
+    if let Some(value) = show_backdrop {
+        custom_prefs.insert(META_SHOW_BACKDROP.to_owned(), value.to_string());
+    }
+    if let Some(value) = remember_sorting {
+        custom_prefs.insert(META_REMEMBER_SORTING.to_owned(), value.to_string());
+    }
+    if let Some(value) = show_sidebar {
+        custom_prefs.insert(META_SHOW_SIDEBAR.to_owned(), value.to_string());
+    }
+}
+
 /// CustomPrefs jsonb → 扁平字符串 map（Emby DTO 契约是 map<string,string>）。
 fn json_object_to_string_map(value: &serde_json::Value) -> BTreeMap<String, String> {
     let Some(object) = value.as_object() else {
@@ -502,6 +621,8 @@ mod tests {
     use axum::{extract::Query, http::Uri};
     use serde_json::json;
 
+    use crate::compat::emby::dto::{DisplayPreferencesDto, DisplayPreferencesSource};
+
     use super::*;
 
     #[test]
@@ -512,6 +633,62 @@ mod tests {
             DEFAULT_DISPLAY_CLIENT
         );
         assert_eq!(normalized_client(Some(" Infuse ".to_owned())), "Infuse");
+    }
+
+    #[test]
+    fn display_preferences_meta_fields_round_trip_via_custom_prefs() {
+        let request = serde_json::from_value::<DisplayPreferencesUpdateDto>(serde_json::json!({
+            "SortBy": "SortName",
+            "SortOrder": "Ascending",
+            "Client": "emby",
+            "ViewType": "Poster",
+            "ScrollDirection": "Vertical",
+            "ShowBackdrop": false,
+            "RememberSorting": true,
+            "PrimaryImageHeight": 300,
+            "CustomPrefs": { "homesection0": "resume", "homesection1": "latestmedia" }
+        }))
+        .expect("display preferences body should deserialize");
+
+        let input = display_preferences_update_input(
+            "usersettings",
+            DisplayPreferencesQuery {
+                user_id: Some("user-1".to_owned()),
+                client: Some("emby".to_owned()),
+            },
+            request,
+        )
+        .expect("display preferences update should normalize");
+
+        assert_eq!(
+            input.custom_prefs.get("homesection0").map(String::as_str),
+            Some("resume")
+        );
+        assert_eq!(
+            input.custom_prefs.get(META_VIEW_TYPE).map(String::as_str),
+            Some("Poster")
+        );
+        assert_eq!(
+            input.custom_prefs.get(META_SCROLL_DIRECTION).map(String::as_str),
+            Some("Vertical")
+        );
+
+        let mut dto = DisplayPreferencesDto::from(DisplayPreferencesSource {
+            id: "usersettings".to_owned(),
+            client: "emby".to_owned(),
+        });
+        dto.custom_prefs = input.custom_prefs;
+        apply_display_meta_from_custom_prefs(&mut dto);
+        assert_eq!(dto.view_type.as_deref(), Some("Poster"));
+        assert_eq!(dto.scroll_direction, "Vertical");
+        assert!(!dto.show_backdrop);
+        assert!(dto.remember_sorting);
+        assert_eq!(dto.primary_image_height, 300);
+        assert_eq!(
+            dto.custom_prefs.get("homesection0").map(String::as_str),
+            Some("resume")
+        );
+        assert!(!dto.custom_prefs.contains_key(META_VIEW_TYPE));
     }
 
     #[test]

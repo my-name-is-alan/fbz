@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderMap, Uri},
+    http::{HeaderMap, StatusCode, Uri},
 };
 use serde::Deserialize;
 
@@ -87,7 +88,19 @@ pub async fn remote_lyrics_search(
     )
     .await?;
 
-    // Provider 过滤：显式指定且不是 LrcLib → 空（当前只接 LRCLIB，免密钥公共服务）。
+    // 插件优先：已启用 `lyrics.provider.query` 订阅者（如 fbz.lyrics.lrclib）。
+    if let Some(found) = super::remote_lyrics::search(&state, &item_id, query.search_term.as_deref()).await? {
+        let wanted = query.provider_name.as_deref();
+        return Ok(Json(
+            found
+                .into_iter()
+                .filter(|l| wanted.is_none_or(|w| l.provider_name.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(w)) || l.id.starts_with(w)))
+                .map(provider_lyric_to_remote_info)
+                .collect(),
+        ));
+    }
+
+    // 无歌词插件：回退 core 内置 LRCLIB。Provider 过滤：显式指定且不是 LrcLib → 空。
     if let Some(provider) = query.provider_name.as_deref()
         && !provider.eq_ignore_ascii_case("lrclib")
     {
@@ -97,25 +110,31 @@ pub async fn remote_lyrics_search(
         return Err(AppError::internal("database is not configured"));
     };
 
-    // 搜索词：客户端 SearchTerm 优先，缺省用曲目标题。
-    let search_term = match query.search_term.clone() {
-        Some(term) => Some(term),
-        None => LibraryRepository::new(database.clone())
-            .find_user_item_by_id(user.id, &item_id)
-            .await
-            .map_err(|err| AppError::internal(format!("failed to get lyrics item: {err}")))?
-            .map(|item| item.name),
+    // 曲目上下文（标题/艺人/专辑）：用于 LRCLIB 结构化搜索与结果元数据规范化。
+    let visible = LibraryRepository::new(database.clone())
+        .find_user_item_by_id(user.id, &item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get lyrics item: {err}")))?;
+    if visible.is_none() {
+        return Ok(Json(Vec::new()));
+    }
+    let ctx = super::remote_lyrics::track_context(database, &item_id).await?;
+    let known = LrclibContext {
+        title: ctx.get("title").and_then(|v| v.as_str()).map(str::to_owned),
+        artist: ctx.get("artist").and_then(|v| v.as_str()).map(str::to_owned),
     };
+    // 搜索词：客户端 SearchTerm 优先，缺省用曲目标题。
+    let search_term = query.search_term.clone().or_else(|| known.title.clone());
     let Some(search_term) = search_term.filter(|term| !term.trim().is_empty()) else {
         return Ok(Json(Vec::new()));
     };
 
-    Ok(Json(search_lrclib_lyrics(&search_term).await?))
+    Ok(Json(search_lrclib_lyrics(&search_term, &known).await?))
 }
 
 /// LRCLIB 公共搜索（无需 API key）。失败降级为空列表（歌词是增值功能，
 /// 外部服务抖动不该打断客户端）。
-async fn search_lrclib_lyrics(search_term: &str) -> Result<Vec<RemoteLyricInfoDto>, AppError> {
+async fn search_lrclib_lyrics(search_term: &str, known: &LrclibContext) -> Result<Vec<RemoteLyricInfoDto>, AppError> {
     #[derive(Deserialize)]
     struct LrclibRecord {
         id: i64,
@@ -139,12 +158,15 @@ async fn search_lrclib_lyrics(search_term: &str) -> Result<Vec<RemoteLyricInfoDt
         Ok(client) => client,
         Err(_) => return Ok(Vec::new()),
     };
-    let response = match client
-        .get("https://lrclib.net/api/search")
-        .query(&[("q", search_term)])
-        .send()
-        .await
-    {
+    // 已知艺人且用默认搜索词 → 结构化 track_name+artist_name（JF LrcLib 同法），否则 q。
+    let mut request = client.get("https://lrclib.net/api/search");
+    request = match known.artist.as_deref() {
+        Some(artist) if known.title.as_deref() == Some(search_term) => {
+            request.query(&[("track_name", search_term), ("artist_name", artist)])
+        }
+        _ => request.query(&[("q", search_term)]),
+    };
+    let response = match request.send().await {
         Ok(response) if response.status().is_success() => response,
         _ => return Ok(Vec::new()),
     };
@@ -172,14 +194,16 @@ async fn search_lrclib_lyrics(search_term: &str) -> Result<Vec<RemoteLyricInfoDt
             } else {
                 return None;
             };
+            let (title, artist, album) =
+                normalize_lrclib_metadata(record.track_name, record.artist_name, record.album_name, known);
             if dto.metadata.title.is_none() {
-                dto.metadata.title = record.track_name;
+                dto.metadata.title = title;
             }
             if dto.metadata.artist.is_none() {
-                dto.metadata.artist = record.artist_name;
+                dto.metadata.artist = artist;
             }
             if dto.metadata.album.is_none() {
-                dto.metadata.album = record.album_name;
+                dto.metadata.album = album;
             }
 
             Some(RemoteLyricInfoDto {
@@ -189,6 +213,240 @@ async fn search_lrclib_lyrics(search_term: &str) -> Result<Vec<RemoteLyricInfoDt
             })
         })
         .collect())
+}
+
+/// 曲目已知信息（规范化 LRCLIB 记录用）。
+#[derive(Clone, Debug, Default)]
+pub struct LrclibContext {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+}
+
+/// LRCLIB 用户上传的记录常把三栏都填成「歌名 - 歌手」。规范化：
+/// - 三栏（非空者）相同且含 ` - ` → 拆成标题/艺人（按已知艺人判断顺序，未知时取「标题 - 艺人」），专辑置空；
+/// - 艺人栏等于标题栏 → 艺人取已知艺人（无则置空）；专辑等于标题 → 置空。
+pub fn normalize_lrclib_metadata(
+    track: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    known: &LrclibContext,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let clean = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    let (mut track, mut artist, mut album) = (clean(track), clean(artist), clean(album));
+    let same = |a: &Option<String>, b: &Option<String>| match (a, b) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    };
+    let eq = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    if let Some(combined) = track.clone().filter(|t| t.contains(" - ") && (same(&track, &artist) || artist.is_none())) {
+        if let Some((left, right)) = combined.split_once(" - ") {
+            let (left, right) = (left.trim().to_owned(), right.trim().to_owned());
+            let artist_first = known.artist.as_deref().is_some_and(|a| eq(a, &left))
+                || known.title.as_deref().is_some_and(|t| eq(t, &right));
+            let (t, a) = if artist_first { (right, left) } else { (left, right) };
+            if same(&album, &Some(combined.clone())) {
+                album = None;
+            }
+            track = Some(t);
+            artist = Some(a);
+        }
+    }
+    if same(&artist, &track) {
+        artist = known.artist.clone();
+    }
+    if same(&album, &track) {
+        album = None;
+    }
+    (track, artist, album)
+}
+
+fn provider_lyric_to_dto(lyric: &super::remote_lyrics::ProviderLyric) -> LyricDto {
+    let mut dto = match lyric.text() {
+        Some((text, "lrc")) => parse_lrc_lyrics(text),
+        Some((text, _)) => parse_plain_text_lyrics(text),
+        None => LyricDto::empty(),
+    };
+    if dto.metadata.title.is_none() {
+        dto.metadata.title = lyric.track_name.clone();
+    }
+    if dto.metadata.artist.is_none() {
+        dto.metadata.artist = lyric.artist_name.clone();
+    }
+    if dto.metadata.album.is_none() {
+        dto.metadata.album = lyric.album_name.clone();
+    }
+    dto
+}
+
+fn provider_lyric_to_remote_info(lyric: super::remote_lyrics::ProviderLyric) -> RemoteLyricInfoDto {
+    let lyrics = Some(provider_lyric_to_dto(&lyric));
+    RemoteLyricInfoDto {
+        id: lyric.id,
+        provider_name: lyric.provider_name.unwrap_or_default(),
+        lyrics,
+    }
+}
+
+/// 按 LyricId 取歌词原文：插件 id（`{pluginId}~x`）走插件；`lrclib-{n}` 走内置 LRCLIB `/api/get/{n}`。
+async fn fetch_remote_lyric(state: &AppState, lyric_id: &str) -> Result<super::remote_lyrics::ProviderLyric, AppError> {
+    if super::remote_lyrics::split_lyric_id(lyric_id).is_some() {
+        return super::remote_lyrics::fetch(state, lyric_id).await;
+    }
+    let Some(n) = lyric_id.strip_prefix("lrclib-").filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) else {
+        return Err(AppError::unprocessable("LyricId is invalid"));
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("FBZ/0.1 (https://github.com/fbz)")
+        .build()
+        .map_err(|err| AppError::internal(err.to_string()))?;
+    let response = client
+        .get(format!("https://lrclib.net/api/get/{n}"))
+        .send()
+        .await
+        .map_err(|err| AppError::conflict(format!("lrclib request failed: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::not_found("lyrics not found"));
+    }
+    let mut lyric: super::remote_lyrics::ProviderLyric = response.json().await.map_err(|err| AppError::conflict(format!("lrclib response invalid: {err}")))?;
+    lyric.id = lyric_id.to_owned();
+    lyric.provider_name = Some("LrcLib".to_owned());
+    let (title, artist, album) = normalize_lrclib_metadata(
+        lyric.track_name.take(),
+        lyric.artist_name.take(),
+        lyric.album_name.take(),
+        &LrclibContext::default(),
+    );
+    (lyric.track_name, lyric.artist_name, lyric.album_name) = (title, artist, album);
+    if lyric.text().is_none() {
+        return Err(AppError::not_found("lyrics not found"));
+    }
+    Ok(lyric)
+}
+
+/// `GET /Providers/Lyrics/{lyricId}`（JF）：取远程歌词但不保存。
+pub async fn remote_lyric_by_id(
+    State(state): State<AppState>,
+    AxumPath(lyric_id): AxumPath<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<LyricDto>, AppError> {
+    authenticate_request_user(&state, &headers, &uri).await?;
+    let lyric = fetch_remote_lyric(&state, lyric_id.trim()).await?;
+    Ok(Json(provider_lyric_to_dto(&lyric)))
+}
+
+/// `POST /Audio/{id}/RemoteSearch/Lyrics/{lyricId}`（JF）：下载远程歌词并写 sidecar（同步 → .lrc，纯文本 → .txt），返回解析结果。
+pub async fn download_remote_lyrics(
+    State(state): State<AppState>,
+    AxumPath((item_id, lyric_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Json<LyricDto>, AppError> {
+    let source = writable_lyrics_source(&state, &item_id, &headers, &uri).await?;
+    let lyric = fetch_remote_lyric(&state, lyric_id.trim()).await?;
+    let Some((text, extension)) = lyric.text() else {
+        return Err(AppError::not_found("lyrics not found"));
+    };
+    for candidate in lyric_sidecar_candidates(Path::new(source.path.trim())) {
+        let _ = tokio::fs::remove_file(&candidate).await;
+    }
+    let mut target = PathBuf::from(source.path.trim());
+    target.set_extension(extension);
+    tokio::fs::write(&target, text.as_bytes())
+        .await
+        .map_err(|err| AppError::internal(format!("failed to write lyrics sidecar: {err}")))?;
+    Ok(Json(provider_lyric_to_dto(&lyric)))
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct UploadLyricsQuery {
+    #[serde(default, alias = "fileName", alias = "filename")]
+    pub file_name: Option<String>,
+}
+
+/// 上传目标扩展名：仅 lrc / elrc / txt，默认 lrc。
+fn upload_extension(file_name: Option<&str>) -> &'static str {
+    let ext = file_name
+        .and_then(|n| n.rsplit_once('.').map(|(_, e)| e.trim().to_ascii_lowercase()))
+        .unwrap_or_default();
+    match ext.as_str() {
+        "txt" => "txt",
+        "elrc" => "elrc",
+        _ => "lrc",
+    }
+}
+
+async fn writable_lyrics_source(
+    state: &AppState,
+    item_id: &str,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<PlaybackMediaSourceRecord, AppError> {
+    let user = ensure_lyrics_item_visible(state, item_id, &LyricsQuery::default(), headers, uri).await?;
+    if !user.can_manage_server() {
+        return Err(AppError::forbidden("lyric management permission required"));
+    }
+    let Some(database) = state.database() else {
+        return Err(AppError::internal("database is not configured"));
+    };
+    let source = MediaRepository::new(database.clone())
+        .find_playback_media_source(user.id, item_id, None)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get lyrics source: {err}")))?
+        .ok_or_else(|| AppError::not_found("item not found"))?;
+    if source.is_strm {
+        return Err(AppError::unprocessable("lyrics sidecar is not supported for STRM items"));
+    }
+    Ok(source)
+}
+
+/// `POST /Audio/{id}/Lyrics?fileName=` — 正文为歌词文本，写入同目录 sidecar 并返回解析结果（JF 10.9）。
+pub async fn upload_lyrics(
+    State(state): State<AppState>,
+    AxumPath(item_id): AxumPath<String>,
+    Query(query): Query<UploadLyricsQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<Json<LyricDto>, AppError> {
+    if body.is_empty() {
+        return Err(AppError::unprocessable("lyrics body is empty"));
+    }
+    if body.len() as u64 > MAX_LYRICS_SIDECAR_BYTES {
+        return Err(AppError::unprocessable("lyrics body is too large"));
+    }
+    let source = writable_lyrics_source(&state, &item_id, &headers, &uri).await?;
+    let extension = upload_extension(query.file_name.as_deref());
+    let contents = String::from_utf8_lossy(&body).into_owned();
+    // 先清掉其它扩展名的旧 sidecar，避免读取优先级让新上传不生效。
+    for candidate in lyric_sidecar_candidates(Path::new(source.path.trim())) {
+        let _ = tokio::fs::remove_file(&candidate).await;
+    }
+    let mut target = PathBuf::from(source.path.trim());
+    target.set_extension(extension);
+    tokio::fs::write(&target, contents.as_bytes())
+        .await
+        .map_err(|err| AppError::internal(format!("failed to write lyrics sidecar: {err}")))?;
+    Ok(Json(parse_lyrics_sidecar(&contents, extension)))
+}
+
+/// `DELETE /Audio/{id}/Lyrics` — 删除 sidecar 歌词，204。
+pub async fn delete_lyrics(
+    State(state): State<AppState>,
+    AxumPath(item_id): AxumPath<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<StatusCode, AppError> {
+    let source = writable_lyrics_source(&state, &item_id, &headers, &uri).await?;
+    let mut removed = false;
+    for candidate in lyric_sidecar_candidates(Path::new(source.path.trim())) {
+        if tokio::fs::remove_file(&candidate).await.is_ok() {
+            removed = true;
+        }
+    }
+    if removed { Ok(StatusCode::NO_CONTENT) } else { Err(AppError::not_found("lyrics not found")) }
 }
 
 async fn ensure_lyrics_item_visible(
@@ -501,6 +759,35 @@ mod tests {
     }
 
     #[test]
+    fn lrclib_metadata_is_normalized() {
+        let s = |v: &str| Some(v.to_owned());
+        let combined = s("Bohemian Rhapsody - Queen");
+        let none = LrclibContext::default();
+        assert_eq!(
+            normalize_lrclib_metadata(combined.clone(), combined.clone(), combined.clone(), &none),
+            (s("Bohemian Rhapsody"), s("Queen"), None)
+        );
+        let known = LrclibContext { title: s("Bohemian Rhapsody"), artist: s("Queen") };
+        let reversed = s("Queen - Bohemian Rhapsody");
+        assert_eq!(
+            normalize_lrclib_metadata(reversed.clone(), reversed.clone(), reversed, &known),
+            (s("Bohemian Rhapsody"), s("Queen"), None)
+        );
+        assert_eq!(
+            normalize_lrclib_metadata(s("Song"), s("Song"), s("Song"), &known),
+            (s("Song"), s("Queen"), None)
+        );
+        assert_eq!(
+            normalize_lrclib_metadata(s("Song"), s("Artist"), s("Album"), &known),
+            (s("Song"), s("Artist"), s("Album"))
+        );
+        assert_eq!(
+            normalize_lrclib_metadata(s("AC - DC Song"), s("Real Artist"), None, &none),
+            (s("AC - DC Song"), s("Real Artist"), None)
+        );
+    }
+
+    #[test]
     fn remote_lyrics_search_query_accepts_common_parameters() {
         let query = serde_json::from_value::<RemoteLyricsSearchQuery>(json!({
             "UserId": "user-1",
@@ -604,5 +891,18 @@ Second line"#,
                 PathBuf::from("D:/Music/Artist/Song.txt"),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::upload_extension;
+
+    #[test]
+    fn upload_extension_defaults_to_lrc() {
+        assert_eq!(upload_extension(None), "lrc");
+        assert_eq!(upload_extension(Some("a.TXT")), "txt");
+        assert_eq!(upload_extension(Some("a.elrc")), "elrc");
+        assert_eq!(upload_extension(Some("../../etc/passwd")), "lrc");
     }
 }

@@ -8,13 +8,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    db::DbPool,
     auth::{
         repository::{AuthRepository, SessionCapabilitiesInput, SessionInfoRecord},
         service::{AuthService, AuthenticatedUser},
         token::issue_access_token,
     },
     compat::emby::auth::{EmbyCredential, parse_auth_context},
-    compat::emby::dto::{BaseItemDto, NameIdPairDto, QueryResultDto, SessionInfoDto},
+    compat::emby::dto::{
+        BaseItemDto, NameIdPairDto, QueryResultDto, SessionInfoDto, SessionPlayStateDto,
+    },
     compat::emby::payload::parse_emby_body,
     error::AppError,
     state::AppState,
@@ -333,6 +336,13 @@ pub async fn list_sessions(
     }
     .map_err(|err| AppError::internal(format!("failed to list sessions: {err}")))?;
 
+    let now_playing = load_active_now_playing(database)
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = err.message(), "sessions list: now playing enrichment skipped");
+            std::collections::HashMap::new()
+        });
+
     let sessions = records
         .into_iter()
         .filter(|record| {
@@ -343,7 +353,12 @@ pub async fn list_sessions(
         })
         .map(|record| {
             let connected = state.session_hub().is_connected(&record.id);
-            session_record_to_dto(record, connected)
+            let (item, play_state) = now_playing
+                .get(&record.user_id)
+                .map(now_playing_to_item_and_state)
+                .map(|(i, s)| (Some(i), Some(s)))
+                .unwrap_or((None, None));
+            session_record_to_dto_with_now_playing(record, connected, item, play_state)
         })
         .collect();
 
@@ -370,7 +385,20 @@ pub async fn session_by_id(
         .ok_or_else(|| AppError::not_found("session not found"))?;
 
     let connected = state.session_hub().is_connected(&session.id);
-    Ok(Json(session_record_to_dto(session, connected)))
+    let now_playing = load_active_now_playing(database)
+        .await
+        .unwrap_or_default();
+    let (item, play_state) = now_playing
+        .get(&session.user_id)
+        .map(now_playing_to_item_and_state)
+        .map(|(i, s)| (Some(i), Some(s)))
+        .unwrap_or((None, None));
+    Ok(Json(session_record_to_dto_with_now_playing(
+        session,
+        connected,
+        item,
+        play_state,
+    )))
 }
 
 pub async fn logout(
@@ -761,6 +789,15 @@ fn session_record_to_dto(
     record: SessionInfoRecord,
     supports_remote_control: bool,
 ) -> SessionInfoDto {
+    session_record_to_dto_with_now_playing(record, supports_remote_control, None, None)
+}
+
+fn session_record_to_dto_with_now_playing(
+    record: SessionInfoRecord,
+    supports_remote_control: bool,
+    now_playing_item: Option<serde_json::Value>,
+    play_state: Option<SessionPlayStateDto>,
+) -> SessionInfoDto {
     SessionInfoDto {
         id: record.id,
         user_id: record.user_id,
@@ -771,7 +808,151 @@ fn session_record_to_dto(
         application_version: record.application_version,
         is_active: record.is_active,
         supports_remote_control,
+        last_activity_date: record.last_activity_date,
+        remote_end_point: record.remote_end_point,
+        server_id: "fbz-api".to_owned(),
+        now_playing_item,
+        play_state,
     }
+}
+
+fn emby_play_method_label(stored: &str) -> String {
+    match stored {
+        "direct_stream" => "DirectStream".to_owned(),
+        "transcode" => "Transcode".to_owned(),
+        "strm_redirect" => "DirectStream".to_owned(),
+        _ => "DirectPlay".to_owned(),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ActiveNowPlaying {
+    item_id: String,
+    item_name: String,
+    item_type: String,
+    runtime_ticks: i64,
+    position_ticks: i64,
+    is_paused: bool,
+    play_method: String,
+}
+
+async fn load_active_now_playing(
+    pool: &DbPool,
+) -> Result<std::collections::HashMap<String, ActiveNowPlaying>, AppError> {
+    let rows = sqlx::query(
+        r#"
+        select distinct on (u.public_id)
+            u.public_id::text as user_id,
+            mi.public_id::text as item_id,
+            mi.title as item_name,
+            mi.item_type,
+            coalesce(mi.runtime_ticks, mf.duration_ticks, 0) as runtime_ticks,
+            ps.position_ticks,
+            ps.is_paused,
+            ps.play_method
+        from playback_sessions ps
+        join users u on u.id = ps.user_id
+        join media_items mi on mi.id = ps.media_item_id
+        left join media_files mf on mf.id = ps.media_file_id
+        where ps.stopped_at is null
+          and ps.last_progress_at > now() - interval '90 seconds'
+        order by u.public_id, ps.last_progress_at desc, ps.id desc
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|err| AppError::internal(format!("failed to list now playing: {err}")))?;
+
+    use sqlx::Row as _;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let user_id: String = row.try_get("user_id").map_err(|err| {
+            AppError::internal(format!("failed to read now playing user_id: {err}"))
+        })?;
+        map.insert(
+            user_id,
+            ActiveNowPlaying {
+                item_id: row.try_get("item_id").map_err(|err| {
+                    AppError::internal(format!("failed to read now playing item_id: {err}"))
+                })?,
+                item_name: row.try_get("item_name").map_err(|err| {
+                    AppError::internal(format!("failed to read now playing item_name: {err}"))
+                })?,
+                item_type: row.try_get("item_type").map_err(|err| {
+                    AppError::internal(format!("failed to read now playing item_type: {err}"))
+                })?,
+                runtime_ticks: row.try_get("runtime_ticks").map_err(|err| {
+                    AppError::internal(format!("failed to read now playing runtime: {err}"))
+                })?,
+                position_ticks: row.try_get("position_ticks").map_err(|err| {
+                    AppError::internal(format!("failed to read now playing position: {err}"))
+                })?,
+                is_paused: row.try_get("is_paused").map_err(|err| {
+                    AppError::internal(format!("failed to read now playing paused: {err}"))
+                })?,
+                play_method: row.try_get("play_method").map_err(|err| {
+                    AppError::internal(format!("failed to read now playing method: {err}"))
+                })?,
+            },
+        );
+    }
+    Ok(map)
+}
+
+fn emby_item_type_label(stored: &str) -> String {
+    match stored.to_ascii_lowercase().as_str() {
+        "movie" => "Movie".to_owned(),
+        "episode" => "Episode".to_owned(),
+        "series" => "Series".to_owned(),
+        "season" => "Season".to_owned(),
+        "trailer" => "Trailer".to_owned(),
+        "video" => "Video".to_owned(),
+        "audio" | "track" => "Audio".to_owned(),
+        "album" => "MusicAlbum".to_owned(),
+        "artist" => "MusicArtist".to_owned(),
+        "audiobook" => "AudioBook".to_owned(),
+        other if !other.is_empty() => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => "Video".to_owned(),
+            }
+        }
+        _ => "Video".to_owned(),
+    }
+}
+
+fn now_playing_to_item_and_state(
+    np: &ActiveNowPlaying,
+) -> (serde_json::Value, SessionPlayStateDto) {
+    let item_type = emby_item_type_label(&np.item_type);
+    let media_type = if item_type == "Audio"
+        || item_type == "MusicAlbum"
+        || item_type == "MusicArtist"
+        || item_type == "AudioBook"
+    {
+        "Audio"
+    } else {
+        "Video"
+    };
+    let item = serde_json::json!({
+        "Id": np.item_id,
+        "Name": np.item_name,
+        "Type": item_type,
+        "MediaType": media_type,
+        "RunTimeTicks": np.runtime_ticks,
+        "ServerId": "fbz-api",
+    });
+    let state = SessionPlayStateDto {
+        position_ticks: np.position_ticks,
+        can_seek: true,
+        is_paused: np.is_paused,
+        is_muted: false,
+        volume_level: 100,
+        play_method: emby_play_method_label(&np.play_method),
+        repeat_mode: "RepeatNone".to_owned(),
+    };
+    (item, state)
 }
 
 async fn persist_capabilities(
@@ -1286,6 +1467,8 @@ mod tests {
                 device_name: Some("Apple TV".to_owned()),
                 application_version: Some("8.0".to_owned()),
                 is_active: true,
+                last_activity_date: Some("2026-10-15 12:00:00+00".to_owned()),
+                remote_end_point: Some("192.168.1.10".to_owned()),
             },
             true,
         );
@@ -1299,6 +1482,46 @@ mod tests {
         assert_eq!(dto.application_version.as_deref(), Some("8.0"));
         assert!(dto.is_active);
         assert!(dto.supports_remote_control);
+        assert_eq!(
+            dto.last_activity_date.as_deref(),
+            Some("2026-10-15 12:00:00+00")
+        );
+        assert_eq!(dto.remote_end_point.as_deref(), Some("192.168.1.10"));
+        assert_eq!(dto.server_id, "fbz-api");
+        assert!(dto.now_playing_item.is_none());
+        assert!(dto.play_state.is_none());
+    }
+
+    #[test]
+    fn session_dto_includes_now_playing_when_provided() {
+        let record = SessionInfoRecord {
+            id: "session-2".to_owned(),
+            user_id: "user-2".to_owned(),
+            user_name: "bob".to_owned(),
+            client: Some("FBZ Web".to_owned()),
+            device_id: Some("web-1".to_owned()),
+            device_name: Some("Chrome".to_owned()),
+            application_version: Some("1.0".to_owned()),
+            is_active: true,
+            last_activity_date: None,
+            remote_end_point: None,
+        };
+        let np = ActiveNowPlaying {
+            item_id: "item-9".to_owned(),
+            item_name: "Demo".to_owned(),
+            item_type: "Movie".to_owned(),
+            runtime_ticks: 3_600_000_0000,
+            position_ticks: 90_000_0000,
+            is_paused: true,
+            play_method: "direct_play".to_owned(),
+        };
+        let (item, state) = now_playing_to_item_and_state(&np);
+        let dto = session_record_to_dto_with_now_playing(record, false, Some(item), Some(state));
+        assert_eq!(dto.now_playing_item.as_ref().unwrap()["Id"], "item-9");
+        assert_eq!(dto.now_playing_item.as_ref().unwrap()["Name"], "Demo");
+        assert_eq!(dto.play_state.as_ref().unwrap().position_ticks, 90_000_0000);
+        assert!(dto.play_state.as_ref().unwrap().is_paused);
+        assert_eq!(dto.play_state.as_ref().unwrap().play_method, "DirectPlay");
     }
 
     #[test]

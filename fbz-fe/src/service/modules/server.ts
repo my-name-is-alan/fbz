@@ -25,7 +25,12 @@ export interface ServerItem {
   RunTimeTicks?: number;
   ImageTags?: Record<string, string>;
   ProductionYear?: number;
-  UserData?: { PlaybackPositionTicks?: number; Played?: boolean };
+  UserData?: { PlaybackPositionTicks?: number; Played?: boolean; IsFavorite?: boolean };
+  Chapters?: {
+    StartPositionTicks: number;
+    Name?: string;
+    MarkerType?: string;
+  }[];
 }
 export interface ServerLibrary {
   Id: string;
@@ -216,7 +221,7 @@ export async function enrich(items: ServerItem[]) {
 }
 export async function itemDetail(id: string) {
   const item = await serverRequest<ServerItem>(
-    `/emby/Users/${readSession()?.userId}/Items/${encodeURIComponent(id)}?Fields=Overview,Genres,MediaSources,UserData&EnableImages=true&EnableImageTypes=Primary,Backdrop`,
+    `/emby/Users/${readSession()?.userId}/Items/${encodeURIComponent(id)}?Fields=Overview,Genres,MediaSources,UserData,Chapters&EnableImages=true&EnableImageTypes=Primary,Backdrop`,
   );
   return (await enrich([item]))[0]!;
 }
@@ -229,17 +234,43 @@ export async function seriesEpisodes(id: string) {
     items.push(...(await enrich(result.Items.slice(i, i + 100))));
   return { Items: items };
 }
+export interface PlaybackMediaSourceOption {
+  id: string;
+  label: string;
+}
+
+function mediaSourceLabel(
+  source: { Id: string; Name?: string; Container?: string },
+  index: number,
+): string {
+  const parts = [source.Name?.trim(), source.Container?.toUpperCase()].filter(Boolean);
+  if (parts.length) return parts.join(" · ");
+  return `版本 ${index + 1}`;
+}
+
 export async function preparePlayback(item: ServerItem, mediaSourceId?: string) {
   const detail = await itemDetail(item.Id);
   const info = await serverRequest<{
     PlaySessionId: string;
     MediaSources: {
       Id: string;
+      Name?: string;
       DirectStreamUrl?: string;
       RunTimeTicks?: number;
       Container?: string;
       Size?: number;
       IsRemote?: boolean;
+      MediaStreams?: {
+        Index?: number;
+        Type?: string;
+        Codec?: string;
+        Language?: string;
+        DisplayTitle?: string;
+        Title?: string;
+        IsExternal?: boolean;
+        DeliveryMethod?: string;
+        DeliveryUrl?: string;
+      }[];
     }[];
   }>(`/emby/Items/${encodeURIComponent(item.Id)}/PlaybackInfo`, {
     UserId: readSession()?.userId,
@@ -248,9 +279,14 @@ export async function preparePlayback(item: ServerItem, mediaSourceId?: string) 
     EnableDirectStream: true,
     EnableTranscoding: false,
   });
+  const playable = info.MediaSources.filter((s) => Boolean(s.DirectStreamUrl));
+  const mediaSources: PlaybackMediaSourceOption[] = playable.map((s, i) => ({
+    id: s.Id,
+    label: mediaSourceLabel(s, i),
+  }));
   const source = mediaSourceId
-    ? info.MediaSources.find((s) => s.Id === mediaSourceId)
-    : info.MediaSources[0];
+    ? (playable.find((s) => s.Id === mediaSourceId) ?? playable[0])
+    : playable[0];
   if (!source?.DirectStreamUrl) throw new Error("该条目暂无可播放媒体源");
   const uri = new URL(source.DirectStreamUrl, `${serverAddress()}/`);
   if (!["http:", "https:"].includes(uri.protocol)) throw new Error("不支持的媒体地址");
@@ -261,6 +297,46 @@ export async function preparePlayback(item: ServerItem, mediaSourceId?: string) 
     proxy.searchParams.set("mediaSourceId", source.Id);
     proxy.searchParams.set("api_key", readSession()?.token ?? "");
   }
+  const chapters = (detail.Chapters ?? [])
+    .filter((c) => Number.isFinite(c.StartPositionTicks))
+    .map((c, index) => ({
+      id: `ch-${index}-${c.MarkerType ?? "Chapter"}`,
+      title: c.Name || c.MarkerType || `章节 ${index + 1}`,
+      startTime: c.StartPositionTicks / 1e7,
+      duration: 0,
+      markerType: c.MarkerType,
+    }));
+
+  // 外挂字幕：PlaybackInfo MediaStreams IsExternal + DeliveryUrl → C 端挂轨（非 demux）。
+  const base = serverAddress().replace(/\/$/, "");
+  const subtitleTracks = (source.MediaStreams ?? [])
+    .filter(
+      (s) =>
+        (s.Type ?? "").toLowerCase() === "subtitle" &&
+        Boolean(s.IsExternal) &&
+        Boolean(s.DeliveryUrl?.trim()),
+    )
+    .map((s, index) => {
+      const raw = s.DeliveryUrl!.trim();
+      const deliveryUrl =
+        raw.startsWith("http://") || raw.startsWith("https://")
+          ? raw
+          : `${base}${raw.startsWith("/") ? "" : "/"}${raw}`;
+      const label =
+        s.DisplayTitle?.trim() ||
+        s.Title?.trim() ||
+        [s.Language, s.Codec?.toUpperCase(), "外挂"].filter(Boolean).join(" · ") ||
+        `外挂字幕 ${index + 1}`;
+      return {
+        id: `ext-${s.Index ?? index}`,
+        label,
+        language: s.Language ?? undefined,
+        deliveryUrl,
+        codec: s.Codec ?? undefined,
+        isExternal: true,
+      };
+    });
+
   return {
     type: (item.Type === "Episode" ? "episode" : "movie") as "movie" | "episode",
     id: item.Id,
@@ -272,6 +348,9 @@ export async function preparePlayback(item: ServerItem, mediaSourceId?: string) 
         ? `第 ${item.ParentIndexNumber ?? 1} 季 · 第 ${item.IndexNumber ?? "—"} 集`
         : undefined,
     duration: (source.RunTimeTicks || detail.RunTimeTicks || 0) / 1e7,
+    mediaSources,
+    chapters: chapters.length ? chapters : undefined,
+    subtitleTracks: subtitleTracks.length ? subtitleTracks : undefined,
     source: {
       uri: uri.href,
       size: source.Size,
@@ -301,8 +380,9 @@ export function mediaCard(item: ServerItem): import("@/types/media.ts").Continue
         ? `第 ${item.ParentIndexNumber ?? 1} 季 · 第 ${item.IndexNumber ?? "—"} 集`
         : [item.ProductionYear, type, item.Genres?.[0]].filter(Boolean).join(" · "),
     serverItem: item,
+    isPlayed: item.UserData?.Played ?? false,
     progress:
-      item.UserData?.PlaybackPositionTicks && item.RunTimeTicks
+      !item.UserData?.Played && item.UserData?.PlaybackPositionTicks && item.RunTimeTicks
         ? Math.min(100, (item.UserData.PlaybackPositionTicks / item.RunTimeTicks) * 100)
         : undefined,
   };

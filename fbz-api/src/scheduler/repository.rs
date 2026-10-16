@@ -376,6 +376,10 @@ pub struct QueueStatsRollupRecord {
 }
 
 impl SchedulerRepository {
+    pub fn pool(&self) -> &DbPool {
+        &self.pool
+    }
+
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }

@@ -5,6 +5,16 @@
 //! id rather than searching. First version normalizes the imdb id to the
 //! canonical `tt` prefix and reserves a point for future rating/certification
 //! enrichment from a compliant data source.
+//!
+//! # Migration freeze (P1)
+//!
+//! Official installable packages live under `plugins/*-provider/` and speak
+//! `metadata.provider.query`. **Do not deepen** this built-in client (no new
+//! upstream endpoints, SDK deps, or core-only API-key paths). Transition: core
+//! may keep running; cutover deletes this module after the official package
+//! carries the real upstream calls. See `plugins/README.md` and
+//! `docs/plans/official-metadata-providers-migration.md`.
+
 
 use async_trait::async_trait;
 

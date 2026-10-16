@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useLibraryStore } from "@/stores/library.ts";
 import { useAuthStore } from "@/stores/auth.ts";
+import { searchHints, type SearchResultItem } from "@/service/modules/search.ts";
 
 const emit = defineEmits<{ openDrawer: [] }>();
 
@@ -10,12 +11,62 @@ const { libraries } = storeToRefs(libraryStore);
 const accountMenuOpen = ref(false);
 const router = useRouter();
 
-// 桌面端顶部内联搜索：回车跳 /search?q=；空关键词跳 /search 引导态。
+// 桌面端顶部内联搜索：回车跳 /search?q=；输入防抖出建议；空关键词跳 /search 引导态。
 const searchTerm = ref("");
+const suggestions = ref<SearchResultItem[]>([]);
+const suggestOpen = ref(false);
+const suggestLoading = ref(false);
+let suggestController: AbortController | undefined;
+
+const loadSuggestions = debounce(async (term: string) => {
+  const trimmed = term.trim();
+  if (!trimmed) {
+    suggestions.value = [];
+    suggestOpen.value = false;
+    return;
+  }
+  suggestController?.abort();
+  const controller = new AbortController();
+  suggestController = controller;
+  suggestLoading.value = true;
+  try {
+    const items = await searchHints(trimmed, {
+      userId: authStore.userId,
+      limit: 8,
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return;
+    suggestions.value = items;
+    suggestOpen.value = items.length > 0 || trimmed.length > 0;
+  } catch (error) {
+    if ((error as { code?: string })?.code === "ERR_CANCELED") return;
+    suggestions.value = [];
+  } finally {
+    if (!controller.signal.aborted) suggestLoading.value = false;
+  }
+}, 220);
+
+function onSearchInput() {
+  void loadSuggestions(searchTerm.value);
+}
+
 function submitSearch() {
+  loadSuggestions.cancel();
+  suggestOpen.value = false;
   const q = searchTerm.value.trim();
   void router.push({ name: "search", query: q ? { q } : {} });
 }
+
+function pickSuggestion(item: SearchResultItem) {
+  suggestOpen.value = false;
+  searchTerm.value = item.title;
+  void router.push(item.to);
+}
+
+function closeSuggestions() {
+  suggestOpen.value = false;
+}
+
 // 手机端搜索图标：直接进搜索页（输入框在页内）。
 function goSearch() {
   void router.push({ name: "search" });
@@ -53,6 +104,7 @@ onBeforeUnmount(() => window.removeEventListener("scroll", onScroll));
 useEventListener(window, "click", (event) => {
   const target = event.target as HTMLElement | null;
   if (!target?.closest(".account-menu")) accountMenuOpen.value = false;
+  if (!target?.closest(".header-search")) closeSuggestions();
 });
 
 const fmt = new Intl.NumberFormat("en-US");
@@ -66,8 +118,9 @@ function logout() {
 }
 
 useEventListener(window, "keydown", (e) => {
-  if (e.key === "Escape" && accountMenuOpen.value) {
-    closeAccountMenu();
+  if (e.key === "Escape") {
+    if (accountMenuOpen.value) closeAccountMenu();
+    if (suggestOpen.value) closeSuggestions();
   }
 });
 </script>
@@ -109,6 +162,8 @@ useEventListener(window, "keydown", (e) => {
       </div>
 
       <RouterLink to="/" class="nav-item">最近添加</RouterLink>
+      <RouterLink to="/playlists" class="nav-item" active-class="active">播放列表</RouterLink>
+      <RouterLink to="/collections" class="nav-item" active-class="active">合集</RouterLink>
     </nav>
 
     <form class="header-search" role="search" @submit.prevent="submitSearch">
@@ -121,7 +176,37 @@ useEventListener(window, "keydown", (e) => {
         placeholder="搜索影片、人物..."
         autocomplete="off"
         aria-label="搜索"
+        aria-autocomplete="list"
+        :aria-expanded="suggestOpen"
+        @input="onSearchInput"
+        @focus="onSearchInput"
       />
+      <div v-if="suggestOpen" class="search-suggest" role="listbox" aria-label="搜索建议">
+        <p v-if="suggestLoading" class="suggest-hint">搜索中…</p>
+        <p v-else-if="!suggestions.length" class="suggest-hint">回车查看全部结果</p>
+        <button
+          v-for="item in suggestions"
+          :key="`${item.kind}-${item.id}`"
+          type="button"
+          class="suggest-item"
+          role="option"
+          @mousedown.prevent="pickSuggestion(item)"
+        >
+          <img v-if="item.poster" :src="item.poster" alt="" class="suggest-thumb" />
+          <span class="suggest-text">
+            <strong>{{ item.title }}</strong>
+            <small>{{ item.meta }}</small>
+          </span>
+        </button>
+        <button
+          v-if="searchTerm.trim()"
+          type="button"
+          class="suggest-more"
+          @mousedown.prevent="submitSearch"
+        >
+          查看「{{ searchTerm.trim() }}」的全部结果
+        </button>
+      </div>
     </form>
     <button class="icon-search-btn" aria-label="搜索" @click="goSearch">⌕</button>
     <div class="account-menu">
@@ -333,6 +418,7 @@ useEventListener(window, "keydown", (e) => {
 }
 
 .header-search {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -522,5 +608,84 @@ useEventListener(window, "keydown", (e) => {
   .icon-search-btn {
     color: #ffffff;
   }
+}
+
+.search-suggest {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: min(420px, 60vh);
+  overflow: auto;
+  border-radius: var(--fbz-radius-control);
+  border: 1px solid var(--fbz-color-line);
+  background: var(--fbz-color-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  padding: 6px;
+}
+
+.suggest-hint {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--fbz-color-text-muted);
+  font-size: var(--fbz-font-size-sm);
+}
+
+.suggest-item,
+.suggest-more {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.suggest-item:hover,
+.suggest-more:hover {
+  background: var(--fbz-color-panel-strong);
+}
+
+.suggest-thumb {
+  width: 32px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--fbz-color-panel-strong);
+  flex-shrink: 0;
+}
+
+.suggest-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+
+  strong {
+    font-size: var(--fbz-font-size-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  small {
+    color: var(--fbz-color-text-muted);
+    font-size: 12px;
+  }
+}
+
+.suggest-more {
+  margin-top: 2px;
+  border-top: 1px solid var(--fbz-color-line-soft);
+  border-radius: 0 0 8px 8px;
+  color: var(--fbz-color-brand-500);
+  font-size: var(--fbz-font-size-sm);
+  font-weight: 600;
 }
 </style>

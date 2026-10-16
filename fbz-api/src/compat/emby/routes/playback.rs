@@ -17,15 +17,25 @@ use tracing::warn;
 use crate::{
     auth::{service::AuthenticatedUser, token::issue_access_token},
     compat::emby::dto::{
-        MediaSourceDto, MediaStreamDto, PlaybackInfoRequestDto, PlaybackInfoResponseDto,
-        PlaybackProgressDto, deserialize_string_list,
+        ChapterInfoDto, MediaSourceDto, MediaStreamDto, PlaybackInfoRequestDto,
+        PlaybackInfoResponseDto, PlaybackProgressDto, deserialize_string_list,
     },
     compat::emby::payload::parse_emby_body,
     db::DbPool,
     error::AppError,
-    media::repository::{
-        MediaRepository, PlaybackMediaSourceRecord, PlaybackMediaStreamRecord, PlaybackReportInput,
+    library::repository::LibraryRepository,
+    playback::play_method::{
+        MediaCapabilities, PlayMethod, decide_play_method,
+        device_profile_summary_from_playback_hints, merge_request_max_streaming_bitrate,
     },
+    media::{
+        container::normalize_media_source_container,
+        repository::{
+            MediaRepository, PlaybackMediaSourceRecord, PlaybackMediaStreamRecord,
+            PlaybackReportInput,
+        },
+    },
+    notifications::system::enqueue_event_notification,
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
     state::AppState,
     transcode::repository::{CreateTranscodeSessionInput, TranscodeRepository},
@@ -38,6 +48,7 @@ use super::access::{
 
 const PLAYBACK_STARTED_EVENT: &str = "playback.started";
 const PLAYBACK_STOPPED_EVENT: &str = "playback.stopped";
+/// PlaybackInfo / 进度上报保持瘦：读库组装 DTO，转码只入队；探针/刮削/FFmpeg 在 worker。
 const MAX_BITRATE_TEST_SIZE: usize = 64 * 1024 * 1024;
 const MAX_PLAY_SESSION_ID_LEN: usize = 256;
 
@@ -493,37 +504,38 @@ async fn playback_info_for_user(
     let repository = MediaRepository::new(database.clone());
     let requested_media_file_id = media_source_id_as_i64(request.media_source_id.as_deref());
 
-    // 无显式 MediaSourceId 时返回条目的全部版本（多文件条目 → 多 MediaSource，
-    // 客户端据此渲染版本切换）；显式指定时只返回该版本。转码只为首选版本入队，
-    // 客户端切换版本会带 MediaSourceId 重新请求 PlaybackInfo。
-    let media_file_ids: Vec<Option<i64>> = match requested_media_file_id {
-        Some(id) => vec![Some(id)],
-        None => {
-            let ids = repository
-                .list_playback_media_file_ids(user.id, &item_id)
-                .await
-                .map_err(|err| {
-                    AppError::internal(format!("failed to list playback sources: {err}"))
-                })?;
-            if ids.is_empty() {
-                vec![None]
-            } else {
-                ids.into_iter().map(Some).collect()
-            }
-        }
-    };
+    // 瘦 API：只读已落库的 MediaSource/streams；转码仅入队（worker 执行），不在此跑
+    // ffprobe/刮削。无显式 MediaSourceId 时批量返回多版本（上限见 MAX_PLAYBACK_MEDIA_SOURCES），
+    // 显式指定时只返回该版本。转码只为首选版本入队。
+    let source_records = repository
+        .list_playback_media_sources(user.id, &item_id, requested_media_file_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to list playback sources: {err}")))?;
 
+    if source_records.is_empty() {
+        return Err(AppError::not_found("playback source not found"));
+    }
+
+    // Intro/Credits/Chapter markers → MediaSource.Chapters（与 Items 详情同源 media_markers）。
+    let chapters = LibraryRepository::new(database.clone())
+        .fetch_item_markers_as_chapters(&item_id)
+        .await
+        .map_err(|err| AppError::internal(format!("failed to get item markers: {err}")))?
+        .into_iter()
+        .map(media_marker_to_chapter_dto)
+        .collect::<Vec<_>>();
+
+    let profile = merge_request_max_streaming_bitrate(
+        device_profile_summary_from_playback_hints(
+            request.device_profile.as_ref(),
+            request.client_capabilities.as_ref(),
+        ),
+        request.max_streaming_bitrate,
+    );
     let play_session_id = issue_access_token().token;
-    let mut media_sources = Vec::with_capacity(media_file_ids.len());
-    for (index, media_file_id) in media_file_ids.into_iter().enumerate() {
-        let Some(source) = repository
-            .find_playback_media_source(user.id, &item_id, media_file_id)
-            .await
-            .map_err(|err| AppError::internal(format!("failed to get playback source: {err}")))?
-        else {
-            continue;
-        };
-
+    let mut media_sources = Vec::with_capacity(source_records.len());
+    for (index, source) in source_records.into_iter().enumerate() {
+        let decision = decide_play_method(&media_capabilities_from_source(&source), &profile);
         let transcode = if index == 0 {
             queue_transcode_if_needed(
                 state,
@@ -533,6 +545,7 @@ async fn playback_info_for_user(
                 &play_session_id,
                 access_token,
                 device_id,
+                decision.method,
             )
             .await?
         } else {
@@ -542,11 +555,9 @@ async fn playback_info_for_user(
             &source,
             transcode.as_ref(),
             access_token,
+            &chapters,
+            decision.method,
         ));
-    }
-
-    if media_sources.is_empty() {
-        return Err(AppError::not_found("playback source not found"));
     }
 
     Ok(Json(PlaybackInfoResponseDto {
@@ -658,6 +669,7 @@ fn merge_playback_info_request(
         start_time_ticks: body.start_time_ticks.or(query.start_time_ticks),
         media_source_id: body.media_source_id.or(query.media_source_id),
         device_profile: body.device_profile.or(query.device_profile),
+        client_capabilities: body.client_capabilities.or(query.client_capabilities),
     }
 }
 
@@ -948,6 +960,33 @@ async fn dispatch_playback_hook(
             "failed to dispatch plugin playback hooks"
         );
     }
+
+    // 最小 webhook 投递：入队后由通知 worker POST JSON 到 channel=event_key 的 webhook 目标。
+    let (title, message) = match event_key {
+        PLAYBACK_STARTED_EVENT => (
+            "Playback started",
+            format!("user {} started item {}", user.username, report.item_id),
+        ),
+        PLAYBACK_STOPPED_EVENT => (
+            "Playback stopped",
+            format!("user {} stopped item {}", user.username, report.item_id),
+        ),
+        other => (
+            "Playback event",
+            format!("user {} item {} ({other})", user.username, report.item_id),
+        ),
+    };
+    let metadata = playback_hook_payload(user, report, playback_session_id);
+    if let Err(err) =
+        enqueue_event_notification(pool, event_key, title, message, "info", metadata).await
+    {
+        warn!(
+            error = %err,
+            event_key,
+            item_id = %report.item_id,
+            "failed to enqueue playback webhook notification"
+        );
+    }
 }
 
 fn playback_hook_event(
@@ -1010,8 +1049,9 @@ async fn queue_transcode_if_needed(
     play_session_id: &str,
     access_token: &str,
     device_id: Option<&str>,
+    play_method: PlayMethod,
 ) -> Result<Option<PlaybackTranscodeInfo>, AppError> {
-    if !should_queue_transcode(source, request) {
+    if !should_queue_transcode(source, request, play_method) {
         return Ok(None);
     }
 
@@ -1055,9 +1095,13 @@ async fn queue_transcode_if_needed(
 fn should_queue_transcode(
     source: &PlaybackMediaSourceRecord,
     request: &PlaybackInfoRequestDto,
+    play_method: PlayMethod,
 ) -> bool {
     if !source.supports_transcoding {
         return false;
+    }
+    if play_method == PlayMethod::Transcode {
+        return true;
     }
 
     let Some(requested_bitrate) = requested_streaming_bitrate(request) else {
@@ -1105,12 +1149,66 @@ fn transcode_url(
     )
 }
 
+fn media_marker_to_chapter_dto(
+    record: crate::library::repository::MediaChapterRecord,
+) -> ChapterInfoDto {
+    let (name, marker_type) = match record.marker_type.as_str() {
+        "intro_start" => ("Intro", "IntroStart"),
+        "intro_end" => ("Intro End", "IntroEnd"),
+        "credits_start" => ("Credits", "CreditsStart"),
+        "credits_end" => ("Credits End", "CreditsEnd"),
+        "commercial" => ("Commercial", "CommercialBreak"),
+        "chapter" => ("Chapter", "Chapter"),
+        other => (other, "Chapter"),
+    };
+    ChapterInfoDto {
+        start_position_ticks: record.start_ticks,
+        name: name.to_owned(),
+        image_tag: None,
+        marker_type: marker_type.to_owned(),
+    }
+}
+
+fn media_capabilities_from_source(source: &PlaybackMediaSourceRecord) -> MediaCapabilities {
+    let video = source
+        .streams
+        .iter()
+        .find(|s| s.stream_type.eq_ignore_ascii_case("video"));
+    let audio = source
+        .streams
+        .iter()
+        .find(|s| s.stream_type.eq_ignore_ascii_case("audio") && s.is_default)
+        .or_else(|| {
+            source
+                .streams
+                .iter()
+                .find(|s| s.stream_type.eq_ignore_ascii_case("audio"))
+        });
+    MediaCapabilities {
+        container: source.container.clone(),
+        video_codec: video.and_then(|s| s.codec.clone()),
+        audio_codec: audio.and_then(|s| s.codec.clone()),
+        bitrate: source.bitrate.map(i64::from),
+        width: video.and_then(|s| s.width),
+        height: video.and_then(|s| s.height),
+    }
+}
+
 fn media_source_to_dto(
     source: &PlaybackMediaSourceRecord,
     transcode: Option<&PlaybackTranscodeInfo>,
     access_token: &str,
+    chapters: &[ChapterInfoDto],
+    play_method: PlayMethod,
 ) -> MediaSourceDto {
     let protocol = media_source_protocol(&source);
+    let (supports_direct_play, supports_direct_stream) = match play_method {
+        PlayMethod::DirectPlay => (true, true),
+        PlayMethod::Remux => (false, true),
+        PlayMethod::Transcode => (false, false),
+    };
+    let supports_transcoding = source.supports_transcoding
+        && (matches!(play_method, PlayMethod::Transcode | PlayMethod::Remux) || transcode.is_some());
     MediaSourceDto {
         id: source.media_file_id.to_string(),
         source_type: "Default".to_owned(),
@@ -1127,7 +1225,7 @@ fn media_source_to_dto(
         requires_closing: false,
         supports_probing: false,
         read_at_native_framerate: false,
-        container: source.container.clone(),
+        container: normalize_media_source_container(source.container.as_deref()),
         run_time_ticks: source.runtime_ticks,
         size: source.file_size,
         bitrate: transcode
@@ -1139,17 +1237,24 @@ fn media_source_to_dto(
             .streams
             .iter()
             .cloned()
-            .map(media_stream_to_dto)
+            .map(|stream| {
+                media_stream_to_dto(
+                    stream,
+                    &source.item_id,
+                    source.media_file_id,
+                    access_token,
+                )
+            })
             .collect(),
-        supports_direct_play: true,
-        supports_direct_stream: true,
-        supports_transcoding: source.supports_transcoding,
+        supports_direct_play,
+        supports_direct_stream,
+        supports_transcoding,
         direct_stream_url: Some(direct_stream_url(source, access_token)),
         add_api_key_to_direct_stream_url: false,
         transcoding_url: transcode.map(|session| session.url.clone()),
         transcoding_sub_protocol: transcode.map(|_| "hls".to_owned()),
         transcoding_container: transcode.map(|_| "ts".to_owned()),
-        chapters: Vec::new(),
+        chapters: chapters.to_vec(),
     }
 }
 
@@ -1230,8 +1335,19 @@ fn media_source_protocol(source: &PlaybackMediaSourceRecord) -> &'static str {
     "File"
 }
 
-fn media_stream_to_dto(stream: PlaybackMediaStreamRecord) -> MediaStreamDto {
+fn media_stream_to_dto(
+    stream: PlaybackMediaStreamRecord,
+    item_id: &str,
+    media_source_id: i64,
+    access_token: &str,
+) -> MediaStreamDto {
     let display_title = media_stream_display_title(&stream);
+    let delivery_url = external_subtitle_delivery_url(
+        &stream,
+        item_id,
+        media_source_id,
+        access_token,
+    );
     MediaStreamDto {
         index: stream.stream_index,
         stream_type: emby_stream_type(&stream.stream_type).to_owned(),
@@ -1250,7 +1366,49 @@ fn media_stream_to_dto(stream: PlaybackMediaStreamRecord) -> MediaStreamDto {
         bit_rate: stream.bitrate,
         is_default: stream.is_default,
         is_forced: stream.is_forced,
+        is_external: stream.is_external,
+        delivery_method: Some(if stream.is_external {
+            "External".to_owned()
+        } else {
+            "Embed".to_owned()
+        }),
+        delivery_url,
     }
+}
+
+/// Emby/JF 外挂字幕 DeliveryUrl：走已有 Videos/.../Subtitles/.../Stream.{format}。
+fn external_subtitle_delivery_url(
+    stream: &PlaybackMediaStreamRecord,
+    item_id: &str,
+    media_source_id: i64,
+    access_token: &str,
+) -> Option<String> {
+    if !stream.is_external || !stream.stream_type.eq_ignore_ascii_case("subtitle") {
+        return None;
+    }
+    let format = stream
+        .codec
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        })
+        .unwrap_or_else(|| "srt".to_owned());
+    // JF 客户端常见形态含 startPositionTicks=0；本路由同时支持无 ticks 的 Stream.{format}。
+    Some(format!(
+        "/Videos/{item_id}/{media_source_id}/Subtitles/{index}/0/Stream.{format}?api_key={access_token}",
+        item_id = item_id,
+        media_source_id = media_source_id,
+        index = stream.stream_index,
+        format = format,
+        access_token = access_token,
+    ))
 }
 
 fn media_stream_display_title(stream: &PlaybackMediaStreamRecord) -> Option<String> {
@@ -1338,6 +1496,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn playback_info_uses_batched_media_sources_not_per_file_n_plus_one() {
+        let source = include_str!("playback.rs");
+        let impl_src = source
+            .split("mod tests {")
+            .next()
+            .expect("playback impl before tests");
+        assert!(
+            impl_src.contains("list_playback_media_sources"),
+            "PlaybackInfo should batch-load media sources"
+        );
+        // 旧 N+1：对每个 media_file_id 调 find_playback_media_source
+        assert!(
+            !impl_src.contains("for (index, media_file_id) in media_file_ids"),
+            "PlaybackInfo must not loop media_file_ids with per-id finds"
+        );
+    }
+
+
+    #[test]
     fn strm_http_source_uses_http_protocol_and_target_path() {
         let source = PlaybackMediaSourceRecord {
             path: "movie.strm".to_owned(),
@@ -1348,7 +1525,7 @@ mod tests {
             supports_transcoding: false,
             ..test_source()
         };
-        let dto = media_source_to_dto(&source, None, "token-1");
+        let dto = media_source_to_dto(&source, None, "token-1", &[], PlayMethod::DirectPlay);
 
         assert_eq!(dto.id, "42");
         assert_eq!(dto.source_type, "Default");
@@ -1369,16 +1546,21 @@ mod tests {
 
     #[test]
     fn stream_type_mapping_uses_emby_pascal_case() {
-        let dto = media_stream_to_dto(PlaybackMediaStreamRecord {
-            stream_index: 0,
-            stream_type: "video".to_owned(),
-            codec: Some("hevc".to_owned()),
-            width: Some(3840),
-            height: Some(2160),
-            bit_depth: Some(10),
-            bitrate: Some(12_000_000),
-            ..test_stream()
-        });
+        let dto = media_stream_to_dto(
+            PlaybackMediaStreamRecord {
+                stream_index: 0,
+                stream_type: "video".to_owned(),
+                codec: Some("hevc".to_owned()),
+                width: Some(3840),
+                height: Some(2160),
+                bit_depth: Some(10),
+                bitrate: Some(12_000_000),
+                ..test_stream()
+            },
+            "item-1",
+            42,
+            "tok",
+        );
 
         assert_eq!(dto.stream_type, "Video");
         assert_eq!(dto.codec.as_deref(), Some("hevc"));
@@ -1789,6 +1971,7 @@ mod tests {
             start_time_ticks: Some(100),
             media_source_id: Some("42".to_owned()),
             device_profile: Some(json!({"Name": "query-profile"})),
+            client_capabilities: None,
         };
 
         let request = post_playback_info_request(&headers, &body, query).unwrap();
@@ -1816,6 +1999,7 @@ mod tests {
             start_time_ticks: Some(100),
             media_source_id: Some("42".to_owned()),
             device_profile: Some(json!({"Name": "query-profile"})),
+            client_capabilities: None,
         };
 
         let request = post_playback_info_request(&headers, &body, query).unwrap();
@@ -1903,8 +2087,9 @@ mod tests {
                 start_time_ticks: None,
                 media_source_id: None,
                 device_profile: None,
+                client_capabilities: None,
             }
-        ));
+        , PlayMethod::DirectPlay));
         assert!(!should_queue_transcode(
             &source,
             &PlaybackInfoRequestDto {
@@ -1913,8 +2098,9 @@ mod tests {
                 start_time_ticks: None,
                 media_source_id: None,
                 device_profile: None,
+                client_capabilities: None,
             }
-        ));
+        , PlayMethod::DirectPlay));
     }
 
     #[test]
@@ -1928,7 +2114,7 @@ mod tests {
             url: transcode_url(&source, "session-1", "play-1", "token-1"),
             bitrate: Some(8_000_000),
         };
-        let dto = media_source_to_dto(&source, Some(&transcode), "token-1");
+        let dto = media_source_to_dto(&source, Some(&transcode), "token-1", &[], PlayMethod::DirectPlay);
 
         assert_eq!(dto.bitrate, Some(8_000_000));
         assert_eq!(dto.run_time_ticks, Some(7_200_000_000));
@@ -1976,7 +2162,7 @@ mod tests {
             ],
             ..test_source()
         };
-        let dto = media_source_to_dto(&source, None, "token-1");
+        let dto = media_source_to_dto(&source, None, "token-1", &[], PlayMethod::DirectPlay);
 
         assert_eq!(dto.default_audio_stream_index, Some(1));
         assert_eq!(dto.default_subtitle_stream_index, Some(2));
@@ -1993,7 +2179,7 @@ mod tests {
             supports_transcoding: true,
             ..test_source()
         };
-        let dto = media_source_to_dto(&source, None, "token-1");
+        let dto = media_source_to_dto(&source, None, "token-1", &[], PlayMethod::DirectPlay);
 
         assert_eq!(
             dto.direct_stream_url.as_deref(),
@@ -2016,7 +2202,7 @@ mod tests {
             url: transcode_url(&source, "session-1", "play-1", "token-1"),
             bitrate: Some(320_000),
         };
-        let dto = media_source_to_dto(&source, Some(&transcode), "token-1");
+        let dto = media_source_to_dto(&source, Some(&transcode), "token-1", &[], PlayMethod::DirectPlay);
 
         assert_eq!(
             dto.transcoding_url.as_deref(),
@@ -2039,11 +2225,263 @@ mod tests {
             supports_transcoding: false,
             ..test_source()
         };
-        let dto = media_source_to_dto(&source, None, "test-token");
+        let dto = media_source_to_dto(&source, None, "test-token", &[], PlayMethod::DirectPlay);
         assert_eq!(dto.protocol, "Http");
         assert!(dto.is_remote);
         assert_eq!(dto.path, dto.direct_stream_url);
         assert!(!dto.supports_transcoding);
+    }
+
+    #[test]
+    fn external_subtitle_stream_marks_delivery_external() {
+        let dto = media_stream_to_dto(
+            PlaybackMediaStreamRecord {
+                stream_index: 3,
+                stream_type: "subtitle".to_owned(),
+                codec: Some("srt".to_owned()),
+                language: Some("chi".to_owned()),
+                title: Some("简体".to_owned()),
+                is_external: true,
+                ..test_stream()
+            },
+            "item-1",
+            42,
+            "tok",
+        );
+        assert_eq!(dto.stream_type, "Subtitle");
+        assert!(dto.is_external);
+        assert_eq!(dto.delivery_method.as_deref(), Some("External"));
+        assert_eq!(
+            dto.delivery_url.as_deref(),
+            Some("/Videos/item-1/42/Subtitles/3/0/Stream.srt?api_key=tok")
+        );
+    }
+
+    #[test]
+    fn media_source_includes_intro_chapters_when_provided() {
+        let chapters = vec![ChapterInfoDto {
+            start_position_ticks: 90_000_0000,
+            name: "Intro".to_owned(),
+            image_tag: None,
+            marker_type: "IntroStart".to_owned(),
+        }];
+        let dto = media_source_to_dto(&test_source(), None, "token-1", &chapters, PlayMethod::DirectPlay);
+        assert_eq!(dto.chapters.len(), 1);
+        assert_eq!(dto.chapters[0].marker_type, "IntroStart");
+        assert_eq!(dto.chapters[0].start_position_ticks, 90_000_0000);
+    }
+
+    #[test]
+    fn playback_hooks_enqueue_webhook_notifications() {
+        let source = include_str!("playback.rs");
+        let impl_src = source
+            .split("mod tests {")
+            .next()
+            .expect("playback impl before tests");
+        assert!(
+            impl_src.contains("enqueue_event_notification"),
+            "playback started/stopped should enqueue webhook notifications"
+        );
+        assert!(
+            impl_src.contains("failed to enqueue playback webhook notification"),
+            "playback webhook enqueue failures must be non-fatal"
+        );
+    }
+
+    #[test]
+    fn playback_info_loads_chapters_from_media_markers() {
+        let source = include_str!("playback.rs");
+        let impl_src = source
+            .split("mod tests {")
+            .next()
+            .expect("playback impl before tests");
+        assert!(
+            impl_src.contains("fetch_item_markers_as_chapters"),
+            "PlaybackInfo should load media_markers as Chapters"
+        );
+        assert!(
+            !impl_src.contains("chapters: Vec::new()"),
+            "PlaybackInfo must not hardcode empty MediaSource chapters"
+        );
+    }
+
+    #[test]
+    fn play_method_drives_supports_direct_flags() {
+        let source = test_source();
+        let direct = media_source_to_dto(&source, None, "tok", &[], PlayMethod::DirectPlay);
+        assert!(direct.supports_direct_play);
+        assert!(direct.supports_direct_stream);
+        assert!(!direct.supports_transcoding);
+
+        let remux = media_source_to_dto(&source, None, "tok", &[], PlayMethod::Remux);
+        assert!(!remux.supports_direct_play);
+        assert!(remux.supports_direct_stream);
+        assert!(remux.supports_transcoding);
+
+        let transcode = media_source_to_dto(&source, None, "tok", &[], PlayMethod::Transcode);
+        assert!(!transcode.supports_direct_play);
+        assert!(!transcode.supports_direct_stream);
+        assert!(transcode.supports_transcoding);
+    }
+
+    #[test]
+    fn device_profile_decision_queues_transcode_and_clears_direct_flags() {
+        let source = PlaybackMediaSourceRecord {
+            container: Some("mkv".to_owned()),
+            bitrate: Some(8_000_000),
+            supports_transcoding: true,
+            streams: vec![
+                PlaybackMediaStreamRecord {
+                    stream_index: 0,
+                    stream_type: "video".to_owned(),
+                    codec: Some("hevc".to_owned()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    ..test_stream()
+                },
+                PlaybackMediaStreamRecord {
+                    stream_index: 1,
+                    stream_type: "audio".to_owned(),
+                    codec: Some("aac".to_owned()),
+                    is_default: true,
+                    ..test_stream()
+                },
+            ],
+            ..test_source()
+        };
+        let request = PlaybackInfoRequestDto {
+            user_id: None,
+            max_streaming_bitrate: None,
+            start_time_ticks: None,
+            media_source_id: None,
+            device_profile: Some(json!({
+                "DirectPlayProfiles": [{
+                    "Type": "Video",
+                    "Container": "mkv",
+                    "VideoCodec": "h264",
+                    "AudioCodec": "aac"
+                }]
+            })),
+            client_capabilities: None,
+        };
+        let profile = merge_request_max_streaming_bitrate(
+            device_profile_summary_from_playback_hints(
+                request.device_profile.as_ref(),
+                request.client_capabilities.as_ref(),
+            ),
+            request.max_streaming_bitrate,
+        );
+        let decision = decide_play_method(&media_capabilities_from_source(&source), &profile);
+        assert_eq!(decision.method, PlayMethod::Transcode);
+        assert!(should_queue_transcode(&source, &request, decision.method));
+
+        let dto = media_source_to_dto(&source, None, "tok", &[], decision.method);
+        assert!(!dto.supports_direct_play);
+        assert!(!dto.supports_direct_stream);
+        assert!(dto.supports_transcoding);
+    }
+
+    #[test]
+    fn client_capabilities_device_profile_drives_remux_flags() {
+        let source = PlaybackMediaSourceRecord {
+            container: Some("mkv".to_owned()),
+            streams: vec![
+                PlaybackMediaStreamRecord {
+                    stream_index: 0,
+                    stream_type: "video".to_owned(),
+                    codec: Some("h264".to_owned()),
+                    ..test_stream()
+                },
+                PlaybackMediaStreamRecord {
+                    stream_index: 1,
+                    stream_type: "audio".to_owned(),
+                    codec: Some("aac".to_owned()),
+                    is_default: true,
+                    ..test_stream()
+                },
+            ],
+            ..test_source()
+        };
+        let request = PlaybackInfoRequestDto {
+            user_id: None,
+            max_streaming_bitrate: None,
+            start_time_ticks: None,
+            media_source_id: None,
+            device_profile: None,
+            client_capabilities: Some(json!({
+                "DeviceProfile": {
+                    "DirectPlayProfiles": [{
+                        "Type": "Video",
+                        "Container": "mp4",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac"
+                    }]
+                }
+            })),
+        };
+        let profile = device_profile_summary_from_playback_hints(
+            request.device_profile.as_ref(),
+            request.client_capabilities.as_ref(),
+        );
+        let decision = decide_play_method(&media_capabilities_from_source(&source), &profile);
+        assert_eq!(decision.method, PlayMethod::Remux);
+        assert!(!should_queue_transcode(&source, &request, decision.method));
+
+        let dto = media_source_to_dto(&source, None, "tok", &[], decision.method);
+        assert!(!dto.supports_direct_play);
+        assert!(dto.supports_direct_stream);
+        assert!(dto.supports_transcoding);
+    }
+
+    #[test]
+    fn request_bitrate_with_profile_hints_selects_transcode() {
+        let source = PlaybackMediaSourceRecord {
+            bitrate: Some(12_000_000),
+            streams: vec![
+                PlaybackMediaStreamRecord {
+                    stream_index: 0,
+                    stream_type: "video".to_owned(),
+                    codec: Some("h264".to_owned()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    ..test_stream()
+                },
+                PlaybackMediaStreamRecord {
+                    stream_index: 1,
+                    stream_type: "audio".to_owned(),
+                    codec: Some("aac".to_owned()),
+                    is_default: true,
+                    ..test_stream()
+                },
+            ],
+            ..test_source()
+        };
+        let request = PlaybackInfoRequestDto {
+            user_id: None,
+            max_streaming_bitrate: Some(4_000_000),
+            start_time_ticks: None,
+            media_source_id: None,
+            device_profile: Some(json!({
+                "DirectPlayProfiles": [{
+                    "Type": "Video",
+                    "Container": "mkv",
+                    "VideoCodec": "h264",
+                    "AudioCodec": "aac"
+                }]
+            })),
+            client_capabilities: None,
+        };
+        let profile = merge_request_max_streaming_bitrate(
+            device_profile_summary_from_playback_hints(
+                request.device_profile.as_ref(),
+                request.client_capabilities.as_ref(),
+            ),
+            request.max_streaming_bitrate,
+        );
+        let decision = decide_play_method(&media_capabilities_from_source(&source), &profile);
+        assert_eq!(decision.method, PlayMethod::Transcode);
+        assert_eq!(decision.reason, "exceeds_bitrate_or_resolution_limit");
+        assert!(should_queue_transcode(&source, &request, decision.method));
     }
 
     fn test_source() -> PlaybackMediaSourceRecord {
@@ -2082,6 +2520,7 @@ mod tests {
             bitrate: None,
             is_default: true,
             is_forced: false,
+            is_external: false,
         }
     }
 }

@@ -66,6 +66,32 @@ pub struct NextUpQuery {
     pub sort_order: Option<String>,
     #[serde(alias = "fields")]
     pub fields: Option<String>,
+    #[serde(alias = "enableRewatching")]
+    pub enable_rewatching: Option<bool>,
+    #[serde(alias = "enableResumable")]
+    pub enable_resumable: Option<bool>,
+    #[serde(alias = "nextUpDateCutoff")]
+    pub next_up_date_cutoff: Option<String>,
+    #[serde(alias = "disableFirstEpisode")]
+    pub disable_first_episode: Option<bool>,
+}
+
+/// `NextUpDateCutoff` 粗校验：形如 `YYYY-MM-DD...`，交给 Postgres 解析；非法值 → 422。
+fn next_up_date_cutoff(raw: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let bytes = raw.as_bytes();
+    let looks_like_date = raw.len() >= 10
+        && raw.len() <= 40
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && raw.chars().all(|c| c.is_ascii_alphanumeric() || "-:.+ TZ".contains(c));
+    if !looks_like_date {
+        return Err(AppError::unprocessable("NextUpDateCutoff is invalid"));
+    }
+    Ok(Some(raw.to_owned()))
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -222,6 +248,10 @@ pub async fn next_up(
             start_index: window.start_index,
             limit: window.limit,
             options,
+            enable_rewatching: query.enable_rewatching.unwrap_or(false),
+            enable_resumable: query.enable_resumable.unwrap_or(true),
+            date_cutoff: next_up_date_cutoff(query.next_up_date_cutoff.as_deref())?,
+            disable_first_episode: query.disable_first_episode.unwrap_or(false),
         })
         .await
         .map_err(|err| AppError::internal(format!("failed to list next up items: {err}")))?;
@@ -431,5 +461,25 @@ mod tests {
 
         assert_eq!(window.start_index, 0);
         assert_eq!(window.limit, 100);
+    }
+}
+
+#[cfg(test)]
+mod next_up_flag_tests {
+    use super::*;
+
+    #[test]
+    fn next_up_flags_parse_from_query() {
+        let q: NextUpQuery = serde_json::from_value(serde_json::json!({
+            "EnableRewatching": true, "enableResumable": false,
+            "NextUpDateCutoff": "2026-01-01T00:00:00Z", "DisableFirstEpisode": true
+        })).unwrap();
+        assert_eq!(q.enable_rewatching, Some(true));
+        assert_eq!(q.enable_resumable, Some(false));
+        assert_eq!(q.disable_first_episode, Some(true));
+        assert_eq!(next_up_date_cutoff(q.next_up_date_cutoff.as_deref()).unwrap().as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(next_up_date_cutoff(Some(" ")).unwrap(), None);
+        assert!(next_up_date_cutoff(Some("yesterday")).is_err());
+        assert!(next_up_date_cutoff(Some("2026-01-01'; drop")).is_err());
     }
 }

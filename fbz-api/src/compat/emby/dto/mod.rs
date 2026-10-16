@@ -61,6 +61,7 @@ pub struct ServerInfoSource {
     pub version: String,
     pub local_address: String,
     pub operating_system: String,
+    pub supports_library_monitor: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -82,7 +83,7 @@ impl From<ServerInfoSource> for SystemInfoDto {
             version: source.version,
             local_address: source.local_address,
             operating_system: source.operating_system,
-            supports_library_monitor: false,
+            supports_library_monitor: source.supports_library_monitor,
         }
     }
 }
@@ -504,9 +505,18 @@ pub struct DisplayPreferencesSource {
 #[serde(rename_all = "PascalCase")]
 pub struct DisplayPreferencesDto {
     pub id: String,
+    pub view_type: Option<String>,
     pub sort_by: String,
+    pub index_by: Option<String>,
+    pub remember_indexing: bool,
+    pub primary_image_height: i32,
+    pub primary_image_width: i32,
     pub custom_prefs: BTreeMap<String, String>,
+    pub scroll_direction: String,
+    pub show_backdrop: bool,
+    pub remember_sorting: bool,
     pub sort_order: String,
+    pub show_sidebar: bool,
     pub client: String,
 }
 
@@ -514,9 +524,18 @@ impl From<DisplayPreferencesSource> for DisplayPreferencesDto {
     fn from(source: DisplayPreferencesSource) -> Self {
         Self {
             id: source.id,
+            view_type: None,
             sort_by: "SortName".to_owned(),
+            index_by: None,
+            remember_indexing: false,
+            primary_image_height: 250,
+            primary_image_width: 250,
             custom_prefs: BTreeMap::new(),
+            scroll_direction: "Horizontal".to_owned(),
+            show_backdrop: true,
+            remember_sorting: false,
             sort_order: "Ascending".to_owned(),
+            show_sidebar: false,
             client: source.client,
         }
     }
@@ -561,6 +580,8 @@ pub struct UserDetailSource {
     pub enable_playback_transcoding: bool,
     pub enable_all_folders: bool,
     pub enabled_folders: Vec<String>,
+    pub max_parental_rating: Option<i32>,
+    pub block_unrated_items: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -624,12 +645,12 @@ impl From<UserDetailSource> for UserDto {
                 enable_content_downloading: source.enable_content_downloading,
                 enable_subtitle_downloading: false,
                 enable_subtitle_management: false,
-                max_parental_rating: None,
+                max_parental_rating: source.max_parental_rating,
                 allow_tag_or_rating: false,
                 is_tag_blocking_mode_inclusive: false,
                 include_tags: Vec::new(),
                 access_schedules: Vec::new(),
-                block_unrated_items: Vec::new(),
+                block_unrated_items: source.block_unrated_items,
                 enable_sync_transcoding: source.enable_playback_transcoding,
                 enable_media_conversion: source.enable_playback_transcoding,
                 enable_remote_control_of_other_users: source.is_administrator,
@@ -725,26 +746,44 @@ pub struct UserPolicyDto {
     pub allow_sharing_personal_items: bool,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase", default)]
 pub struct UserConfigurationDto {
+    #[serde(alias = "audioLanguagePreference", alias = "audio_language_preference")]
     pub audio_language_preference: Option<String>,
+    #[serde(alias = "playDefaultAudioTrack", alias = "play_default_audio_track")]
     pub play_default_audio_track: bool,
+    #[serde(alias = "subtitleLanguagePreference", alias = "subtitle_language_preference")]
     pub subtitle_language_preference: Option<String>,
+    #[serde(alias = "displayMissingEpisodes", alias = "display_missing_episodes")]
     pub display_missing_episodes: bool,
+    #[serde(alias = "subtitleMode", alias = "subtitle_mode")]
     pub subtitle_mode: String,
+    #[serde(alias = "enableLocalPassword", alias = "enable_local_password")]
     pub enable_local_password: bool,
+    #[serde(alias = "orderedViews", alias = "ordered_views")]
     pub ordered_views: Vec<String>,
+    #[serde(alias = "latestItemsExcludes", alias = "latest_items_excludes")]
     pub latest_items_excludes: Vec<String>,
+    #[serde(alias = "myMediaExcludes", alias = "my_media_excludes")]
     pub my_media_excludes: Vec<String>,
+    #[serde(alias = "hidePlayedInLatest", alias = "hide_played_in_latest")]
     pub hide_played_in_latest: bool,
+    #[serde(alias = "hidePlayedInMoreLikeThis", alias = "hide_played_in_more_like_this")]
     pub hide_played_in_more_like_this: bool,
+    #[serde(alias = "hidePlayedInSuggestions", alias = "hide_played_in_suggestions")]
     pub hide_played_in_suggestions: bool,
+    #[serde(alias = "introSkipMode", alias = "intro_skip_mode")]
     pub intro_skip_mode: String,
+    #[serde(alias = "profilePin", alias = "profile_pin")]
     pub profile_pin: Option<String>,
+    #[serde(alias = "rememberAudioSelections", alias = "remember_audio_selections")]
     pub remember_audio_selections: bool,
+    #[serde(alias = "rememberSubtitleSelections", alias = "remember_subtitle_selections")]
     pub remember_subtitle_selections: bool,
+    #[serde(alias = "resumeRewindSeconds", alias = "resume_rewind_seconds")]
     pub resume_rewind_seconds: i32,
+    #[serde(alias = "enableNextEpisodeAutoPlay", alias = "enable_next_episode_auto_play")]
     pub enable_next_episode_auto_play: bool,
 }
 
@@ -773,7 +812,7 @@ impl Default for UserConfigurationDto {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct AuthenticationResultDto {
     pub user: PublicUserDto,
@@ -811,7 +850,7 @@ impl AuthenticateUserRequestDto {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SessionInfoDto {
     pub id: String,
@@ -824,6 +863,32 @@ pub struct SessionInfoDto {
     pub is_active: bool,
     /// 该会话当前是否有活跃 websocket 通道（远程控制指令可送达）。
     pub supports_remote_control: bool,
+    /// Emby Sessions 列表常用：最近活动时间（sessions.last_seen_at）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_date: Option<String>,
+    /// 客户端远端地址（sessions.remote_addr）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_end_point: Option<String>,
+    pub server_id: String,
+    /// 当前在播条目（有活跃 playback_sessions 时填充；否则省略）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub now_playing_item: Option<serde_json::Value>,
+    /// 当前播放状态（与 NowPlayingItem 成对）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub play_state: Option<SessionPlayStateDto>,
+}
+
+/// Emby `PlayerStateInfo` 最小子集，供 Sessions 列表展示进度。
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct SessionPlayStateDto {
+    pub position_ticks: i64,
+    pub can_seek: bool,
+    pub is_paused: bool,
+    pub is_muted: bool,
+    pub volume_level: i32,
+    pub play_method: String,
+    pub repeat_mode: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -984,7 +1049,7 @@ impl LibraryOptionsResultDto {
             .collect();
 
         Self {
-            metadata_savers: Vec::new(),
+            metadata_savers: vec![LibraryOptionInfoDto::new("Nfo", false)],
             metadata_readers: vec![metadata_reader.clone()],
             subtitle_fetchers: Vec::new(),
             lyrics_fetchers: Vec::new(),
@@ -1420,9 +1485,12 @@ pub struct BaseItemDto {
     pub premiere_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_date: Option<String>,
-    /// 题材名列表（详情接口回填；列表接口为空省略）。
+    /// 题材名列表（列表/详情均从库回填；无题材时省略）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
+    /// 社区评分（TMDB/元数据写入的 `media_items.community_rating`；无评分时省略）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community_rating: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1480,6 +1548,7 @@ impl From<BaseItemSource> for BaseItemDto {
             premiere_date: None,
             end_date: None,
             genres: Vec::new(),
+            community_rating: None,
             original_title: None,
             official_rating: None,
             image_tags: BTreeMap::new(),
@@ -1530,6 +1599,8 @@ pub struct PlaybackInfoRequestDto {
     pub media_source_id: Option<String>,
     #[serde(alias = "deviceProfile", alias = "device_profile")]
     pub device_profile: Option<Value>,
+    #[serde(alias = "clientCapabilities", alias = "client_capabilities")]
+    pub client_capabilities: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1613,6 +1684,14 @@ pub struct MediaStreamDto {
     pub bit_rate: Option<i32>,
     pub is_default: bool,
     pub is_forced: bool,
+    /// 外挂字幕/音轨（相对容器内嵌）。
+    pub is_external: bool,
+    /// Emby/JF：`Embed` / `External` / `Hls` 等；外挂字幕常用 External。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_method: Option<String>,
+    /// 外挂字幕拉取 URL（相对站点根）；内嵌轨省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1797,6 +1876,7 @@ mod tests {
             version: "0.1.0".to_owned(),
             local_address: "http://127.0.0.1:8080".to_owned(),
             operating_system: "windows".to_owned(),
+            supports_library_monitor: false,
         });
 
         let value = serde_json::to_value(dto).unwrap();
@@ -1814,6 +1894,7 @@ mod tests {
             version: "0.1.0".to_owned(),
             local_address: "http://127.0.0.1:8080".to_owned(),
             operating_system: "windows".to_owned(),
+            supports_library_monitor: false,
         });
 
         let value = serde_json::to_value(dto).unwrap();
@@ -1960,6 +2041,11 @@ mod tests {
         assert_eq!(value["SortOrder"], "Ascending");
         assert_eq!(value["Client"], "Infuse");
         assert_eq!(value["CustomPrefs"], json!({}));
+        assert_eq!(value["ScrollDirection"], "Horizontal");
+        assert_eq!(value["ShowBackdrop"], true);
+        assert_eq!(value["RememberSorting"], false);
+        assert_eq!(value["PrimaryImageHeight"], 250);
+        assert_eq!(value["PrimaryImageWidth"], 250);
     }
 
     #[test]
@@ -1983,6 +2069,28 @@ mod tests {
         assert_eq!(value["Chapters"], json!([]));
         assert!(value.get("CollectionType").is_none());
         assert!(value.get("MediaSources").is_none());
+        assert!(value.get("Genres").is_none());
+        assert!(value.get("CommunityRating").is_none());
+    }
+
+    #[test]
+    fn base_item_serializes_genres_and_community_rating_when_present() {
+        let mut dto = BaseItemDto::from(BaseItemSource {
+            id: "item-2".to_owned(),
+            name: "Rated".to_owned(),
+            item_type: "Movie".to_owned(),
+            media_type: Some("Video".to_owned()),
+            parent_id: None,
+            is_folder: false,
+            run_time_ticks: None,
+            production_year: Some(2024),
+        });
+        dto.genres = vec!["Action".to_owned(), "Drama".to_owned()];
+        dto.community_rating = Some(8.5);
+
+        let value = serde_json::to_value(dto).unwrap();
+        assert_eq!(value["Genres"], json!(["Action", "Drama"]));
+        assert_eq!(value["CommunityRating"], json!(8.5));
     }
 
     #[test]
@@ -2055,7 +2163,7 @@ mod tests {
 
         let value = serde_json::to_value(result).unwrap();
 
-        assert!(value["MetadataSavers"].as_array().unwrap().is_empty());
+        assert_eq!(value["MetadataSavers"][0]["Name"], "Nfo");
         assert!(value["SubtitleFetchers"].as_array().unwrap().is_empty());
         assert!(value["LyricsFetchers"].as_array().unwrap().is_empty());
         assert!(
@@ -2223,6 +2331,8 @@ mod tests {
             enable_playback_transcoding: false,
             enable_all_folders: false,
             enabled_folders: vec!["library-1".to_owned(), "library-2".to_owned()],
+            max_parental_rating: None,
+            block_unrated_items: Vec::new(),
         });
 
         let value = serde_json::to_value(dto).unwrap();
@@ -2288,6 +2398,8 @@ mod tests {
             enable_playback_transcoding: true,
             enable_all_folders: true,
             enabled_folders: Vec::new(),
+            max_parental_rating: None,
+            block_unrated_items: Vec::new(),
         });
 
         let value = serde_json::to_value(dto).unwrap();
@@ -2309,6 +2421,34 @@ mod tests {
         assert_eq!(value["Policy"]["AllowCameraUpload"], false);
         assert_eq!(value["Policy"]["AllowSharingPersonalItems"], false);
     }
+
+
+    #[test]
+    fn user_detail_serializes_parental_policy_fields() {
+        let dto = UserDto::from(UserDetailSource {
+            id: "user-1".to_owned(),
+            name: "kid".to_owned(),
+            has_password: true,
+            is_administrator: false,
+            is_disabled: false,
+            allow_download: false,
+            allow_transcode: false,
+            allow_new_device_login: true,
+            enable_content_downloading: false,
+            enable_playback_transcoding: false,
+            enable_all_folders: true,
+            enabled_folders: Vec::new(),
+            max_parental_rating: Some(8),
+            block_unrated_items: vec!["Movie".to_owned(), "Trailer".to_owned()],
+        });
+        let value = serde_json::to_value(dto).unwrap();
+        assert_eq!(value["Policy"]["MaxParentalRating"], 8);
+        assert_eq!(
+            value["Policy"]["BlockUnratedItems"],
+            json!(["Movie", "Trailer"])
+        );
+    }
+
 
     #[test]
     fn playback_info_request_deserializes_pascal_case_payload() {
@@ -2347,6 +2487,31 @@ mod tests {
         assert_eq!(
             payload.device_profile,
             Some(json!({ "name": "client-profile" }))
+        );
+    }
+
+    #[test]
+    fn playback_info_request_accepts_client_capabilities_device_profile() {
+        let payload: PlaybackInfoRequestDto = serde_json::from_value(json!({
+            "UserId": "user-1",
+            "ClientCapabilities": {
+                "DeviceProfile": {
+                    "Name": "caps-profile",
+                    "DirectPlayProfiles": [{
+                        "Type": "Video",
+                        "Container": "mp4",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac"
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(payload.device_profile.is_none());
+        assert_eq!(
+            payload.client_capabilities.as_ref().unwrap()["DeviceProfile"]["Name"],
+            json!("caps-profile")
         );
     }
 
@@ -2658,6 +2823,9 @@ mod tests {
                     bit_rate: Some(12_000_000),
                     is_default: true,
                     is_forced: false,
+                    is_external: false,
+                    delivery_method: Some("Embed".to_owned()),
+                    delivery_url: None,
                 }],
             }],
         };

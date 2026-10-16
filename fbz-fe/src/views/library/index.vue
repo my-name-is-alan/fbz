@@ -1,21 +1,60 @@
 <script setup lang="ts">
 import { useLibraryStore } from "@/stores/library.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import { useAuthStore } from "@/stores/auth.ts";
+import { fetchLibraryCover } from "@/service/modules/library.ts";
 import { libraryRoute } from "@/utils/libraryRoute.ts";
 import type { MediaLibrary } from "@/types/media.ts";
 
 const libraryStore = useLibraryStore();
 const uiStore = useUiStore();
+const authStore = useAuthStore();
 const { libraries, totalCount, loading, error } = storeToRefs(libraryStore);
 
 const fmt = new Intl.NumberFormat("en-US");
+/** 库 id → 封面 URL（有 ImageTags 才写入；失败保持空，继续文字占位）。 */
+const covers = ref<Record<string, string>>({});
+let coverGeneration = 0;
+
+async function enrichCovers(libs: MediaLibrary[]) {
+  const userId = authStore.userId;
+  if (!userId || !libs.length) return;
+  const gen = ++coverGeneration;
+  const next: Record<string, string> = { ...covers.value };
+  await Promise.all(
+    libs.map(async (lib) => {
+      if (next[lib.id]) return;
+      try {
+        const cover = await fetchLibraryCover(userId, lib.id);
+        if (cover) next[lib.id] = cover;
+      } catch {
+        // 单库封面失败不影响总览。
+      }
+    }),
+  );
+  if (gen !== coverGeneration) return;
+  covers.value = next;
+}
 
 onMounted(() => {
   if (!libraryStore.loaded) void libraryStore.loadFromBackend();
 });
 
+watch(
+  libraries,
+  (libs) => {
+    void enrichCovers(libs);
+  },
+  { immediate: true },
+);
+
 function onLibraryContextMenu(e: MouseEvent, lib: MediaLibrary) {
+  if (!authStore.isAdmin) return;
   uiStore.openLibraryContextMenu(e.clientX, e.clientY, { id: lib.id, name: lib.name });
+}
+
+function coverOf(lib: MediaLibrary): string | undefined {
+  return covers.value[lib.id] || lib.cover;
 }
 </script>
 
@@ -48,8 +87,15 @@ function onLibraryContextMenu(e: MouseEvent, lib: MediaLibrary) {
         class="lib-card"
         @contextmenu.prevent="onLibraryContextMenu($event, lib)"
       >
-        <div class="cover" :class="{ alt: i % 2 === 1 }">
-          <span class="cover-name">{{ lib.name }}</span>
+        <div class="cover" :class="{ alt: i % 2 === 1, 'has-image': !!coverOf(lib) }">
+          <MediaPoster
+            v-if="coverOf(lib)"
+            :src="coverOf(lib)"
+            :title="lib.name"
+            ratio="wide"
+            :variant="(i % 2) as 0 | 1"
+          />
+          <span v-else class="cover-name">{{ lib.name }}</span>
         </div>
         <div class="info">
           <span class="name">{{ lib.name }}</span>
@@ -143,12 +189,24 @@ function onLibraryContextMenu(e: MouseEvent, lib: MediaLibrary) {
   background: var(--fbz-color-panel);
   display: grid;
   place-content: center;
+  overflow: hidden;
   transition:
     border-color var(--fbz-motion-fast),
     transform var(--fbz-motion-fast);
 
   &.alt {
     background: var(--fbz-color-panel-strong);
+  }
+
+  &.has-image {
+    place-content: stretch;
+  }
+
+  :deep(.media-poster) {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: auto;
+    border-radius: 0;
   }
 
   .lib-card:hover & {

@@ -73,6 +73,39 @@ describe('fbz-plugin-http helper', () => {
     assert.deepEqual(hostApi.seenTokens, ['host-token-1', 'host-token-1'])
   })
 
+
+  it('returns HTTP 400 for empty body and invalid JSON', async () => {
+    const plugin = createHttpPluginServer({
+      path: '/fbz-plugin',
+      handleDispatch: async () => ({ ok: true })
+    })
+    const pluginBaseUrl = await listenOnLoopback(plugin)
+
+    const empty = await fetch(`${pluginBaseUrl}/fbz-plugin`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fbz-plugin-id': 'dev.fbz.test' },
+      body: ''
+    })
+    assert.equal(empty.status, 400)
+    assert.deepEqual(await empty.json(), { error: 'request body is required' })
+
+    const invalid = await fetch(`${pluginBaseUrl}/fbz-plugin`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fbz-plugin-id': 'dev.fbz.test' },
+      body: '{not-json'
+    })
+    assert.equal(invalid.status, 400)
+    assert.deepEqual(await invalid.json(), { error: 'invalid JSON body' })
+
+    const arrayBody = await fetch(`${pluginBaseUrl}/fbz-plugin`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fbz-plugin-id': 'dev.fbz.test' },
+      body: '[]'
+    })
+    assert.equal(arrayBody.status, 400)
+    assert.deepEqual(await arrayBody.json(), { error: 'request body must be a JSON object' })
+  })
+
   it('keeps port parsing conservative', () => {
     assert.equal(parsePort('19091', 1), 19091)
     assert.equal(parsePort('0', 1), 1)

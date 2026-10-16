@@ -30,7 +30,10 @@ use crate::{
     config::MediaConfig,
     db::DbPool,
     error::AppError,
-    media::repository::{MediaRepository, PlaybackMediaSourceRecord},
+    media::{
+        repository::{MediaRepository, PlaybackMediaSourceRecord},
+        strm::{StrmResolveRequest, StrmResolver, default_strm_resolver},
+    },
     plugins::hooks::{PluginHookDispatcher, PluginHookEvent},
     state::AppState,
     transcode::repository::{CreateTranscodeSessionInput, TranscodeRepository},
@@ -712,7 +715,13 @@ fn strm_redirect_response(
     media_config: &MediaConfig,
     source: &PlaybackMediaSourceRecord,
 ) -> Result<Response, AppError> {
-    let target = source.strm_target.as_deref().unwrap_or(&source.path).trim();
+    // 鉴权已在 stream_source / download 入口完成；此处只解析 Location，不中继视频体。
+    let resolved = default_strm_resolver().resolve(&StrmResolveRequest {
+        media_file_id: source.media_file_id,
+        path: &source.path,
+        strm_target: source.strm_target.as_deref(),
+    })?;
+    let target = resolved.location.trim();
 
     if !is_allowed_strm_target(media_config, target) {
         return Err(AppError::forbidden("strm target is not allowed"));

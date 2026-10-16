@@ -162,8 +162,10 @@ function ticksToSeconds(ticks: number | null | undefined): number | undefined {
 }
 
 /** 秒 → "2h 6m" / "48m"，用于 meta 展示。 */
-function formatRuntime(seconds: number | undefined): string {
+export function formatRuntime(seconds: number | undefined): string {
   if (!seconds) return "";
+  // 不足 1 分钟的短片（预告/样片）按秒显示，避免出现「0m」。
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s`;
   const totalMinutes = Math.round(seconds / 60);
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
@@ -447,38 +449,52 @@ export async function loadPersonDetail(routeId: string): Promise<PersonDetail | 
   }
 }
 
-/** 加载合集详情与成员，全部来自 Rust 后端 `/Collections/*`。 */
+/** 加载合集详情与成员，全部来自 Rust 后端 `/Collections/*`。
+ * 详情与成员分请求：成员成功即可浏览/播放，不因详情 404 整页回退到列表。
+ */
 export async function loadCollectionDetail(
   routeId: string,
 ): Promise<{ collection: CollectionDetail; parts: MediaItem[] } | undefined> {
-  try {
-    const id = encodeURIComponent(routeId);
-    const [detailResponse, itemsResponse] = await Promise.all([
-      embyRequest.get<BaseItemDto>(`/Collections/${id}`),
-      embyRequest.get<QueryResultDto<BaseItemDto>>(`/Collections/${id}/Items`, {
-        params: { limit: 100, enableImages: true },
-      }),
-    ]);
+  const id = encodeURIComponent(routeId);
+  let item: BaseItemDto | undefined;
+  let parts: MediaItem[] = [];
 
-    const item = detailResponse.data;
-    const parts = (itemsResponse.data.Items ?? []).map(collectionPartToMediaItem);
-    const firstPoster = parts.find((part) => part.poster)?.poster ?? null;
-    return {
-      collection: {
-        key: `collection:${item.Id}`,
-        id: Number.isFinite(Number(item.Id)) ? Number(item.Id) : 0,
-        type: "collection",
-        title: item.Name,
-        overview: item.Overview ?? "",
-        poster_path: firstPoster,
-        backdrop_path: null,
-        parts: [],
-      },
-      parts,
-    };
+  try {
+    const { data } = await embyRequest.get<BaseItemDto>(`/Collections/${id}`);
+    item = data;
   } catch {
-    return undefined;
+    item = undefined;
   }
+
+  try {
+    const { data } = await embyRequest.get<QueryResultDto<BaseItemDto>>(
+      `/Collections/${id}/Items`,
+      { params: { Limit: 100, EnableImages: true } },
+    );
+    parts = (data.Items ?? []).map(collectionPartToMediaItem);
+  } catch {
+    parts = [];
+  }
+
+  // 详情与成员皆失败 → 真缺失；否则仍展示合集壳，便于打开子项并播放。
+  if (!item && !parts.length) return undefined;
+
+  const title = item?.Name ?? "合集";
+  const publicId = item?.Id ?? routeId;
+  const firstPoster = parts.find((part) => part.poster)?.poster ?? null;
+  return {
+    collection: {
+      key: `collection:${publicId}`,
+      id: Number.isFinite(Number(publicId)) ? Number(publicId) : 0,
+      type: "collection",
+      title,
+      overview: item?.Overview ?? "",
+      poster_path: firstPoster,
+      backdrop_path: null,
+      parts: [],
+    },
+    parts,
+  };
 }
 
 /* ---------- 剧集季/集（真实后端数据） ---------- */
@@ -611,6 +627,9 @@ export interface PlaybackSourceResult {
   size?: number;
   proxyUri?: string;
   server?: { playSessionId: string; mediaSourceId: string; startTicks: number };
+  mediaSources?: { id: string; label: string }[];
+  chapters?: import("@/stores/playback.ts").PlaybackChapter[];
+  duration?: number;
 }
 
 export async function fetchPlaybackSource(
@@ -621,8 +640,24 @@ export async function fetchPlaybackSource(
     const { itemDetail, preparePlayback } = await import("./server.ts");
     const item = await itemDetail(itemId);
     const prepared = await preparePlayback(item, mediaSourceId);
-    return { ...prepared.source, server: prepared.server };
+    return {
+      ...prepared.source,
+      server: prepared.server,
+      mediaSources: prepared.mediaSources,
+      duration: prepared.duration,
+      chapters: prepared.chapters,
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * 管理员删除媒体条目。对接 Emby `DELETE /Items/{id}`（库内软删；默认不删磁盘文件）。
+ * 右键「删除」走此接口；`DeleteFiles=true` 留给后续确认流。
+ */
+export async function deleteMediaItem(itemId: string, deleteFiles = false): Promise<void> {
+  await embyRequest.delete(`/Items/${encodeURIComponent(itemId)}`, {
+    params: { DeleteFiles: deleteFiles },
+  });
 }

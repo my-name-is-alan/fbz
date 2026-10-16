@@ -50,6 +50,18 @@ watch(streamUrl, async (url) => {
   el.src = url;
   currentTime.value = 0;
   duration.value = 0;
+  // 续听：元数据就绪后跳到起播位置（有声书）。
+  const startSeconds = current.value?.startSeconds ?? 0;
+  if (startSeconds > 0) {
+    el.addEventListener(
+      "loadedmetadata",
+      () => {
+        if (Number.isFinite(el.duration) && startSeconds < el.duration)
+          el.currentTime = startSeconds;
+      },
+      { once: true },
+    );
+  }
 
   // 新曲会话：记录 id + 新会话标识，上报 start（best-effort）。
   reportedItemId = current.value?.id;
@@ -59,7 +71,7 @@ watch(streamUrl, async (url) => {
     void reportPlaybackStart({
       itemId: reportedItemId,
       playSessionId,
-      positionSeconds: 0,
+      positionSeconds: startSeconds,
     }).catch(() => {});
   }
 

@@ -1,0 +1,37 @@
+{
+  "id": "fbz.provider.imdb",
+  "name": "IMDb Provider",
+  "version": "0.2.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19104/fbz-plugin",
+  "description": "Official IMDb provider (minimal). OMDb when api_key set; else IMDb suggestion fallback + tt id normalize. Secrets in plugin config/env only — never in this manifest or core.",
+  "permissions": [
+    {
+      "key": "metadata.read",
+      "reason": "Receive metadata.provider.query lookups with recognition-layer context; contribute whitelist fields via sync response."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "metadata.provider.query",
+      "handler": "providers.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "api_key",
+      "label": "OMDb API key",
+      "type": "secret",
+      "required": false,
+      "helpText": "OMDb API key (https://www.omdbapi.com). Optional; without it, suggestion fallback is used."
+    },
+    {
+      "key": "data_source",
+      "label": "Data source",
+      "type": "string",
+      "required": false,
+      "helpText": "omdb (default when key set) or suggest"
+    }
+  ]
+}

@@ -104,6 +104,8 @@ pub struct ItemsFilters2Dto {
     pub genres: Vec<NameLongIdPairDto>,
     pub studios: Vec<NameLongIdPairDto>,
     pub tags: Vec<String>,
+    pub official_ratings: Vec<String>,
+    pub years: Vec<i32>,
 }
 
 pub async fn items_filters(
@@ -169,14 +171,24 @@ fn items_filters_to_dto(result: ItemsFiltersResult) -> ItemsFiltersDto {
 }
 
 fn items_filters2_to_dto(result: ItemsFiltersResult) -> ItemsFilters2Dto {
+    let genres = result
+        .genres
+        .into_iter()
+        .zip(result.genre_ids.into_iter().chain(std::iter::repeat(0)))
+        .map(|(name, id)| NameLongIdPairDto { name, id })
+        .collect();
+    let studios = result
+        .studio_names
+        .into_iter()
+        .zip(result.studio_ids.into_iter().chain(std::iter::repeat(0)))
+        .map(|(name, id)| NameLongIdPairDto { name, id })
+        .collect();
     ItemsFilters2Dto {
-        genres: result
-            .genres
-            .into_iter()
-            .map(|name| NameLongIdPairDto { name, id: 0 })
-            .collect(),
-        studios: Vec::new(),
+        genres,
+        studios,
         tags: result.tags,
+        official_ratings: result.official_ratings,
+        years: result.years,
     }
 }
 
@@ -620,9 +632,12 @@ mod tests {
     fn items_filters2_response_uses_official_query_filters_shape() {
         let filters = items_filters2_to_dto(ItemsFiltersResult {
             genres: vec!["Action".to_owned()],
+            genre_ids: vec![42],
             tags: vec!["HDR".to_owned()],
             official_ratings: vec!["PG-13".to_owned()],
             years: vec![2024],
+            studio_names: vec!["Warner".to_owned()],
+            studio_ids: vec![7],
         });
 
         assert_eq!(
@@ -631,11 +646,18 @@ mod tests {
                 "Genres": [
                     {
                         "Name": "Action",
-                        "Id": 0
+                        "Id": 42
                     }
                 ],
-                "Studios": [],
-                "Tags": ["HDR"]
+                "Studios": [
+                    {
+                        "Name": "Warner",
+                        "Id": 7
+                    }
+                ],
+                "Tags": ["HDR"],
+                "OfficialRatings": ["PG-13"],
+                "Years": [2024]
             })
         );
     }

@@ -1,0 +1,653 @@
+:root,
+html.dark {
+  color-scheme: dark;
+  --ui-background: #09090e;
+  --ui-surface: #111119;
+  --ui-surface-raised: #171722;
+  --ui-surface-hover: #20202c;
+  --ui-input: #0d0d14;
+  --ui-border: #282838;
+  --ui-border-strong: #3a3a50;
+  --ui-text: #eeeef6;
+  --ui-text-muted: #9c9cb2;
+  --ui-text-subtle: #707085;
+  --ui-accent: var(--hdhive-accent-main, #d08700);
+  --ui-accent-hover: var(--hdhive-accent-light, #f0b100);
+  --ui-accent-channel: var(--hdhive-accent-main-channel, 208 135 0);
+  --ui-accent-contrast: var(--hdhive-accent-contrast-text, #0a0a0a);
+  --ui-danger: #fb7185;
+  --ui-danger-contrast: #19080c;
+  --ui-success: #34d399;
+  --ui-success-contrast: #06130e;
+  --ui-warning: #fbbf24;
+  --ui-warning-contrast: #171005;
+  --ui-overlay: rgb(2 3 8 / 72%);
+  --ui-glass: rgb(17 17 25 / 82%);
+  --ui-glass-strong: rgb(18 18 28 / 92%);
+  --ui-glass-border: rgb(255 255 255 / 14%);
+  --ui-glass-backdrop: rgb(2 3 8 / 56%);
+  --ui-shadow-surface: 0 16px 42px rgb(0 0 0 / 24%);
+  --ui-shadow-float: 0 24px 70px rgb(0 0 0 / 42%);
+  --ui-shadow-dialog: 0 28px 90px rgb(0 0 0 / 52%);
+}
+
+html.light {
+  color-scheme: light;
+  --ui-background: #f5f6f9;
+  --ui-surface: #ffffff;
+  --ui-surface-raised: #ffffff;
+  --ui-surface-hover: #eff0f5;
+  --ui-input: #fafafd;
+  --ui-border: #dcdeea;
+  --ui-border-strong: #c4c7d7;
+  --ui-text: #181822;
+  --ui-text-muted: #626276;
+  --ui-text-subtle: #89899c;
+  --ui-accent: var(--hdhive-accent-main, #f0b100);
+  --ui-accent-hover: var(--hdhive-accent-dark, #d08700);
+  --ui-accent-channel: var(--hdhive-accent-main-channel, 240 177 0);
+  --ui-accent-contrast: var(--hdhive-accent-contrast-text, #18140a);
+  --ui-danger: #be123c;
+  --ui-danger-contrast: #ffffff;
+  --ui-success: #047857;
+  --ui-success-contrast: #ffffff;
+  --ui-warning: #a16207;
+  --ui-warning-contrast: #ffffff;
+  --ui-overlay: rgb(25 25 38 / 42%);
+  --ui-glass: rgb(255 255 255 / 86%);
+  --ui-glass-strong: rgb(248 249 252 / 96%);
+  --ui-glass-border: rgb(220 222 234 / 88%);
+  --ui-glass-backdrop: rgb(25 25 38 / 24%);
+  --ui-shadow-surface: 0 14px 38px rgb(40 40 70 / 10%);
+  --ui-shadow-float: 0 24px 70px rgb(40 40 70 / 16%);
+  --ui-shadow-dialog: 0 28px 90px rgb(40 40 70 / 24%);
+}
+
+:root {
+  --ui-focus: var(--ui-accent-hover);
+  --ui-header-height: 64px;
+  --ui-content-width: 1280px;
+  --ui-shell-width: 1536px;
+  --ui-shell-gutter: 24px;
+  --ui-radius-sm: 7px;
+  --ui-radius-md: 11px;
+  --ui-radius-lg: 16px;
+  --ui-font-sans: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --ui-font-mono: var(--font-mono, "Roboto Mono"), var(--ui-font-sans);
+  --ui-duration-fast: 160ms;
+  --ui-duration-base: 220ms;
+  --ui-duration-theme: 280ms;
+  --ui-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* HeroUI v3 semantic bridge driven by the local light/dark mode store. */
+  --background: var(--ui-background);
+  --foreground: var(--ui-text);
+  --surface: var(--ui-surface);
+  --surface-foreground: var(--ui-text);
+  --surface-secondary: var(--ui-surface-raised);
+  --surface-secondary-foreground: var(--ui-text);
+  --surface-tertiary: var(--ui-surface-hover);
+  --surface-tertiary-foreground: var(--ui-text);
+  --surface-hover: var(--ui-surface-hover);
+  --overlay: var(--ui-surface-raised);
+  --overlay-foreground: var(--ui-text);
+  --muted: var(--ui-text-muted);
+  --default: var(--ui-surface-hover);
+  --default-foreground: var(--ui-text);
+  --accent: var(--ui-accent);
+  --accent-hover: var(--ui-accent-hover);
+  --accent-foreground: var(--ui-accent-contrast);
+  --focus: var(--ui-focus);
+  --link: var(--ui-accent);
+  --field-background: var(--ui-input);
+  --field-foreground: var(--ui-text);
+  --field-placeholder: var(--ui-text-subtle);
+  --field-border: var(--ui-border);
+  --field-border-width: 1px;
+  --border: var(--ui-border);
+  --separator: var(--ui-border);
+  --success: var(--ui-success);
+  --success-foreground: var(--ui-success-contrast);
+  --warning: var(--ui-warning);
+  --warning-foreground: var(--ui-warning-contrast);
+  --danger: var(--ui-danger);
+  --danger-foreground: var(--ui-danger-contrast);
+  --backdrop: var(--ui-overlay);
+  --radius: var(--ui-radius-sm);
+  --field-radius: var(--ui-radius-md);
+  --surface-shadow: var(--ui-shadow-surface);
+  --overlay-shadow: var(--ui-shadow-dialog);
+  --field-shadow: none;
+  --font-sans: var(--ui-font-sans);
+  --font-mono: var(--ui-font-mono);
+  --default-font-family: var(--ui-font-sans);
+  --font-hdhive-sans: "Noto Sans SC";
+
+  /* Temporary aliases while existing shell consumers move to --ui-*. */
+  --hd-v2-background: var(--ui-background);
+  --hd-v2-surface: var(--ui-surface);
+  --hd-v2-surface-raised: var(--ui-surface-raised);
+  --hd-v2-surface-hover: var(--ui-surface-hover);
+  --hd-v2-border: var(--ui-border);
+  --hd-v2-border-strong: var(--ui-border-strong);
+  --hd-v2-text: var(--ui-text);
+  --hd-v2-text-muted: var(--ui-text-muted);
+  --hd-v2-accent: var(--ui-accent);
+  --hd-v2-accent-hover: var(--ui-accent-hover);
+  --hd-v2-accent-channel: var(--ui-accent-channel);
+  --hd-v2-danger: var(--ui-danger);
+  --hd-v2-success: var(--ui-success);
+  --hd-v2-warning: var(--ui-warning);
+  --hd-v2-header-height: var(--ui-header-height);
+  --hd-v2-content-width: var(--ui-content-width);
+  --hd-v2-radius-sm: var(--ui-radius-sm);
+  --hd-v2-radius-md: var(--ui-radius-md);
+  --hd-v2-radius-lg: var(--ui-radius-lg);
+  --hd-v2-shadow-float: var(--ui-shadow-float);
+}
+
+@layer theme {
+  :root,
+  :host {
+    --font-sans: var(--ui-font-sans);
+    --font-mono: var(--ui-font-mono);
+  }
+}
+
+html {
+  max-width: 100%;
+  background: var(--ui-background);
+  font-family: var(--ui-font-sans);
+  text-rendering: optimizeLegibility;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ui-text-subtle) 72%, transparent) transparent;
+}
+
+html,
+html.dark {
+  color-scheme: dark;
+}
+
+html.dark {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html.light {
+  color-scheme: light;
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+}
+
+html.theme-revealing {
+  view-transition-name: root;
+}
+
+html.theme-revealing::view-transition-old(root),
+html.theme-revealing::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+html.theme-revealing::view-transition-old(root) {
+  z-index: 1;
+}
+
+html.theme-revealing::view-transition-new(root) {
+  z-index: 2147483646;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ui-text-subtle) 58%, transparent);
+  border: 2px solid transparent;
+  border-radius: 99px;
+  background-clip: padding-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100dvh;
+  margin: 0;
+  overflow-x: clip;
+  color: var(--ui-text);
+  background: var(--ui-background);
+  font-family: var(--ui-font-sans);
+}
+
+button,
+input,
+textarea,
+select,
+optgroup {
+  font: inherit;
+}
+
+::selection {
+  color: var(--ui-accent-contrast);
+  background: var(--ui-accent);
+}
+
+.hd-shell-v2 {
+  min-height: 100dvh;
+  color: var(--ui-text);
+  background:
+    radial-gradient(circle at 50% -20%, rgb(var(--ui-accent-channel) / 10%), transparent 34rem),
+    var(--ui-background);
+  font-family: var(--ui-font-sans);
+}
+
+.hd-shell-v2 *,
+.hd-shell-v2 *::before,
+.hd-shell-v2 *::after {
+  box-sizing: border-box;
+}
+
+:where(.hd-shell-v2 a) {
+  color: inherit;
+}
+
+.hd-shell-v2 button {
+  font-family: inherit;
+}
+
+.hd-shell-v2 input,
+.hd-shell-v2 textarea,
+.hd-shell-v2 select {
+  font: inherit;
+}
+
+.hd-shell-v2 :focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 3px;
+}
+
+.hd-shell-v2 input,
+.hd-shell-v2 textarea,
+.hd-shell-v2 select {
+  color: var(--ui-text);
+  border-color: var(--ui-border);
+  background: var(--ui-input);
+}
+
+.button {
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--ui-text);
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.button--sm {
+  min-height: 32px;
+  font-size: 12px;
+}
+
+.button--lg {
+  min-height: 40px;
+  font-size: 14px;
+}
+
+.button--primary {
+  color: var(--ui-accent-contrast);
+  background: var(--ui-accent);
+  box-shadow: 0 9px 24px rgb(var(--ui-accent-channel) / 18%);
+}
+
+.button--primary:hover,
+.button--primary[data-hovered="true"] {
+  background: var(--ui-accent-hover);
+  box-shadow: 0 12px 30px rgb(var(--ui-accent-channel) / 24%);
+}
+
+.button--secondary,
+.button--tertiary,
+.button--outline {
+  border-color: color-mix(in srgb, var(--ui-border-strong) 76%, transparent);
+  color: var(--ui-text);
+  background: color-mix(in srgb, var(--ui-surface-raised) 74%, transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
+}
+
+.button--secondary:hover,
+.button--secondary[data-hovered="true"],
+.button--tertiary:hover,
+.button--tertiary[data-hovered="true"],
+.button--outline:hover,
+.button--outline[data-hovered="true"] {
+  border-color: var(--ui-border-strong);
+  background: var(--ui-surface-hover);
+}
+
+.button--ghost {
+  color: var(--ui-text-muted);
+  background: transparent;
+}
+
+.button--ghost:hover,
+.button--ghost[data-hovered="true"] {
+  color: var(--ui-text);
+  background: color-mix(in srgb, var(--ui-surface-hover) 74%, transparent);
+}
+
+.button--danger {
+  color: var(--ui-danger-contrast);
+  background: var(--ui-danger);
+  box-shadow: 0 9px 24px color-mix(in srgb, var(--ui-danger) 22%, transparent);
+}
+
+.button:active,
+.button[data-pressed="true"] {
+  translate: 0 1px;
+  scale: 0.98;
+}
+
+.button:disabled,
+.button[aria-disabled="true"] {
+  box-shadow: none;
+  opacity: 0.48;
+  translate: none;
+  scale: 1;
+}
+
+.hd-shell-v2 [data-ui-input-control] {
+  min-height: 44px;
+  border: 1px solid var(--ui-border);
+  border-radius: 14px;
+  color: var(--ui-text);
+  background: color-mix(in srgb, var(--ui-input) 88%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 5%),
+    0 8px 24px rgb(20 20 40 / 4%);
+  outline: none;
+}
+
+.hd-shell-v2 [data-ui-input-control]:hover,
+.hd-shell-v2 [data-ui-input-control][data-hovered="true"] {
+  border-color: var(--ui-border-strong);
+  background: color-mix(in srgb, var(--ui-surface-raised) 82%, transparent);
+}
+
+.hd-shell-v2 [data-ui-input-control]:focus-visible,
+.hd-shell-v2 [data-ui-input-control]:focus-within,
+.hd-shell-v2 [data-ui-input-control][data-focus-visible="true"] {
+  border-color: rgb(var(--ui-accent-channel) / 54%);
+  background: color-mix(in srgb, var(--ui-surface) 86%, transparent);
+  box-shadow:
+    0 0 0 3px rgb(var(--ui-accent-channel) / 11%),
+    inset 0 1px 0 rgb(255 255 255 / 7%);
+  outline: none;
+}
+
+.hd-shell-v2 [data-ui-input-control] [data-ui-input] {
+  color: var(--ui-text);
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+
+.hd-shell-v2 [data-ui-select-value] {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.hd-shell-v2 [data-ui-input]::placeholder {
+  color: var(--ui-text-subtle);
+  opacity: 1;
+}
+
+@media (max-width: 760px) {
+  /* iOS Safari focuses and zooms editable controls below 16px. Keep the
+     viewport zoomable for accessibility and remove only the auto-zoom trigger. */
+  :where(input, textarea, select, [contenteditable='true']) {
+    font-size: 16px !important;
+  }
+}
+
+.toggle-button-group {
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--ui-border);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--ui-surface-raised) 72%, transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 5%);
+}
+
+.toggle-button {
+  border: 0;
+  border-radius: 9px;
+  color: var(--ui-text-muted);
+  background: transparent;
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.toggle-button--sm {
+  min-height: 32px;
+  font-size: 12px;
+}
+
+.toggle-button--lg {
+  min-height: 40px;
+  font-size: 14px;
+}
+
+.toggle-button:hover,
+.toggle-button[data-hovered="true"] {
+  color: var(--ui-text);
+  background: color-mix(in srgb, var(--ui-surface-hover) 72%, transparent);
+}
+
+.toggle-button[data-selected="true"] {
+  color: var(--ui-text);
+  background: rgb(var(--ui-accent-channel) / 13%);
+  box-shadow:
+    inset 0 0 0 1px rgb(var(--ui-accent-channel) / 24%),
+    0 6px 18px rgb(var(--ui-accent-channel) / 8%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  :where(body, main, section, article, aside, header, footer, nav, [role="dialog"], [role="menu"]),
+  .hd-shell-v2 {
+    transition:
+      color var(--ui-duration-base) var(--ui-ease-out),
+      background-color var(--ui-duration-theme) var(--ui-ease-out),
+      border-color var(--ui-duration-theme) var(--ui-ease-out),
+      box-shadow var(--ui-duration-theme) var(--ui-ease-out);
+  }
+
+  :where(
+    a,
+    button,
+    input,
+    textarea,
+    select,
+    summary,
+    [role="button"],
+    [role="menuitem"],
+    [role="option"],
+    [role="tab"]
+  ) {
+    transition-property: color, background-color, border-color, box-shadow, opacity, transform, translate, scale;
+    transition-duration: var(--ui-duration-fast);
+    transition-timing-function: var(--ui-ease-out);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/*
+ * GTX 1030 / 软件光栅化：关掉页面里大面积毛玻璃。
+ * 不要写 * { will-change: auto }，也不要碰顶栏——AppHeader 靠
+ * --header-scroll-progress / --header-top-weight 实时交叉淡入，
+ * 全局合成层重置会把 header::before 钉在第一帧，滚动透明就停了。
+ */
+html[data-low-effects='1'] *:not(header),
+html[data-low-effects='1'] *:not(header)::before,
+html[data-low-effects='1'] *:not(header)::after,
+html[data-low-effects='1'] *:not(header)::backdrop {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/*
+ * Overlay masks must stay flat. A viewport-sized backdrop-filter continuously
+ * samples and repaints the page underneath every open dialog/drawer, which is
+ * especially expensive on weaker GPUs. Keep the readable translucent color,
+ * but never blur or otherwise filter the page behind it.
+ */
+:is(
+    [data-slot='modal-backdrop'],
+    [data-slot='alert-dialog-backdrop'],
+    [data-slot='drawer-backdrop']
+  ) {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: var(--ui-glass-backdrop) !important;
+}
+
+/*
+ * Overlay motion is part of the application interaction contract. HeroUI exposes
+ * entering/exiting state on each overlay, but the global reduced-motion reset
+ * above otherwise compresses those states into a single frame. Keep this narrow
+ * override limited to dialogs, drawers and popovers; an explicit root opt-out
+ * remains available through data-reduce-motion="true".
+ */
+@keyframes hdhive-overlay-enter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes hdhive-overlay-exit {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes hdhive-modal-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0) scale(0.975);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes hdhive-modal-exit {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.985);
+  }
+}
+
+@keyframes hdhive-popover-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -6px, 0) scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes hdhive-popover-exit {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0) scale(0.98);
+  }
+}
+
+html:not([data-reduce-motion='true'])
+  :is([data-slot='modal-backdrop'], [data-slot='alert-dialog-backdrop'], [data-slot='drawer-backdrop'])[data-entering='true'] {
+  animation: hdhive-overlay-enter 200ms cubic-bezier(0.22, 1, 0.36, 1) both !important;
+}
+
+html:not([data-reduce-motion='true'])
+  :is([data-slot='modal-backdrop'], [data-slot='alert-dialog-backdrop'], [data-slot='drawer-backdrop'])[data-exiting='true'] {
+  animation: hdhive-overlay-exit 160ms ease-in both !important;
+}
+
+html:not([data-reduce-motion='true'])
+  :is([data-slot='modal-container'], [data-slot='alert-dialog-container'])[data-entering='true'] {
+  animation: hdhive-modal-enter 240ms cubic-bezier(0.22, 1, 0.36, 1) both !important;
+  will-change: opacity, transform;
+}
+
+html:not([data-reduce-motion='true'])
+  :is([data-slot='modal-container'], [data-slot='alert-dialog-container'])[data-exiting='true'] {
+  animation: hdhive-modal-exit 180ms ease-in both !important;
+  will-change: opacity, transform;
+}
+
+html:not([data-reduce-motion='true'])
+  :is(.popover, [data-slot='select-popover'], [data-slot='combo-box-popover'], [data-slot='dropdown-popover'])[data-entering='true'] {
+  animation: hdhive-popover-enter 180ms cubic-bezier(0.22, 1, 0.36, 1) both !important;
+  will-change: opacity, transform;
+}
+
+html:not([data-reduce-motion='true'])
+  :is(.popover, [data-slot='select-popover'], [data-slot='combo-box-popover'], [data-slot='dropdown-popover'])[data-exiting='true'] {
+  animation: hdhive-popover-exit 140ms ease-in both !important;
+  will-change: opacity, transform;
+}

@@ -1,0 +1,58 @@
+{
+  "id": "fbz.provider.tmdb",
+  "name": "TMDB Provider",
+  "version": "0.2.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:19101/fbz-plugin",
+  "description": "Official TMDB metadata provider (BaseMatch). Real metadata.provider.query via TMDB v3 HTTP. Secrets in plugin config/env only — never in this manifest or core.",
+  "permissions": [
+    {
+      "key": "metadata.read",
+      "reason": "Receive metadata.provider.query lookups with recognition-layer context; contribute whitelist fields via sync response."
+    }
+  ],
+  "hooks": [
+    {
+      "event": "metadata.provider.query",
+      "handler": "providers.query"
+    }
+  ],
+  "configSchema": [
+    {
+      "key": "access_token",
+      "label": "TMDB Access Token",
+      "type": "secret",
+      "required": true,
+      "helpText": "TMDB v4/v3 read access token. Stored encrypted; never echoed."
+    },
+    {
+      "key": "api_base_url",
+      "label": "API base URL",
+      "type": "url",
+      "required": false,
+      "helpText": "Default https://api.themoviedb.org/3"
+    },
+    {
+      "key": "image_base_url",
+      "label": "Image base URL",
+      "type": "url",
+      "required": false,
+      "helpText": "Default https://image.tmdb.org/t/p"
+    },
+    {
+      "key": "language",
+      "label": "Preferred language",
+      "type": "string",
+      "required": false,
+      "helpText": "BCP-47 / TMDB language tag, e.g. zh-CN"
+    },
+    {
+      "key": "include_adult",
+      "label": "Include adult",
+      "type": "boolean",
+      "required": false,
+      "helpText": "Pass through to TMDB search when true"
+    }
+  ]
+}

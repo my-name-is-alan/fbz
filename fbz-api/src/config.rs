@@ -56,10 +56,12 @@ pub struct Config {
     pub plugins: PluginConfig,
     pub schedules: ScheduleConfig,
     pub scan_worker: ScanWorkerConfig,
+    pub library_monitor: LibraryMonitorConfig,
     pub scheduler: SchedulerWorkerConfig,
     pub transcode_worker: TranscodeWorkerConfig,
     pub probe_worker: ProbeWorkerConfig,
     pub photo_worker: PhotoWorkerConfig,
+    pub marker_detect_worker: MarkerDetectWorkerConfig,
     pub metadata_worker: MetadataWorkerConfig,
     pub plugin_worker: PluginWorkerConfig,
     pub notification_worker: NotificationWorkerConfig,
@@ -304,6 +306,16 @@ pub struct ScanWorkerConfig {
     pub interval_seconds: u64,
 }
 
+/// Library Monitor (path-change → `library.scan`). Default off; per-library
+/// `enable_realtime_monitor` still required when the worker is enabled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryMonitorConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    /// Emby `LibraryMonitorDelay` analogue — wait this long after first change.
+    pub debounce_seconds: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchedulerWorkerConfig {
     pub enabled: bool,
@@ -326,6 +338,14 @@ pub struct ProbeWorkerConfig {
 pub struct PhotoWorkerConfig {
     pub enabled: bool,
     pub interval_seconds: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkerDetectWorkerConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    /// 每 tick 最多串行认领的作业数（与转码分计的并发帽）。
+    pub max_concurrent: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -665,6 +685,11 @@ impl Config {
                 enabled: bool_or("FBZ_SCAN_WORKER_ENABLED", false, &source)?,
                 interval_seconds: parse_or("FBZ_SCAN_WORKER_INTERVAL_SECONDS", 5_u64, &source)?,
             },
+            library_monitor: LibraryMonitorConfig {
+                enabled: bool_or("FBZ_LIBRARY_MONITOR_ENABLED", false, &source)?,
+                interval_seconds: parse_or("FBZ_LIBRARY_MONITOR_INTERVAL_SECONDS", 30_u64, &source)?,
+                debounce_seconds: parse_or("FBZ_LIBRARY_MONITOR_DEBOUNCE_SECONDS", 60_u64, &source)?,
+            },
             scheduler: SchedulerWorkerConfig {
                 enabled: bool_or("FBZ_SCHEDULER_ENABLED", false, &source)?,
                 interval_seconds: parse_or("FBZ_SCHEDULER_INTERVAL_SECONDS", 5_u64, &source)?,
@@ -684,6 +709,15 @@ impl Config {
             photo_worker: PhotoWorkerConfig {
                 enabled: bool_or("FBZ_PHOTO_WORKER_ENABLED", false, &source)?,
                 interval_seconds: parse_or("FBZ_PHOTO_WORKER_INTERVAL_SECONDS", 10_u64, &source)?,
+            },
+            marker_detect_worker: MarkerDetectWorkerConfig {
+                enabled: bool_or("FBZ_MARKER_DETECT_WORKER_ENABLED", false, &source)?,
+                interval_seconds: parse_or(
+                    "FBZ_MARKER_DETECT_WORKER_INTERVAL_SECONDS",
+                    15_u64,
+                    &source,
+                )?,
+                max_concurrent: parse_or("FBZ_MARKER_DETECT_MAX_CONCURRENT", 1_u32, &source)?,
             },
             metadata_worker: MetadataWorkerConfig {
                 enabled: bool_or("FBZ_METADATA_WORKER_ENABLED", false, &source)?,
@@ -1075,6 +1109,20 @@ impl Config {
         if self.photo_worker.interval_seconds == 0 {
             return Err(ConfigError::new(
                 "FBZ_PHOTO_WORKER_INTERVAL_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.marker_detect_worker.interval_seconds == 0 {
+            return Err(ConfigError::new(
+                "FBZ_MARKER_DETECT_WORKER_INTERVAL_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.marker_detect_worker.max_concurrent == 0 {
+            return Err(ConfigError::new(
+                "FBZ_MARKER_DETECT_MAX_CONCURRENT",
                 "must be greater than zero",
             ));
         }

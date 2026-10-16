@@ -1,0 +1,28 @@
+{
+  "id": "dev.fbz.storage.guangya",
+  "name": "Guangya Storage",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "runtime": "http",
+  "entrypoint": "http://127.0.0.1:8098/rpc",
+  "description": "First-party Guangya HTTP cloud storage media source. Installable package identity for approval UI; process still starts via compose or node. Host dispatches via the StorageProvider registry (id=guangya); endpoint from FBZ_STORAGE_PROVIDER_ENDPOINT_guangya or legacy FBZ_GUANGYA_PLUGIN_URL. Plugin communication and host encryption keys stay in deployment secrets only — never in this manifest.",
+  "permissions": [
+    {
+      "key": "storage.account",
+      "reason": "Bind Guangya accounts via device-code login and refresh host-held credentials."
+    },
+    {
+      "key": "storage.read",
+      "reason": "List cloud directories and read small sidecars (NFO/images/subtitles) for mounts."
+    },
+    {
+      "key": "storage.resolve",
+      "reason": "Resolve short-lived HTTPS playback URLs for host-authorized streaming."
+    },
+    {
+      "key": "library.read",
+      "reason": "Expose cloud-discovered library trees and mount paths to the host for media-library association."
+    }
+  ],
+  "hooks": []
+}

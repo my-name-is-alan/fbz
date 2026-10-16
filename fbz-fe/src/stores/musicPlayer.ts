@@ -8,6 +8,8 @@ export interface PlayerTrack {
   subtitle?: string;
   /** 封面绝对地址；为空时播放栏渲染占位块。 */
   poster?: string;
+  /** 起播位置（秒）；有声书续听时由调用方给出，>0 时加载后跳到该处。 */
+  startSeconds?: number;
 }
 
 /**
