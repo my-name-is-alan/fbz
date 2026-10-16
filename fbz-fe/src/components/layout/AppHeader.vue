@@ -2,21 +2,33 @@
 import { useLibraryStore } from "@/stores/library.ts";
 import { useAuthStore } from "@/stores/auth.ts";
 import { searchHints, type SearchResultItem } from "@/service/modules/search.ts";
+import { libraryRoute } from "@/utils/libraryRoute.ts";
+import { libraryTypeMeta } from "@/utils/libraryType.ts";
 
 const emit = defineEmits<{ openDrawer: [] }>();
 
 const libraryStore = useLibraryStore();
 const authStore = useAuthStore();
 const { libraries } = storeToRefs(libraryStore);
-const accountMenuOpen = ref(false);
 const router = useRouter();
+const route = useRoute();
 
-// 桌面端顶部内联搜索：回车跳 /search?q=；输入防抖出建议；空关键词跳 /search 引导态。
+const fmt = new Intl.NumberFormat("zh-CN");
+
+/* ---------- 顶栏内联搜索：回车跳 /search?q=；输入防抖出联想；空关键词进搜索页引导态 ---------- */
 const searchTerm = ref("");
 const suggestions = ref<SearchResultItem[]>([]);
 const suggestOpen = ref(false);
 const suggestLoading = ref(false);
 let suggestController: AbortController | undefined;
+
+const SUGGEST_ICONS: Record<string, string> = {
+  movie: "movie",
+  tv: "tv",
+  person: "user-round",
+  album: "album",
+  artist: "artist",
+};
 
 const loadSuggestions = debounce(async (term: string) => {
   const trimmed = term.trim();
@@ -29,6 +41,7 @@ const loadSuggestions = debounce(async (term: string) => {
   const controller = new AbortController();
   suggestController = controller;
   suggestLoading.value = true;
+  suggestOpen.value = true;
   try {
     const items = await searchHints(trimmed, {
       userId: authStore.userId,
@@ -37,7 +50,6 @@ const loadSuggestions = debounce(async (term: string) => {
     });
     if (controller.signal.aborted) return;
     suggestions.value = items;
-    suggestOpen.value = items.length > 0 || trimmed.length > 0;
   } catch (error) {
     if ((error as { code?: string })?.code === "ERR_CANCELED") return;
     suggestions.value = [];
@@ -63,182 +75,203 @@ function pickSuggestion(item: SearchResultItem) {
   void router.push(item.to);
 }
 
-function closeSuggestions() {
-  suggestOpen.value = false;
+/* ---------- 媒体库下拉 ---------- */
+const libMenuOpen = ref(false);
+const libraryActive = computed(() =>
+  ["/library", "/music/", "/books/"].some((p) => route.path.startsWith(p)),
+);
+
+/* ---------- 账户菜单 ---------- */
+const accountMenuOpen = ref(false);
+
+function logout() {
+  accountMenuOpen.value = false;
+  authStore.logout();
+  void router.push({ name: "login" });
 }
 
-// 手机端搜索图标：直接进搜索页（输入框在页内）。
-function goSearch() {
-  void router.push({ name: "search" });
-}
-
-const accountLinks = [
-  { label: "后台管理", to: "/admin" },
-  { label: "个人信息", to: "/admin/profile" },
-  { label: "消息中心", to: "/admin/logs" },
-] as const;
-
-// 滚动 → header 镂空磨砂
-const scrolled = ref(false);
-const route = useRoute();
-const hasHeroBackdrop = computed(() => {
-  const name = String(route.name ?? "");
-  const path = route.path;
-  return (
-    ["home", "movie-detail", "tv-detail", "collection-detail"].includes(name) ||
-    path === "/" ||
-    path.startsWith("/movie/") ||
-    path.startsWith("/tv/") ||
-    path.startsWith("/collection/")
-  );
-});
-function onScroll() {
-  scrolled.value = window.scrollY > 50;
-}
-onMounted(() => {
-  onScroll();
-  window.addEventListener("scroll", onScroll, { passive: true });
-});
-onBeforeUnmount(() => window.removeEventListener("scroll", onScroll));
+watch(
+  () => route.fullPath,
+  () => {
+    libMenuOpen.value = false;
+    accountMenuOpen.value = false;
+    suggestOpen.value = false;
+  },
+);
 
 useEventListener(window, "click", (event) => {
   const target = event.target as HTMLElement | null;
   if (!target?.closest(".account-menu")) accountMenuOpen.value = false;
-  if (!target?.closest(".header-search")) closeSuggestions();
+  if (!target?.closest(".header-search")) suggestOpen.value = false;
+  if (!target?.closest(".lib-wrap")) libMenuOpen.value = false;
 });
 
-const fmt = new Intl.NumberFormat("en-US");
-
-function closeAccountMenu() {
-  accountMenuOpen.value = false;
-}
-
-function logout() {
-  accountMenuOpen.value = false;
-}
-
 useEventListener(window, "keydown", (e) => {
-  if (e.key === "Escape") {
-    if (accountMenuOpen.value) closeAccountMenu();
-    if (suggestOpen.value) closeSuggestions();
-  }
+  if (e.key !== "Escape") return;
+  accountMenuOpen.value = false;
+  suggestOpen.value = false;
+  libMenuOpen.value = false;
 });
 </script>
 
 <template>
-  <header
-    class="site-header"
-    :class="{ 'is-scrolled': scrolled, 'is-hero-transparent': hasHeroBackdrop && !scrolled }"
-  >
-    <button class="hamburger" aria-label="打开侧边导航" @click="emit('openDrawer')">☰</button>
-
-    <RouterLink to="/" class="brand">F<b>B</b>Z</RouterLink>
-
-    <nav class="nav" aria-label="主导航">
-      <RouterLink to="/" class="nav-item" active-class="active" exact-active-class="active">
-        首页
-      </RouterLink>
-
-      <div class="lib-wrap">
-        <RouterLink to="/library" class="nav-item has-caret" active-class="active"
-          >媒体库</RouterLink
-        >
-        <div class="lib-menu">
-          <RouterLink to="/library" class="lib-link strong">
-            <span class="lib-ic">▦</span> 媒体库总览
-          </RouterLink>
-          <div class="lib-group-label">全部库</div>
-          <RouterLink
-            v-for="lib in libraries"
-            :key="lib.id"
-            :to="`/library/${lib.id}`"
-            class="lib-link"
-          >
-            <span class="lib-ic">{{ lib.name.charAt(0) }}</span>
-            {{ lib.name }}
-            <span class="lib-count">{{ fmt.format(lib.count) }}</span>
-          </RouterLink>
-        </div>
-      </div>
-
-      <RouterLink to="/" class="nav-item">最近添加</RouterLink>
-      <RouterLink to="/playlists" class="nav-item" active-class="active">播放列表</RouterLink>
-      <RouterLink to="/collections" class="nav-item" active-class="active">合集</RouterLink>
-    </nav>
-
-    <form class="header-search" role="search" @submit.prevent="submitSearch">
-      <span class="search-icon" aria-hidden="true" />
-      <input
-        v-model="searchTerm"
-        class="header-search-input"
-        type="search"
-        name="q"
-        placeholder="搜索影片、人物..."
-        autocomplete="off"
-        aria-label="搜索"
-        aria-autocomplete="list"
-        :aria-expanded="suggestOpen"
-        @input="onSearchInput"
-        @focus="onSearchInput"
-      />
-      <div v-if="suggestOpen" class="search-suggest" role="listbox" aria-label="搜索建议">
-        <p v-if="suggestLoading" class="suggest-hint">搜索中…</p>
-        <p v-else-if="!suggestions.length" class="suggest-hint">回车查看全部结果</p>
-        <button
-          v-for="item in suggestions"
-          :key="`${item.kind}-${item.id}`"
-          type="button"
-          class="suggest-item"
-          role="option"
-          @mousedown.prevent="pickSuggestion(item)"
-        >
-          <img v-if="item.poster" :src="item.poster" alt="" class="suggest-thumb" />
-          <span class="suggest-text">
-            <strong>{{ item.title }}</strong>
-            <small>{{ item.meta }}</small>
-          </span>
-        </button>
-        <button
-          v-if="searchTerm.trim()"
-          type="button"
-          class="suggest-more"
-          @mousedown.prevent="submitSearch"
-        >
-          查看「{{ searchTerm.trim() }}」的全部结果
-        </button>
-      </div>
-    </form>
-    <button class="icon-search-btn" aria-label="搜索" @click="goSearch">⌕</button>
-    <div class="account-menu">
+  <header class="site-header">
+    <div class="header-inner">
       <button
-        class="avatar"
+        class="icon-btn hamburger"
         type="button"
-        aria-label="打开用户菜单"
-        :aria-expanded="accountMenuOpen"
-        @click.stop="accountMenuOpen = !accountMenuOpen"
+        aria-label="打开导航"
+        @click="emit('openDrawer')"
       >
-        <BaseAvatar
-          :user-id="authStore.userId"
-          :name="authStore.nickname"
-          :version="authStore.avatarVersion"
-          :size="34"
-        />
+        <BaseIcon name="menu" :size="20" />
       </button>
 
-      <div v-if="accountMenuOpen" class="account-dropdown" role="menu" aria-label="用户账户菜单">
-        <RouterLink
-          v-for="link in accountLinks"
-          :key="link.to"
-          class="account-item"
-          role="menuitem"
-          :to="link.to"
-          @click="closeAccountMenu"
-        >
-          {{ link.label }}
+      <RouterLink to="/" class="brand" aria-label="FBZ 首页">FBZ</RouterLink>
+
+      <nav class="nav" aria-label="主导航">
+        <RouterLink to="/" class="nav-item" exact-active-class="active">
+          <BaseIcon name="home" :size="16" />首页
         </RouterLink>
-        <button class="account-item danger" type="button" role="menuitem" @click="logout">
-          退出登录
+
+        <div class="lib-wrap" :class="{ open: libMenuOpen }">
+          <button
+            type="button"
+            class="nav-item"
+            :class="{ active: libraryActive }"
+            aria-haspopup="menu"
+            :aria-expanded="libMenuOpen"
+            @click.stop="libMenuOpen = !libMenuOpen"
+          >
+            <BaseIcon name="library" :size="16" />媒体库
+            <BaseIcon name="down" :size="14" class="caret" />
+          </button>
+          <div class="lib-menu" role="menu" aria-label="媒体库">
+            <RouterLink to="/library" class="lib-link overview" role="menuitem">
+              <span class="lib-ic"><BaseIcon name="grid" :size="16" /></span>
+              <span class="lib-name">媒体库总览</span>
+              <span class="lib-count">{{ libraries.length }} 个库</span>
+            </RouterLink>
+            <div v-if="libraries.length" class="lib-sep" />
+            <RouterLink
+              v-for="lib in libraries"
+              :key="lib.id"
+              :to="libraryRoute(lib)"
+              class="lib-link"
+              role="menuitem"
+            >
+              <span class="lib-ic"
+                ><BaseIcon :name="libraryTypeMeta(lib.libraryType).icon" :size="16"
+              /></span>
+              <span class="lib-name">
+                {{ lib.name }}
+                <small>{{ libraryTypeMeta(lib.libraryType).label }}</small>
+              </span>
+              <span class="lib-count">{{ fmt.format(lib.count) }}</span>
+            </RouterLink>
+          </div>
+        </div>
+
+        <RouterLink to="/playlists" class="nav-item" active-class="active">
+          <BaseIcon name="playlist" :size="16" />播放列表
+        </RouterLink>
+        <RouterLink to="/collections" class="nav-item" active-class="active">
+          <BaseIcon name="collection" :size="16" />合集
+        </RouterLink>
+      </nav>
+
+      <form class="header-search" role="search" @submit.prevent="submitSearch">
+        <BaseIcon name="search" :size="15" class="search-icon" />
+        <input
+          v-model="searchTerm"
+          class="header-search-input"
+          type="search"
+          name="q"
+          placeholder="搜索影片、剧集、人物…"
+          autocomplete="off"
+          aria-label="搜索"
+          aria-autocomplete="list"
+          :aria-expanded="suggestOpen"
+          @input="onSearchInput"
+          @focus="onSearchInput"
+        />
+        <div v-if="suggestOpen" class="search-suggest" role="listbox" aria-label="搜索建议">
+          <p v-if="suggestLoading" class="suggest-hint">
+            <BaseIcon name="loading" :size="14" class="c-spin" />搜索中…
+          </p>
+          <p v-else-if="!suggestions.length" class="suggest-hint">没有联想结果，回车查看全部</p>
+          <button
+            v-for="item in suggestions"
+            :key="`${item.kind}-${item.id}`"
+            type="button"
+            class="suggest-item"
+            role="option"
+            @mousedown.prevent="pickSuggestion(item)"
+          >
+            <span class="suggest-thumb">
+              <img v-if="item.poster" :src="item.poster" alt="" />
+              <BaseIcon v-else :name="SUGGEST_ICONS[item.kind] ?? 'file'" :size="16" />
+            </span>
+            <span class="suggest-text">
+              <strong>{{ item.title }}</strong>
+              <small>{{ item.meta }}</small>
+            </span>
+            <BaseIcon :name="SUGGEST_ICONS[item.kind] ?? 'file'" :size="14" class="suggest-kind" />
+          </button>
+          <button
+            v-if="searchTerm.trim()"
+            type="button"
+            class="suggest-more"
+            @mousedown.prevent="submitSearch"
+          >
+            <BaseIcon name="search" :size="14" />查看「{{ searchTerm.trim() }}」的全部结果
+          </button>
+        </div>
+      </form>
+
+      <RouterLink to="/search" class="icon-btn mobile-search" aria-label="搜索">
+        <BaseIcon name="search" :size="20" />
+      </RouterLink>
+
+      <div class="account-menu">
+        <button
+          class="avatar"
+          type="button"
+          aria-label="打开用户菜单"
+          :aria-expanded="accountMenuOpen"
+          @click.stop="accountMenuOpen = !accountMenuOpen"
+        >
+          <BaseAvatar
+            :user-id="authStore.userId"
+            :name="authStore.nickname"
+            :version="authStore.avatarVersion"
+            :size="32"
+          />
         </button>
+
+        <div v-if="accountMenuOpen" class="account-dropdown" role="menu" aria-label="用户菜单">
+          <div class="account-head">
+            <strong>{{ authStore.nickname || authStore.username || "用户" }}</strong>
+            <small>{{ authStore.isAdmin ? "管理员" : "普通用户" }}</small>
+          </div>
+          <RouterLink v-if="authStore.isAdmin" class="account-item" role="menuitem" to="/admin">
+            <BaseIcon name="admin" :size="16" />后台管理
+          </RouterLink>
+          <RouterLink class="account-item" role="menuitem" to="/admin/profile">
+            <BaseIcon name="user" :size="16" />个人信息
+          </RouterLink>
+          <RouterLink
+            v-if="authStore.isAdmin"
+            class="account-item"
+            role="menuitem"
+            to="/admin/logs"
+          >
+            <BaseIcon name="bell" :size="16" />消息中心
+          </RouterLink>
+          <div class="account-sep" />
+          <button class="account-item danger" type="button" role="menuitem" @click="logout">
+            <BaseIcon name="logout" :size="16" />退出登录
+          </button>
+        </div>
       </div>
     </div>
   </header>
@@ -246,47 +279,38 @@ useEventListener(window, "keydown", (e) => {
 
 <style scoped lang="scss">
 .site-header {
-  position: fixed;
-  inset: 0 0 auto 0;
-  height: var(--header-h, 60px);
-  z-index: var(--fbz-z-overlay);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: var(--ui-header-height);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-glass);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+}
+
+.header-inner {
+  height: 100%;
+  max-width: var(--ui-shell-width);
+  margin: 0 auto;
+  padding: 0 var(--ui-shell-gutter);
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-6);
-  padding: 0 var(--fbz-space-8);
-  background: transparent;
-  border-bottom: 1px solid transparent;
-  backdrop-filter: blur(0px);
-  transition:
-    background var(--fbz-motion-slow) ease,
-    border-color var(--fbz-motion-slow) ease,
-    backdrop-filter var(--fbz-motion-slow) ease;
-
-  &.is-scrolled {
-    background: color-mix(in srgb, var(--fbz-color-bg) 72%, transparent);
-    border-bottom: 1px solid var(--fbz-color-line);
-    backdrop-filter: saturate(140%) blur(14px);
-    -webkit-backdrop-filter: saturate(140%) blur(14px);
-  }
+  gap: 24px;
 }
 
 .brand {
-  font-family: var(--fbz-font-display);
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 2px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ui-text);
   text-decoration: none;
-  color: var(--fbz-color-text);
-
-  b {
-    color: var(--fbz-color-brand-500);
-  }
 }
 
 .nav {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   margin-right: auto;
 }
 
@@ -294,176 +318,285 @@ useEventListener(window, "keydown", (e) => {
   position: relative;
   display: inline-flex;
   align-items: center;
-  color: var(--fbz-color-text-soft);
-  background: none;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
   border: 0;
-  font-size: var(--fbz-font-size-md);
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text-muted);
+  font-size: 13.5px;
+  font-weight: 500;
   text-decoration: none;
-  padding: 8px 12px;
-  border-radius: var(--fbz-radius-control);
-  transition:
-    color var(--fbz-motion-fast),
-    background var(--fbz-motion-fast);
+  cursor: pointer;
 
   &:hover {
-    color: var(--fbz-color-text);
-    background: var(--fbz-color-panel-strong);
+    color: var(--ui-text);
+    background: var(--ui-surface-hover);
   }
 
   &.active {
-    color: var(--fbz-color-text);
-
-    &::after {
-      content: "";
-      position: absolute;
-      left: 12px;
-      right: 12px;
-      bottom: 2px;
-      height: 2px;
-      background: var(--fbz-color-brand-500);
-      border-radius: 2px;
-    }
+    color: var(--ui-accent);
   }
 
-  &.has-caret::before {
-    content: "▾";
-    font-size: 10px;
-    margin-right: 6px;
-    opacity: 0.6;
-    display: inline-flex;
-    align-items: center;
-    line-height: 1;
+  .caret {
+    opacity: 0.7;
+    transition: transform var(--ui-duration-fast);
   }
 }
 
 .lib-wrap {
   position: relative;
-  display: inline-flex;
-  align-items: center;
+
+  &.open .caret {
+    transform: rotate(180deg);
+  }
 }
 
 .lib-menu {
   position: absolute;
   top: calc(100% + 8px);
   left: 0;
-  width: 320px;
-  background: color-mix(in srgb, var(--fbz-color-panel) 97%, transparent);
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 8px;
-  padding: 8px;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  box-shadow: var(--fbz-shadow-panel);
+  width: 300px;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-glass-strong);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--ui-shadow-float);
   opacity: 0;
   visibility: hidden;
-  transform: translateY(-6px);
+  transform: translateY(-4px);
   transition:
-    opacity var(--fbz-motion-base),
-    transform var(--fbz-motion-base),
-    visibility var(--fbz-motion-base);
+    opacity var(--ui-duration-fast),
+    transform var(--ui-duration-fast),
+    visibility var(--ui-duration-fast);
 
-  .lib-wrap:hover &,
-  .lib-wrap:focus-within & {
+  .lib-wrap.open & {
     opacity: 1;
     visibility: visible;
     transform: none;
   }
 }
 
-.lib-group-label {
-  padding: 8px 10px 4px;
-  font-size: var(--fbz-font-size-xs);
-  color: var(--fbz-color-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 1px;
+.lib-sep,
+.account-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ui-border);
 }
 
 .lib-link {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  color: var(--fbz-color-text-soft);
-  font-size: var(--fbz-font-size-md);
+  padding: 7px 8px;
+  border-radius: var(--ui-radius-sm);
+  color: var(--ui-text);
   text-decoration: none;
+  font-size: 13px;
 
   &:hover {
-    background: var(--fbz-color-panel-strong);
-    color: var(--fbz-color-text);
+    background: var(--ui-surface-hover);
   }
 
-  &.strong {
-    color: var(--fbz-color-text);
-    font-weight: 600;
+  &.router-link-active:not(.overview) {
+    color: var(--ui-accent);
+
+    .lib-ic {
+      color: var(--ui-accent);
+      border-color: rgb(var(--ui-accent-channel) / 40%);
+    }
   }
 }
 
 .lib-ic {
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   flex: 0 0 auto;
   display: grid;
-  place-content: center;
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 5px;
-  font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  place-items: center;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface);
+  color: var(--ui-text-muted);
+}
+
+.lib-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+
+  small {
+    font-size: 11px;
+    color: var(--ui-text-subtle);
+  }
 }
 
 .lib-count {
-  margin-left: auto;
-  font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  font-size: 12px;
+  color: var(--ui-text-subtle);
+  font-variant-numeric: tabular-nums;
 }
 
 .header-search {
   position: relative;
   display: flex;
   align-items: center;
+  width: 280px;
+  height: 34px;
+  padding: 0 10px;
   gap: 8px;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel-strong);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-sm);
-  min-width: 200px;
-  transition: border-color var(--fbz-motion-fast);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-input);
+  color: var(--ui-text-subtle);
+  transition:
+    border-color var(--ui-duration-fast),
+    box-shadow var(--ui-duration-fast);
 
   &:focus-within {
-    border-color: var(--fbz-color-brand-500);
-  }
-
-  .search-icon {
-    flex: 0 0 auto;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    border: 1.5px solid currentColor;
-    opacity: 0.7;
+    border-color: rgb(var(--ui-accent-channel) / 60%);
+    box-shadow: 0 0 0 3px rgb(var(--ui-accent-channel) / 12%);
   }
 }
 
 .header-search-input {
-  flex: 1 1 auto;
+  flex: 1;
   min-width: 0;
   height: 100%;
   border: 0;
-  background: none;
   outline: none;
-  color: var(--fbz-color-text);
-  font-size: var(--fbz-font-size-sm);
+  background: transparent;
+  color: var(--ui-text);
+  font-size: 13px;
 
   &::placeholder {
-    color: var(--fbz-color-text-muted);
+    color: var(--ui-text-subtle);
   }
 
   &::-webkit-search-cancel-button {
     appearance: none;
+  }
+}
+
+.search-suggest {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: min(440px, 64vh);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-glass-strong);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--ui-shadow-float);
+}
+
+.suggest-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 10px;
+  color: var(--ui-text-muted);
+  font-size: 12px;
+}
+
+.suggest-item,
+.suggest-more {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text);
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--ui-surface-hover);
+  }
+}
+
+.suggest-thumb {
+  width: 30px;
+  height: 44px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-subtle);
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.suggest-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  strong {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  small {
+    font-size: 11.5px;
+    color: var(--ui-text-muted);
+  }
+}
+
+.suggest-kind {
+  color: var(--ui-text-subtle);
+}
+
+.suggest-more {
+  margin-top: 4px;
+  border-top: 1px solid var(--ui-border);
+  border-radius: 0 0 var(--ui-radius-sm) var(--ui-radius-sm);
+  color: var(--ui-accent);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.icon-btn {
+  display: none;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--ui-surface-hover);
   }
 }
 
@@ -475,20 +608,18 @@ useEventListener(window, "keydown", (e) => {
 .avatar {
   width: 34px;
   height: 34px;
-  flex: 0 0 auto;
   padding: 0;
-  border-radius: 50%;
-  background: none;
-  border: 1px solid var(--fbz-color-line);
   display: grid;
-  place-content: center;
+  place-items: center;
   overflow: hidden;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 50%;
+  background: var(--ui-surface-raised);
   cursor: pointer;
-  transition: border-color var(--fbz-motion-fast);
 
   &:hover,
   &[aria-expanded="true"] {
-    border-color: var(--fbz-color-line-bright);
+    border-color: rgb(var(--ui-accent-channel) / 70%);
   }
 }
 
@@ -496,15 +627,29 @@ useEventListener(window, "keydown", (e) => {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  width: 180px;
+  width: 200px;
   padding: 6px;
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--fbz-color-panel) 98%, transparent);
-  box-shadow: var(--fbz-shadow-panel);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-glass-strong);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--ui-shadow-float);
+}
+
+.account-head {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px 8px;
+
+  strong {
+    font-size: 13px;
+    color: var(--ui-text);
+  }
+
+  small {
+    font-size: 11.5px;
+    color: var(--ui-text-subtle);
+  }
 }
 
 .account-item {
@@ -512,44 +657,40 @@ useEventListener(window, "keydown", (e) => {
   min-height: 34px;
   display: flex;
   align-items: center;
-  padding: 0 10px;
+  gap: 10px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--ui-radius-sm);
   background: transparent;
-  color: var(--fbz-color-text-soft);
-  font-size: var(--fbz-font-size-md);
+  color: var(--ui-text-muted);
+  font-size: 13px;
   text-align: left;
   text-decoration: none;
+  cursor: pointer;
 
   &:hover {
-    background: var(--fbz-color-panel-strong);
-    color: var(--fbz-color-text);
+    color: var(--ui-text);
+    background: var(--ui-surface-hover);
   }
 
-  &.danger {
-    color: #fca5a5;
+  &.danger:hover {
+    color: var(--ui-danger);
   }
 }
 
-.hamburger,
-.icon-search-btn {
-  display: none;
-  background: none;
-  border: 0;
-  color: var(--fbz-color-text);
-  width: 36px;
-  height: 36px;
-  font-size: 20px;
+@media (max-width: 1100px) {
+  .header-search {
+    width: 200px;
+  }
+
+  .nav-item {
+    padding: 0 8px;
+  }
 }
 
-.icon-search-btn {
-  font-size: 18px;
-}
-
-@media (max-width: 600px) {
-  .site-header {
-    gap: var(--fbz-space-3);
-    padding: 0 var(--fbz-space-4);
+@media (max-width: 860px) {
+  .header-inner {
+    gap: 8px;
   }
 
   .nav,
@@ -558,134 +699,12 @@ useEventListener(window, "keydown", (e) => {
     display: none;
   }
 
-  .hamburger,
-  .icon-search-btn {
+  .icon-btn {
     display: grid;
-    place-content: center;
   }
 
   .brand {
     margin-right: auto;
   }
-}
-
-.site-header.is-hero-transparent {
-  .brand {
-    color: #ffffff;
-  }
-
-  .nav-item {
-    color: rgba(255, 255, 255, 0.7);
-
-    &:hover {
-      color: #ffffff;
-      background: rgba(255, 255, 255, 0.08);
-    }
-
-    &.active {
-      color: #ffffff;
-    }
-  }
-
-  .header-search {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.5);
-  }
-
-  .avatar {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.75);
-
-    &:hover {
-      border-color: rgba(255, 255, 255, 0.3);
-      color: #ffffff;
-    }
-  }
-
-  .hamburger,
-  .icon-search-btn {
-    color: #ffffff;
-  }
-}
-
-.search-suggest {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  z-index: 40;
-  max-height: min(420px, 60vh);
-  overflow: auto;
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-  padding: 6px;
-}
-
-.suggest-hint {
-  margin: 0;
-  padding: 10px 12px;
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-sm);
-}
-
-.suggest-item,
-.suggest-more {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 10px;
-  text-align: left;
-  border: none;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  border-radius: 8px;
-  padding: 8px 10px;
-}
-
-.suggest-item:hover,
-.suggest-more:hover {
-  background: var(--fbz-color-panel-strong);
-}
-
-.suggest-thumb {
-  width: 32px;
-  height: 48px;
-  object-fit: cover;
-  border-radius: 4px;
-  background: var(--fbz-color-panel-strong);
-  flex-shrink: 0;
-}
-
-.suggest-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-
-  strong {
-    font-size: var(--fbz-font-size-sm);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  small {
-    color: var(--fbz-color-text-muted);
-    font-size: 12px;
-  }
-}
-
-.suggest-more {
-  margin-top: 2px;
-  border-top: 1px solid var(--fbz-color-line-soft);
-  border-radius: 0 0 8px 8px;
-  color: var(--fbz-color-brand-500);
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 600;
 }
 </style>

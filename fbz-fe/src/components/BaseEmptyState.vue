@@ -4,7 +4,7 @@
  * 媒体库总览、库详情、首页无库/无结果等场景共用，保证空态视觉一致。
  */
 interface Props {
-  /** 顶部大图标（emoji 或字符），默认空盒 */
+  /** 顶部图标：BaseIcon（Lucide）名称。禁止 emoji / 字符。 */
   icon?: string;
   title: string;
   description?: string;
@@ -13,7 +13,7 @@ interface Props {
 }
 
 withDefaults(defineProps<Props>(), {
-  icon: "📁",
+  icon: "folder-open",
   description: "",
   compact: false,
 });
@@ -22,9 +22,7 @@ withDefaults(defineProps<Props>(), {
 <template>
   <div class="empty-state" :class="{ compact }">
     <div class="icon" aria-hidden="true">
-      <BaseIcon v-if="/^[a-z-]+$/.test(icon)" :name="icon" :size="30" /><span v-else>{{
-        icon
-      }}</span>
+      <BaseIcon :name="icon" :size="compact ? 22 : 26" />
     </div>
     <h2 class="title">{{ title }}</h2>
     <p v-if="description" class="desc">{{ description }}</p>
@@ -44,7 +42,7 @@ withDefaults(defineProps<Props>(), {
   gap: var(--fbz-space-3);
   padding: 72px var(--fbz-space-6);
   border: 1px dashed var(--fbz-color-line);
-  border-radius: 8px;
+  border-radius: var(--fbz-radius-card);
   background: var(--fbz-color-panel);
 
   &.compact {
@@ -55,9 +53,19 @@ withDefaults(defineProps<Props>(), {
 }
 
 .icon {
-  font-size: 40px;
-  line-height: 1;
-  opacity: 0.7;
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--fbz-color-line);
+  border-radius: var(--fbz-radius-card);
+  background: var(--fbz-color-panel-strong);
+  color: var(--fbz-color-text-muted);
+
+  .compact & {
+    width: 44px;
+    height: 44px;
+  }
 }
 
 .title {

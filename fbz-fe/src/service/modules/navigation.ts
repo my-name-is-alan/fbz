@@ -46,6 +46,7 @@ function toFeatured(item: NavigationFeatured): FeaturedItem {
     overview: item.overview,
     backdrop: mediaImageUrl(item.backdrop),
     thumb: mediaImageUrl(item.thumb),
+    detailType: item.detailType,
   };
 }
 
@@ -119,6 +120,7 @@ async function fetchFavoriteHomeItems(userId: string, limit = 24): Promise<Conti
         isFavorite: true,
         isPlayed: played,
         progress,
+        itemType: item.Type,
       };
     });
   } catch {
@@ -189,6 +191,10 @@ async function fetchNextUpForContinue(userId: string, limit = 16): Promise<Conti
         isFavorite: item.UserData?.IsFavorite ?? false,
         isPlayed: played,
         progress,
+        itemType: "Episode",
+        seriesId: item.SeriesId ?? undefined,
+        seasonNumber: season ?? undefined,
+        episodeNumber: episode ?? undefined,
       };
     });
   } catch {

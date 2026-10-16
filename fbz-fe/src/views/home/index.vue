@@ -2,27 +2,43 @@
 import { fetchHomeData } from "@/service/modules/navigation.ts";
 import { useLibraryStore } from "@/stores/library.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import { useAuthStore } from "@/stores/auth.ts";
 import type { FeaturedItem } from "@/types/media.ts";
 import type { HomeRow } from "@/types/navigation.ts";
+import { libraryRoute } from "@/utils/libraryRoute.ts";
+import { libraryTypeMeta } from "@/utils/libraryType.ts";
 
 const libraryStore = useLibraryStore();
 const uiStore = useUiStore();
+const authStore = useAuthStore();
+const { libraries } = storeToRefs(libraryStore);
 
 const featured = ref<FeaturedItem[]>([]);
 const rows = ref<HomeRow[]>([]);
 const loaded = ref(false);
 const error = ref<string | null>(null);
 
-const hasLibraries = computed(() => libraryStore.libraries.length > 0);
+const fmt = new Intl.NumberFormat("zh-CN");
+
+const hasLibraries = computed(() => libraries.value.length > 0);
 const hasAnyLibraryItems = computed(() => libraryStore.totalCount > 0);
 const emptyStateTitle = computed(() =>
   hasLibraries.value ? "媒体库还没有可展示内容" : "还没有创建媒体库",
 );
 const emptyStateDescription = computed(() =>
   hasLibraries.value
-    ? "当前媒体库存在，但首页还没有扫描出的媒体条目。可以进入媒体库管理检查路径并重新触发扫描。"
-    : "先创建一个媒体库，选择 Rust 后端可访问的服务器目录，然后让后端扫描真实媒体文件。",
+    ? "媒体库已存在，但还没有扫描出的媒体条目。进入媒体库管理检查路径并重新触发扫描。"
+    : "先创建一个媒体库，选择后端可访问的服务器目录，然后让后端扫描真实媒体文件。",
 );
+
+/** 分区 key → 图标（导航 BFF 行：续看 / 最新 / 收藏 / 按库）。 */
+function rowIcon(row: HomeRow): string {
+  if (row.key === "continue") return "clock";
+  if (row.key === "latest") return "sparkles";
+  if (row.key === "favorites") return "heart";
+  const lib = libraries.value.find((l) => row.to?.endsWith(l.id) || row.key.endsWith(l.id));
+  return lib ? libraryTypeMeta(lib.libraryType).icon : "library";
+}
 
 async function refreshHome() {
   try {
@@ -54,151 +70,163 @@ useEventListener(window, "fbz:item-deleted", () => {
 </script>
 
 <template>
-  <main class="home-view">
+  <main class="c-page home-view">
+    <nav v-if="libraries.length" class="lib-chips" aria-label="媒体库快捷入口">
+      <RouterLink to="/library" class="chip">
+        <BaseIcon name="grid" :size="14" />全部媒体
+        <span class="n">{{ fmt.format(libraryStore.totalCount) }}</span>
+      </RouterLink>
+      <RouterLink v-for="lib in libraries" :key="lib.id" :to="libraryRoute(lib)" class="chip">
+        <BaseIcon :name="libraryTypeMeta(lib.libraryType).icon" :size="14" />{{ lib.name }}
+        <span class="n">{{ fmt.format(lib.count) }}</span>
+      </RouterLink>
+    </nav>
+
     <HomeHero v-if="featured.length" :items="featured" />
 
-    <div class="content">
-      <p v-if="!loaded" class="state-text">正在加载首页数据...</p>
-      <p v-else-if="error" class="state-text is-error">{{ error }}</p>
-      <section v-else-if="!rows.length || !hasAnyLibraryItems" class="empty-library-panel">
-        <div class="empty-copy">
-          <span class="eyebrow">Media Library</span>
-          <h1>{{ emptyStateTitle }}</h1>
-          <p>{{ emptyStateDescription }}</p>
+    <div v-if="!loaded" class="skeleton-rows" aria-busy="true" aria-label="正在加载首页">
+      <div v-for="r in 2" :key="r" class="skeleton-row">
+        <div class="sk-title" />
+        <div class="sk-cards">
+          <div v-for="c in 7" :key="c" class="sk-card" />
         </div>
-        <div class="empty-actions">
-          <button class="primary-action" type="button" @click="uiStore.openLibraryEditor(null)">
-            新建媒体库
-          </button>
-          <RouterLink class="secondary-action" to="/admin/libraries">媒体库管理</RouterLink>
-        </div>
-      </section>
-      <MediaRow
-        v-for="row in rows"
-        :key="row.key"
-        :title="row.title"
-        :items="row.items"
-        :layout="row.layout"
-        :size="row.layout === 'wide' ? 'xlarge' : 'normal'"
-        :to="row.to"
-        :show-resolution="row.layout !== 'wide'"
-        :show-rating="row.layout !== 'wide'"
-      />
+      </div>
     </div>
+    <p v-else-if="error" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />{{ error }}
+    </p>
+    <BaseEmptyState
+      v-else-if="!rows.length || !hasAnyLibraryItems"
+      :icon="hasLibraries ? 'scan' : 'library-big'"
+      :title="emptyStateTitle"
+      :description="emptyStateDescription"
+    >
+      <button
+        v-if="authStore.isAdmin"
+        class="du-btn du-btn-primary"
+        type="button"
+        @click="uiStore.openLibraryEditor(null)"
+      >
+        <BaseIcon name="plus" :size="16" />新建媒体库
+      </button>
+      <RouterLink v-if="authStore.isAdmin" class="du-btn du-btn-ghost" to="/admin/libraries">
+        <BaseIcon name="settings" :size="16" />媒体库管理
+      </RouterLink>
+    </BaseEmptyState>
+
+    <MediaRow
+      v-for="row in rows"
+      :key="row.key"
+      :title="row.title"
+      :icon="rowIcon(row)"
+      :items="row.items"
+      :layout="row.layout"
+      :size="row.layout === 'wide' ? 'xlarge' : 'normal'"
+      :to="row.to"
+      :show-resolution="row.layout !== 'wide'"
+      :show-rating="row.layout !== 'wide'"
+    />
   </main>
 </template>
 
 <style scoped lang="scss">
-.content {
-  position: relative;
-  z-index: 3;
-  padding: var(--fbz-space-6) var(--fbz-space-8) 80px;
-}
-
-.state-text {
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-md);
-
-  &.is-error {
-    color: var(--fbz-color-danger-500);
-  }
-}
-
-.empty-library-panel {
-  min-height: 320px;
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(45, 212, 191, 0.08), transparent 42%), var(--fbz-color-panel);
+.home-view {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--fbz-space-8);
-  padding: var(--fbz-space-8);
+  flex-direction: column;
+  gap: 28px;
 }
 
-.empty-copy {
-  max-width: 640px;
-
-  .eyebrow {
-    display: inline-block;
-    margin-bottom: var(--fbz-space-3);
-    color: var(--fbz-color-brand-500);
-    font-size: var(--fbz-font-size-xs);
-    font-weight: 800;
-    letter-spacing: 0;
-    text-transform: uppercase;
-  }
-
-  h1 {
-    margin: 0 0 var(--fbz-space-3);
-    color: var(--fbz-color-text);
-    font-size: 28px;
-    line-height: 1.2;
-  }
-
-  p {
-    margin: 0;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-md);
-    line-height: 1.7;
-  }
-}
-
-.empty-actions {
+.lib-chips {
   display: flex;
-  gap: var(--fbz-space-3);
-  flex-shrink: 0;
+  gap: 8px;
+  margin-bottom: -8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
 }
 
-.primary-action,
-.secondary-action {
-  height: 40px;
-  border-radius: var(--fbz-radius-control);
-  padding: 0 var(--fbz-space-5);
+.chip {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 800;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface);
+  color: var(--ui-text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
   text-decoration: none;
-  cursor: pointer;
-}
+  transition:
+    color var(--ui-duration-fast),
+    border-color var(--ui-duration-fast),
+    background var(--ui-duration-fast);
 
-.primary-action {
-  border: 0;
-  background: var(--fbz-color-brand-500);
-  color: #07120a;
+  .n {
+    color: var(--ui-text-subtle);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
 
   &:hover {
-    background: var(--fbz-color-brand-600);
+    color: var(--ui-text);
+    background: var(--ui-surface-hover);
+  }
+
+  &.router-link-exact-active {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent);
+    background: var(--ui-surface-hover);
   }
 }
 
-.secondary-action {
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel-strong);
-  color: var(--fbz-color-text-soft);
-
-  &:hover {
-    background: var(--fbz-color-panel-elevated);
-    color: var(--fbz-color-text);
-  }
+.skeleton-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
 }
 
-@media (max-width: 600px) {
-  .content {
-    padding: var(--fbz-space-5) var(--fbz-space-4) 60px;
+.sk-title {
+  width: 140px;
+  height: 16px;
+  margin-bottom: 12px;
+  border-radius: 4px;
+  background: var(--ui-surface-raised);
+}
+
+.sk-cards {
+  display: flex;
+  gap: 16px;
+  overflow: hidden;
+}
+
+.sk-card {
+  flex: 0 0 156px;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--ui-radius-md);
+  background: linear-gradient(
+    100deg,
+    var(--ui-surface) 30%,
+    var(--ui-surface-raised) 50%,
+    var(--ui-surface) 70%
+  );
+  background-size: 200% 100%;
+  animation: sk 1.4s ease infinite;
+}
+
+@keyframes sk {
+  0% {
+    background-position: 150% 0;
   }
 
-  .empty-library-panel {
-    align-items: stretch;
-    flex-direction: column;
-    padding: var(--fbz-space-5);
-  }
-
-  .empty-actions {
-    flex-direction: column;
+  100% {
+    background-position: -50% 0;
   }
 }
 </style>

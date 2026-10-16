@@ -110,7 +110,7 @@ useEventListener(window, "keydown", (e) => {
         <!-- Modal Header -->
         <header class="modal-header">
           <div class="header-title">
-            <span class="icon" aria-hidden="true">✏️</span>
+            <span class="icon"><BaseIcon name="edit" :size="16" /></span>
             <div>
               <h2 id="metadata-title">编辑元数据</h2>
               <span class="subtitle">{{ metadataManager.item?.title }}</span>
@@ -122,7 +122,7 @@ useEventListener(window, "keydown", (e) => {
             aria-label="关闭元数据管理器"
             @click="uiStore.closeMetadataManager"
           >
-            ✕
+            <BaseIcon name="close" :size="16" />
           </button>
         </header>
 
@@ -138,7 +138,7 @@ useEventListener(window, "keydown", (e) => {
             id="tab-basic"
             @click="activeTab = 'basic'"
           >
-            📋 基本信息
+            <BaseIcon name="info" :size="14" />基本信息
           </button>
           <button
             class="tab-btn"
@@ -150,7 +150,7 @@ useEventListener(window, "keydown", (e) => {
             id="tab-poster"
             @click="activeTab = 'poster'"
           >
-            🖼️ 封面与海报
+            <BaseIcon name="photo" :size="14" />封面与海报
           </button>
           <button
             class="tab-btn"
@@ -162,7 +162,7 @@ useEventListener(window, "keydown", (e) => {
             id="tab-fanart"
             @click="activeTab = 'fanart'"
           >
-            🌌 背景与剧照
+            <BaseIcon name="clapperboard" :size="14" />背景与剧照
           </button>
         </nav>
 
@@ -304,7 +304,7 @@ useEventListener(window, "keydown", (e) => {
             <div class="asset-toolbar">
               <span class="hint">为您从网络上搜刮到以下封面图片，请选择一张作为海报：</span>
               <button class="upload-btn" type="button" @click="triggerPosterUpload">
-                📤 上传本地封面
+                <BaseIcon name="upload" :size="14" />上传本地封面
               </button>
             </div>
 
@@ -331,7 +331,9 @@ useEventListener(window, "keydown", (e) => {
               >
                 <img :src="p.url" alt="Poster option" />
                 <div class="asset-overlay">
-                  <span class="check-icon">✓</span>
+                  <span class="check-icon"
+                    ><BaseIcon name="check" :size="12" :stroke-width="3"
+                  /></span>
                 </div>
                 <span class="label">{{ p.label }}</span>
               </div>
@@ -349,7 +351,7 @@ useEventListener(window, "keydown", (e) => {
             <div class="asset-toolbar">
               <span class="hint">为您搜刮到以下高画质背景与剧照横幅：</span>
               <button class="upload-btn" type="button" @click="triggerFanartUpload">
-                📤 上传本地背景
+                <BaseIcon name="upload" :size="14" />上传本地背景
               </button>
             </div>
 
@@ -380,7 +382,9 @@ useEventListener(window, "keydown", (e) => {
               >
                 <img :src="f.url" alt="Fanart option" />
                 <div class="asset-overlay">
-                  <span class="check-icon">✓</span>
+                  <span class="check-icon"
+                    ><BaseIcon name="check" :size="12" :stroke-width="3"
+                  /></span>
                 </div>
                 <span class="label">{{ f.label }}</span>
               </div>
@@ -624,10 +628,13 @@ useEventListener(window, "keydown", (e) => {
     place-content: center;
 
     &::after {
-      content: "✓";
-      color: #07120a;
-      font-size: 10px;
-      font-weight: 900;
+      content: "";
+      width: 5px;
+      height: 9px;
+      margin-top: -2px;
+      border: solid #07120a;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
       opacity: 0;
     }
   }

@@ -252,7 +252,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
       >
         <header class="modal-header">
           <div class="header-title">
-            <span class="icon" aria-hidden="true">📁</span>
+            <span class="icon"><BaseIcon name="folder-open" :size="18" /></span>
             <h2 id="file-picker-title">服务器端文件夹选择器</h2>
           </div>
           <button
@@ -261,7 +261,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
             aria-label="关闭文件夹选择器"
             @click="handleCancel"
           >
-            ✕
+            <BaseIcon name="close" :size="16" />
           </button>
         </header>
 
@@ -322,7 +322,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
                 aria-label="刷新服务器磁盘列表"
                 @click="loadRoots"
               >
-                ↻
+                <BaseIcon name="refresh" :size="14" />
               </button>
             </div>
             <div v-if="loadingRoots" class="sidebar-status">读取中...</div>
@@ -338,7 +338,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
                 type="button"
                 @click="loadFolder(drive.Path)"
               >
-                <span aria-hidden="true">▣</span>
+                <BaseIcon name="size" :size="14" />
                 <span>{{ drive.Name || drive.Path }}</span>
               </button>
             </div>
@@ -397,7 +397,7 @@ useEventListener(window, "keydown", (e: KeyboardEvent) => {
                   :title="entry.Path"
                   @click="loadFolder(entry.Path)"
                 >
-                  <span class="folder-icon" aria-hidden="true">📁</span>
+                  <span class="folder-icon"><BaseIcon name="folder" :size="16" /></span>
                   <span class="folder-name">{{ entry.Name || entry.Path }}</span>
                 </button>
               </div>

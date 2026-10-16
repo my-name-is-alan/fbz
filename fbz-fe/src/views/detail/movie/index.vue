@@ -1,125 +1,124 @@
 <script setup lang="ts">
 import type { DetailViewModel } from "@/service/modules/detail.ts";
 import { fetchPlaybackSource, loadMovieDetail } from "@/service/modules/detail.ts";
-import { searchRemoteSubtitles } from "@/service/modules/metadata.ts";
-import { setFavorite } from "@/service/modules/userData.ts";
+import { useDetailActions } from "@/composables/useDetailActions.ts";
 import { useAuthStore } from "@/stores/auth.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import { detailShellFor, itemRoute, itemTypeMeta } from "@/utils/itemType.ts";
 
+/**
+ * 电影 / 通用视频详情（Movie · Video · MusicVideo · Trailer …）。
+ * 其它真实类型落到这里时按 Type 转到对应详情壳，不把一切都当电影。
+ */
 const route = useRoute();
+const router = useRouter();
 const playback = usePlaybackStore();
 const uiStore = useUiStore();
 const authStore = useAuthStore();
 const routeId = computed(() => String(route.params.id));
 
 const detail = ref<DetailViewModel>();
-const togglingFavorite = shallowRef(false);
+const loading = ref(true);
+const starting = ref(false);
+const versionId = ref("");
+const subtitleOpen = ref(false);
+
+const { toggleFavorite, togglePlayed, openMore, editMetadata } = useDetailActions(
+  detail,
+  "/library",
+);
+
+const typeMeta = computed(() => itemTypeMeta(detail.value?.itemType));
 
 watch(
   routeId,
-  async (v) => {
-    detail.value = await loadMovieDetail(v);
+  async (id) => {
+    loading.value = true;
+    const loaded = await loadMovieDetail(id);
+    if (routeId.value !== id) return;
+    if (loaded && detailShellFor(loaded.itemType) !== "movie") {
+      await router.replace(itemRoute(loaded.itemType, loaded.id, loaded.parentId));
+      return;
+    }
+    detail.value = loaded;
+    loading.value = false;
   },
   { immediate: true },
 );
 
 /** 播放：versionId = 所选版本（MediaSource id）；startAt = 续播位置（秒）。 */
-async function playMovie(versionId?: string, startAt?: number) {
+async function playMovie(selectedVersion?: string, startAt?: number) {
   const movie = detail.value;
-  if (!movie) return;
-
-  const source = await fetchPlaybackSource(movie.id, versionId);
-  const activeVersion = movie.versions.find((v) => v.id === versionId) ?? movie.versions[0];
-  playback.open({
-    type: "movie",
-    id: movie.id,
-    title: movie.title,
-    subtitle: movie.meta.join(" · "),
-    poster: movie.poster,
-    backdrop: movie.backdrop,
-    tags: activeVersion?.tags,
-    duration: source?.duration ?? movie.runtimeSeconds,
-    // 显式传入秒数：从头=0，续播=上次位置；避免被 server.startTicks 覆盖。
-    startPositionSeconds: startAt ?? 0,
-    source: source ?? undefined,
-    server: source?.server,
-    mediaSources: source?.mediaSources,
-    chapters: source?.chapters,
-  });
-}
-
-/** 续播：从上次位置继续。 */
-function resumeMovie(versionId?: string) {
-  void playMovie(versionId, detail.value?.resumePositionSeconds);
-}
-
-/** 收藏切换：乐观更新，失败回滚并提示。 */
-async function toggleFavorite() {
-  const movie = detail.value;
-  const userId = authStore.userId;
-  if (!movie || !userId || togglingFavorite.value) return;
-
-  const next = !movie.isFavorite;
-  togglingFavorite.value = true;
-  detail.value = { ...movie, isFavorite: next };
+  if (!movie || starting.value) return;
+  starting.value = true;
   try {
-    await setFavorite(userId, movie.id, next);
-  } catch {
-    detail.value = { ...movie, isFavorite: !next };
-    uiStore.showToast("更新收藏状态失败。", "error");
-  } finally {
-    togglingFavorite.value = false;
-  }
-}
-
-/** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
-const searchingSubs = shallowRef(false);
-
-/** 外挂字幕入口：对接 RemoteSearch/Subtitles；无 provider 时提示空结果。 */
-async function searchExternalSubtitles() {
-  const movie = detail.value;
-  if (!movie || searchingSubs.value) return;
-  searchingSubs.value = true;
-  try {
-    const versionId = movie.versions[0]?.id;
-    const results = await searchRemoteSubtitles(movie.id, "chi", versionId);
-    if (!results.length) {
-      uiStore.showToast("暂无可用的外挂字幕源（服务端未配置字幕 provider）。", "info");
+    const source = await fetchPlaybackSource(movie.id, selectedVersion);
+    if (!source) {
+      uiStore.showToast("该条目暂无可播放媒体源。", "warning");
       return;
     }
-    uiStore.showToast(`找到 ${results.length} 条外挂字幕候选。`, "success");
-  } catch {
-    uiStore.showToast("搜索外挂字幕失败，请稍后重试。", "error");
+    const activeVersion = movie.versions.find((v) => v.id === selectedVersion) ?? movie.versions[0];
+    playback.open({
+      type: "movie",
+      id: movie.id,
+      title: movie.title,
+      subtitle: movie.meta.join(" · "),
+      poster: movie.poster,
+      backdrop: movie.backdrop,
+      tags: activeVersion?.tags,
+      duration: source.duration ?? movie.runtimeSeconds,
+      // 显式传入秒数：从头=0，续播=上次位置；避免被 server.startTicks 覆盖。
+      startPositionSeconds: startAt ?? 0,
+      source,
+      server: source.server,
+      mediaSources: source.mediaSources,
+      chapters: source.chapters,
+      subtitleTracks: source.subtitleTracks,
+      mediaInfo: source.mediaInfo,
+    });
   } finally {
-    searchingSubs.value = false;
+    starting.value = false;
   }
 }
 
-function editMetadata() {
+function resumeMovie(selectedVersion?: string) {
+  void playMovie(selectedVersion, detail.value?.resumePositionSeconds);
+}
+
+/** 下载外挂字幕后刷新媒体源（字幕列表 / 规格徽章随之更新）。 */
+async function reloadSources() {
   const movie = detail.value;
   if (!movie) return;
-  const yearSeg = movie.meta.find((m) => /^\d{4}$/.test(m));
-  uiStore.openMetadataManager({
-    id: movie.id,
-    libraryId: "movie",
-    detailType: "movie",
-    title: movie.title,
-    meta: movie.meta.join(" · "),
-    poster: movie.poster,
-    year: yearSeg ? Number(yearSeg) : undefined,
-    rating: movie.rating ?? undefined,
-    isFavorite: movie.isFavorite,
-  });
+  const fresh = await loadMovieDetail(movie.id);
+  if (fresh && detail.value?.id === fresh.id) detail.value = fresh;
 }
+
+const activeSource = computed(
+  () =>
+    detail.value?.mediaSources.find((s) => s.id === versionId.value) ??
+    detail.value?.mediaSources[0],
+);
+
+const facts = computed(() => {
+  const d = detail.value;
+  if (!d) return [];
+  return [
+    { label: "导演", value: d.directors },
+    { label: "编剧", value: d.writers },
+    { label: "原名", value: d.originalTitle !== d.title ? d.originalTitle : undefined },
+    { label: "分级", value: d.officialRating },
+    { label: "首映", value: d.premiereDate },
+  ].filter((f) => f.value);
+});
 </script>
 
 <template>
-  <main v-if="detail" class="detail-view">
-    <PageHeader :title="detail.title" fallback="/library/movie" />
-
+  <main v-if="detail" class="c-page detail-page">
     <DetailHero
+      v-model:version-id="versionId"
       :title="detail.title"
+      :original-title="detail.originalTitle"
       :poster="detail.poster"
       :backdrop="detail.backdrop"
       :meta="detail.meta"
@@ -127,109 +126,102 @@ function editMetadata() {
       :official-rating="detail.officialRating"
       :overview="detail.overview"
       :rating="detail.rating"
+      :type-label="typeMeta.label"
+      :type-icon="typeMeta.icon"
       :versions="detail.versions"
       :is-favorite="detail.isFavorite"
       :resume-position-seconds="detail.resumePositionSeconds"
       :played="detail.played"
-      @play="(versionId) => playMovie(versionId, 0)"
+      :busy="starting"
+      show-played-toggle
+      show-more
+      @play="(id) => playMovie(id, 0)"
       @resume="resumeMovie"
       @toggle-favorite="toggleFavorite"
+      @toggle-played="togglePlayed"
+      @more="openMore"
     >
-      <template #extra>
+      <template #header>
+        <PageHeader :title="detail.title" fallback="/library" />
+      </template>
+      <template #actions>
+        <button type="button" class="du-btn act" @click="subtitleOpen = true">
+          <BaseIcon name="subtitles" :size="16" />外挂字幕
+        </button>
+        <button v-if="authStore.isAdmin" type="button" class="du-btn act" @click="editMetadata">
+          <BaseIcon name="edit" :size="15" />编辑元数据
+        </button>
+      </template>
+      <template v-if="facts.length" #facts>
         <dl class="facts">
-          <div v-if="detail.directors" class="fact">
-            <dt>导演</dt>
-            <dd>{{ detail.directors }}</dd>
-          </div>
-          <div v-if="detail.originalTitle" class="fact">
-            <dt>原名</dt>
-            <dd>{{ detail.originalTitle }}</dd>
+          <div v-for="fact in facts" :key="fact.label" class="fact">
+            <dt>{{ fact.label }}</dt>
+            <dd>{{ fact.value }}</dd>
           </div>
         </dl>
-        <div class="hero-extra-actions">
-          <button type="button" class="edit-meta-btn" @click="searchExternalSubtitles">
-            {{ searchingSubs ? "搜索字幕中…" : "外挂字幕" }}
-          </button>
-          <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
-        </div>
       </template>
     </DetailHero>
 
+    <MediaInfoPanel
+      v-if="detail.mediaSources.length"
+      v-model:active-id="versionId"
+      :sources="detail.mediaSources"
+      :chapter-count="detail.chapterCount"
+    />
+
     <CastRow :cast="detail.cast" />
     <SimilarRow :items="detail.similar" />
+
+    <RemoteSubtitleModal
+      :open="subtitleOpen"
+      :item-id="detail.id"
+      :title="detail.title"
+      :media-source-id="activeSource?.id"
+      :existing="activeSource?.subtitles"
+      @close="subtitleOpen = false"
+      @downloaded="reloadSources"
+    />
   </main>
 
-  <main v-else class="detail-missing">
-    <p>未找到该影片</p>
-    <RouterLink to="/" class="link">返回首页</RouterLink>
+  <main v-else-if="loading" class="c-page">
+    <p class="c-state"><BaseIcon name="loading" :size="16" class="c-spin" />正在加载详情…</p>
+  </main>
+
+  <main v-else class="c-page">
+    <BaseEmptyState
+      icon="search-x"
+      title="未找到该条目"
+      description="条目可能已被删除，或当前账号没有访问该媒体库的权限。"
+    >
+      <RouterLink to="/" class="du-btn du-btn-ghost"
+        ><BaseIcon name="home" :size="15" />返回首页</RouterLink
+      >
+    </BaseEmptyState>
   </main>
 </template>
 
 <style scoped lang="scss">
 .facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 32px;
+  max-width: 880px;
   margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--fbz-space-2);
 }
 
 .fact {
   display: flex;
-  gap: var(--fbz-space-3);
-  font-size: var(--fbz-font-size-md);
+  gap: 12px;
+  font-size: 13px;
 
   dt {
-    flex: 0 0 64px;
-    color: var(--fbz-color-text-muted);
+    flex: 0 0 48px;
+    color: var(--ui-text-subtle);
   }
 
   dd {
     margin: 0;
-    color: var(--fbz-color-text-soft);
+    color: var(--ui-text);
   }
-}
-
-.link {
-  color: var(--fbz-color-brand-500);
-  text-decoration: none;
-
-  &:hover {
-    text-decoration: underline;
-  }
-}
-
-.hero-extra-actions {
-  margin-top: var(--fbz-space-3);
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--fbz-space-2);
-}
-
-.edit-meta-btn {
-  height: 34px;
-  padding: 0 16px;
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel-strong);
-  color: var(--fbz-color-text-soft);
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 700;
-  cursor: pointer;
-  transition: all var(--fbz-motion-fast);
-
-  &:hover {
-    border-color: var(--fbz-color-brand-500);
-    color: var(--fbz-color-brand-500);
-    background: color-mix(in srgb, var(--fbz-color-brand-500) 6%, transparent);
-  }
-}
-
-.detail-missing {
-  min-height: 100vh;
-  display: grid;
-  place-content: center;
-  gap: var(--fbz-space-3);
-  text-align: center;
-  color: var(--fbz-color-text-muted);
 }
 </style>

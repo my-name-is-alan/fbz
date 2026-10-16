@@ -66,6 +66,22 @@ function currentQuery(): Record<string, string> {
 /** 当前进行中的请求控制器，切换关键词时中止上一请求。 */
 let controller: AbortController | undefined;
 
+/** 类型筛选 / 分区 → Lucide 图标。 */
+const TYPE_ICONS: Record<string, string> = {
+  Movie: "movie",
+  Series: "tv",
+  Person: "user-round",
+  MusicAlbum: "album",
+  MusicArtist: "artist",
+};
+const SECTION_ICONS: Record<string, string> = {
+  movie: "movie",
+  tv: "tv",
+  person: "user-round",
+  album: "album",
+  artist: "artist",
+};
+
 /** 分区顺序与标题。 */
 const SECTIONS: { kind: SearchKind; title: string }[] = [
   { kind: "movie", title: "电影" },
@@ -176,9 +192,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="search-view">
+  <main class="c-page search-view">
     <form class="search-bar" role="search" @submit.prevent="onSubmit">
-      <span class="search-icon" aria-hidden="true" />
+      <BaseIcon name="search" :size="18" class="search-icon" />
       <input
         ref="inputEl"
         v-model="keyword"
@@ -190,16 +206,40 @@ onBeforeUnmount(() => {
         aria-label="搜索关键词"
         @input="onInput"
       />
+      <BaseIcon v-if="loading" name="loading" :size="16" class="c-spin busy" />
+      <button
+        v-else-if="keyword"
+        class="clear"
+        type="button"
+        aria-label="清空"
+        @click="
+          keyword = '';
+          onSubmit();
+        "
+      >
+        <BaseIcon name="close" :size="15" />
+      </button>
     </form>
 
     <div class="search-filters">
-      <BaseSelect
-        v-model="typeFilter"
-        :options="typeOptions"
-        aria-label="按类型筛选"
-        @update:model-value="onFiltersChange"
-      />
+      <div class="seg" role="group" aria-label="按类型筛选">
+        <button
+          v-for="opt in typeOptions"
+          :key="opt.value"
+          type="button"
+          :class="{ on: typeFilter === opt.value }"
+          @click="
+            typeFilter = opt.value;
+            onFiltersChange();
+          "
+        >
+          <BaseIcon v-if="TYPE_ICONS[opt.value]" :name="TYPE_ICONS[opt.value]!" :size="13" />{{
+            opt.label
+          }}
+        </button>
+      </div>
       <label class="exclude-field">
+        <BaseIcon name="eye-off" :size="14" />
         <span class="exclude-label">排除标签</span>
         <input
           v-model="excludeTagsInput"
@@ -215,16 +255,32 @@ onBeforeUnmount(() => {
       </label>
     </div>
 
-    <p v-if="loading" class="hint">搜索中…</p>
-    <p v-else-if="failed" class="hint">搜索失败，请检查网络或登录状态后重试。</p>
-    <p v-else-if="!keyword.trim()" class="hint">输入关键词以搜索影片、剧集、人物、专辑与艺术家。</p>
-    <p v-else-if="searched && !groups.length" class="hint">
-      没有找到与「{{ keyword.trim() }}」相关的内容。
+    <p v-if="loading && !results.length" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />搜索中…
     </p>
+    <p v-else-if="failed" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />搜索失败，请检查网络或登录状态后重试。
+    </p>
+    <BaseEmptyState
+      v-else-if="!keyword.trim()"
+      compact
+      icon="search"
+      title="搜索媒体库"
+      description="输入关键词以搜索影片、剧集、人物、专辑与艺术家；可按类型筛选、排除标签。"
+    />
+    <BaseEmptyState
+      v-else-if="searched && !groups.length"
+      compact
+      icon="search-x"
+      :title="`没有找到与「${keyword.trim()}」相关的内容`"
+      description="换个关键词，或放宽类型 / 排除标签条件再试。"
+    />
 
     <section v-for="group in groups" :key="group.kind" class="result-section">
-      <h2 class="section-title">
-        {{ group.title }}
+      <h2 class="c-section-title">
+        <BaseIcon :name="SECTION_ICONS[group.kind] ?? 'file'" :size="16" class="lead" />{{
+          group.title
+        }}
         <span class="section-count">{{ group.items.length }}</span>
       </h2>
 
@@ -236,11 +292,19 @@ onBeforeUnmount(() => {
             :variant="(i % 2) as 0 | 1"
             :show-resolution="false"
           />
-          <RouterLink v-else :to="item.to" class="entity-card">
-            <MediaPoster :src="item.poster" :title="item.title" :variant="(i % 2) as 0 | 1" />
+          <RouterLink v-else :to="item.to" class="entity-card" :class="`kind-${item.kind}`">
+            <div class="entity-cover">
+              <MediaPoster
+                :src="item.poster"
+                :title="item.title"
+                :ratio="item.kind === 'album' ? 'square' : 'poster'"
+                :icon="SECTION_ICONS[item.kind]"
+                :variant="(i % 2) as 0 | 1"
+              />
+            </div>
             <div class="entity-footer">
               <span class="entity-title" :title="item.title">{{ item.title }}</span>
-              <span v-if="item.meta" class="entity-meta">{{ item.meta }}</span>
+              <span v-if="item.meta" class="c-meta">{{ item.meta }}</span>
             </div>
           </RouterLink>
         </template>
@@ -251,54 +315,68 @@ onBeforeUnmount(() => {
 
 <style scoped lang="scss">
 .search-view {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-8)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .search-bar {
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-3);
-  max-width: 640px;
-  height: 48px;
-  margin-bottom: var(--fbz-space-8);
-  padding: 0 var(--fbz-space-4);
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel-strong);
-  transition: border-color var(--fbz-motion-fast);
+  gap: 10px;
+  height: 52px;
+  padding: 0 16px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-input);
+  transition:
+    border-color var(--ui-duration-fast),
+    box-shadow var(--ui-duration-fast);
 
   &:focus-within {
-    border-color: var(--fbz-color-brand-500);
+    border-color: rgb(var(--ui-accent-channel) / 60%);
+    box-shadow: 0 0 0 3px rgb(var(--ui-accent-channel) / 12%);
   }
-}
 
-.search-icon {
-  flex: 0 0 auto;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  border: 1.5px solid var(--fbz-color-text-muted);
-  opacity: 0.8;
+  .search-icon,
+  .busy {
+    color: var(--ui-text-subtle);
+  }
 }
 
 .search-input {
-  flex: 1 1 auto;
+  flex: 1;
   min-width: 0;
   height: 100%;
   border: 0;
-  background: none;
   outline: none;
-  color: var(--fbz-color-text);
-  font-size: var(--fbz-font-size-lg);
+  background: transparent;
+  color: var(--ui-text);
+  font-size: 16px;
 
   &::placeholder {
-    color: var(--fbz-color-text-muted);
+    color: var(--ui-text-subtle);
   }
 
-  // 去掉浏览器 type=search 自带的清除按钮，保持视觉统一
   &::-webkit-search-cancel-button {
     appearance: none;
+  }
+}
+
+.clear {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text-subtle);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--ui-surface-hover);
+    color: var(--ui-text);
   }
 }
 
@@ -306,143 +384,153 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--fbz-space-3);
-  max-width: 640px;
-  margin: calc(-1 * var(--fbz-space-4)) 0 var(--fbz-space-6);
+  gap: 10px;
+}
 
-  :deep(.base-select) {
-    width: auto;
-    min-width: 124px;
-    max-width: 168px;
+.seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--ui-border);
+  border-radius: 9px;
+  background: var(--ui-surface);
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 28px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ui-text-muted);
+    font-size: 12.5px;
+    cursor: pointer;
+
+    &:hover {
+      color: var(--ui-text);
+    }
+
+    &.on {
+      color: var(--ui-text);
+      background: rgb(var(--ui-accent-channel) / 14%);
+      box-shadow: inset 0 0 0 1px rgb(var(--ui-accent-channel) / 30%);
+    }
   }
 }
 
 .exclude-field {
   display: inline-flex;
   align-items: center;
-  gap: var(--fbz-space-2);
-  min-width: 0;
-  flex: 1 1 180px;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-input);
+  color: var(--ui-text-subtle);
 }
 
 .exclude-label {
-  flex: 0 0 auto;
-  font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  font-size: 12px;
   white-space: nowrap;
 }
 
 .exclude-input {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 34px;
-  padding: 0 12px;
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel);
-  color: var(--fbz-color-text);
-  font-size: var(--fbz-font-size-sm);
+  width: 160px;
+  border: 0;
   outline: none;
-  transition: border-color var(--fbz-motion-fast);
-
-  &::placeholder {
-    color: var(--fbz-color-text-muted);
-  }
-
-  &:focus {
-    border-color: var(--fbz-color-brand-500);
-  }
-}
-
-.hint {
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-md);
+  background: transparent;
+  color: var(--ui-text);
+  font-size: 12.5px;
 }
 
 .result-section {
-  margin-bottom: var(--fbz-space-8);
-}
-
-.section-title {
   display: flex;
-  align-items: center;
-  gap: var(--fbz-space-2);
-  margin: 0 0 var(--fbz-space-4);
-  font-size: var(--fbz-font-size-lg);
-  font-weight: 800;
+  flex-direction: column;
+  gap: 12px;
+
+  .lead {
+    color: var(--ui-text-subtle);
+  }
 }
 
 .section-count {
-  font-family: var(--fbz-font-display);
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 700;
-  color: var(--fbz-color-text-muted);
+  color: var(--ui-text-subtle);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: var(--fbz-space-5);
+  gap: 20px 16px;
 }
 
 .entity-card {
-  display: block;
-  text-decoration: none;
+  min-width: 0;
   color: inherit;
+  text-decoration: none;
+
+  &:hover {
+    .entity-cover {
+      border-color: var(--ui-border-strong);
+      transform: translateY(-2px);
+    }
+
+    .entity-title {
+      color: var(--ui-accent-hover);
+    }
+  }
+
+  &.kind-person .entity-cover,
+  &.kind-artist .entity-cover {
+    border-radius: 50%;
+    aspect-ratio: 1;
+
+    :deep(.media-poster) {
+      height: 100%;
+    }
+  }
+}
+
+.entity-cover {
   overflow: hidden;
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: var(--fbz-radius-card);
-  background: var(--fbz-color-panel);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-raised);
   transition:
-    border-color var(--fbz-motion-fast),
-    transform var(--fbz-motion-fast);
-
-  &:hover,
-  &:focus-visible {
-    border-color: var(--fbz-color-brand-500);
-    transform: translateY(-4px);
-  }
-
-  :deep(.media-poster) {
-    border-radius: 0;
-  }
+    transform var(--ui-duration-base) var(--ui-ease-out),
+    border-color var(--ui-duration-fast);
 }
 
 .entity-footer {
-  padding: var(--fbz-space-3) var(--fbz-space-3) var(--fbz-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 2px 0;
+  text-align: center;
 }
 
 .entity-title {
-  display: block;
-  font-family: var(--fbz-font-display);
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.3;
-  white-space: nowrap;
   overflow: hidden;
+  color: var(--ui-text);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-.entity-meta {
-  display: block;
-  margin-top: 3px;
-  font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  transition: color var(--ui-duration-fast);
 }
 
 @media (max-width: 600px) {
-  .search-view {
-    padding: calc(var(--header-h, 56px) + var(--fbz-space-5)) var(--fbz-space-4) 60px;
-  }
-
-  .search-bar {
-    height: 44px;
-    margin-bottom: var(--fbz-space-6);
-  }
-
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
-    gap: var(--fbz-space-4);
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  }
+
+  .exclude-input {
+    width: 110px;
   }
 }
 </style>

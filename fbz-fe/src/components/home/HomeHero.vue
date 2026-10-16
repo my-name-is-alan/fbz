@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import type { FeaturedItem } from "@/types/media.ts";
+import { usePlaybackStore } from "@/stores/playback.ts";
+import { useUiStore } from "@/stores/ui.ts";
 
+/**
+ * 首页英雄区：BFF featured（最新入库主打）轮播。横幅 + 渐变遮罩 + 规格徽章 + 缩略图切换条。
+ */
 interface Props {
   items: FeaturedItem[];
   /** 自动轮播间隔（ms），0 表示不自动 */
@@ -8,15 +13,21 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  interval: 6000,
+  interval: 7000,
 });
 
+const router = useRouter();
+const playback = usePlaybackStore();
+const uiStore = useUiStore();
+
 const current = ref(0);
-const active = computed(() => props.items[current.value]);
+const active = computed(() => props.items[current.value] ?? props.items[0]);
+const busy = ref(false);
 
 let timer: ReturnType<typeof setInterval> | undefined;
 
 function go(i: number) {
+  if (!props.items.length) return;
   current.value = (i + props.items.length) % props.items.length;
 }
 
@@ -34,123 +45,103 @@ function select(i: number) {
 
 onMounted(restart);
 onBeforeUnmount(() => timer && clearInterval(timer));
-
-// 蜂巢：拆两列，偶数列错位下移
-const colA = computed(() =>
-  props.items.map((item, i) => ({ item, i })).filter(({ i }) => i % 2 === 0),
+watch(
+  () => props.items.length,
+  () => {
+    if (current.value >= props.items.length) current.value = 0;
+    restart();
+  },
 );
-const colB = computed(() =>
-  props.items.map((item, i) => ({ item, i })).filter(({ i }) => i % 2 === 1),
+
+const detailPath = computed(() =>
+  active.value ? `/${active.value.detailType ?? "movie"}/${active.value.id}` : "/",
 );
-
-import { usePlaybackStore } from "@/stores/playback.ts";
-
-const router = useRouter();
-const playback = usePlaybackStore();
 
 async function playActive() {
-  if (!active.value) return;
+  const item = active.value;
+  if (!item || busy.value) return;
+  busy.value = true;
   try {
     const { itemDetail, preparePlayback } = await import("@/service/modules/server.ts");
-    const item = await itemDetail(String(active.value.id));
-    if (item.Type === "Series") {
-      await router.push(`/tv/${item.Id}`);
+    const detail = await itemDetail(String(item.id));
+    if (detail.Type === "Series" || detail.Type === "Season" || detail.Type === "BoxSet") {
+      await router.push(detail.Type === "BoxSet" ? `/collection/${detail.Id}` : `/tv/${detail.Id}`);
       return;
     }
-    playback.open(await preparePlayback(item));
+    playback.open(await preparePlayback(detail));
   } catch {
-    const { useUiStore } = await import("@/stores/ui.ts");
-    useUiStore().showToast("无法加载播放源，请稍后重试", "error");
+    uiStore.showToast("无法加载播放源，请稍后重试", "error");
+  } finally {
+    busy.value = false;
   }
-}
-
-function viewDetails() {
-  router.push(`/movie/${active.value.id}`);
 }
 </script>
 
 <template>
-  <section class="hero">
+  <section v-if="active" class="hero" aria-roledescription="carousel" aria-label="最新入库">
     <div class="slides">
       <div
         v-for="(item, i) in props.items"
         :key="item.id"
         class="slide"
         :class="{ active: i === current }"
+        :aria-hidden="i !== current"
       >
         <img v-if="item.backdrop" :src="item.backdrop" :alt="item.title" />
-        <span v-else class="slide-ph">{{ item.title }}</span>
+        <div v-else class="slide-ph">
+          <BaseIcon name="clapperboard" :size="64" :stroke-width="1.2" />
+        </div>
       </div>
     </div>
     <div class="scrim" />
 
     <div class="content">
-      <p class="eyebrow">最新入库</p>
+      <span class="eyebrow"><BaseIcon name="sparkles" :size="12" />最新入库</span>
       <h1 class="title">{{ active.title }}</h1>
-      <div class="meta">
-        <template v-for="(m, i) in active.meta" :key="m">
+      <div class="meta c-meta">
+        <template v-for="(m, i) in active.meta" :key="`${m}-${i}`">
+          <span v-if="i > 0" class="c-dot" />
           <span>{{ m }}</span>
-          <span v-if="i < active.meta.length - 1" class="dot" />
         </template>
-        <span class="tags">
-          <span v-for="t in active.tags" :key="t" class="tag">{{ t }}</span>
-        </span>
+        <span v-for="t in active.tags" :key="t" class="spec">{{ t }}</span>
       </div>
-      <p class="overview">{{ active.overview }}</p>
+      <p v-if="active.overview" class="overview">{{ active.overview }}</p>
       <div class="actions">
-        <button class="btn btn-play" type="button" @click="playActive">
-          <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-            <path d="M8 5v14l11-7z" />
-          </svg>
-          <span>播放</span>
+        <button
+          class="du-btn du-btn-primary hero-btn"
+          type="button"
+          :disabled="busy"
+          @click="playActive"
+        >
+          <BaseIcon
+            :name="busy ? 'loading' : 'play'"
+            :size="16"
+            :fill="!busy"
+            :class="{ 'c-spin': busy }"
+          />
+          播放
         </button>
-
-        <button class="btn btn-ghost" type="button" @click="viewDetails">
-          <svg
-            class="btn-icon"
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <circle cx="12" cy="12" r="10" />
-            <line x1="12" y1="16" x2="12" y2="12" />
-            <line x1="12" y1="8" x2="12.01" y2="8" />
-          </svg>
-          <span>详情</span>
-        </button>
+        <RouterLink class="du-btn du-btn-outline hero-btn ghost" :to="detailPath">
+          <BaseIcon name="info" :size="16" />详情
+        </RouterLink>
       </div>
     </div>
 
-    <div class="hive">
-      <div class="hive-col">
-        <button
-          v-for="{ item, i } in colA"
-          :key="item.id"
-          class="hive-cell"
-          :class="{ active: i === current }"
-          @click="select(i)"
-        >
-          <img v-if="item.thumb" :src="item.thumb" :alt="item.title" loading="lazy" />
-          <span v-else class="cell-ph" aria-hidden="true" />
-        </button>
-      </div>
-      <div class="hive-col offset">
-        <button
-          v-for="{ item, i } in colB"
-          :key="item.id"
-          class="hive-cell"
-          :class="{ active: i === current }"
-          @click="select(i)"
-        >
-          <img v-if="item.thumb" :src="item.thumb" :alt="item.title" loading="lazy" />
-          <span v-else class="cell-ph" aria-hidden="true" />
-        </button>
-      </div>
+    <div v-if="props.items.length > 1" class="thumbs" role="tablist" aria-label="切换主打">
+      <button
+        v-for="(item, i) in props.items"
+        :key="item.id"
+        type="button"
+        role="tab"
+        class="thumb"
+        :class="{ active: i === current }"
+        :aria-selected="i === current"
+        :aria-label="item.title"
+        @click="select(i)"
+      >
+        <img v-if="item.thumb" :src="item.thumb" alt="" loading="lazy" />
+        <BaseIcon v-else name="movie" :size="16" />
+      </button>
     </div>
   </section>
 </template>
@@ -158,26 +149,25 @@ function viewDetails() {
 <style scoped lang="scss">
 .hero {
   position: relative;
-  height: 76vh;
-  min-height: 520px;
+  height: 400px;
   display: flex;
-  align-items: center;
-  padding: 0 var(--fbz-space-8);
+  align-items: flex-end;
   overflow: hidden;
-  background: var(--fbz-color-bg-strong);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-surface-raised);
 }
 
 .slides {
   position: absolute;
   inset: 0;
-  z-index: 0;
 }
 
 .slide {
   position: absolute;
   inset: 0;
   opacity: 0;
-  transition: opacity var(--fbz-motion-slow) ease;
+  transition: opacity 600ms var(--ui-ease-out);
 
   &.active {
     opacity: 1;
@@ -187,202 +177,149 @@ function viewDetails() {
     width: 100%;
     height: 100%;
     object-fit: cover;
-    object-position: center 28%;
+    object-position: center 25%;
   }
 }
 
 .slide-ph {
-  position: absolute;
-  inset: 0;
+  width: 100%;
+  height: 100%;
   display: grid;
-  place-content: center;
-  font-size: 80px;
-  font-weight: 800;
-  letter-spacing: 4px;
-  color: rgba(255, 255, 255, 0.06);
+  place-items: center;
+  color: var(--ui-border-strong);
 }
 
 .scrim {
   position: absolute;
   inset: 0;
-  z-index: 1;
   background:
     linear-gradient(
       90deg,
-      rgba(0, 0, 0, 0.88) 0%,
-      rgba(0, 0, 0, 0.42) 48%,
-      rgba(0, 0, 0, 0.08) 75%
+      rgb(var(--ui-scrim) / 96%) 0%,
+      rgb(var(--ui-scrim) / 62%) 42%,
+      rgb(var(--ui-scrim) / 0%) 100%
     ),
-    linear-gradient(
-      0deg,
-      var(--fbz-color-bg) 0%,
-      color-mix(in srgb, var(--fbz-color-bg) 62%, transparent) 18%,
-      rgba(0, 0, 0, 0) 46%
-    );
+    linear-gradient(0deg, rgb(var(--ui-scrim) / 100%) 0%, rgb(var(--ui-scrim) / 0%) 55%);
 }
 
 .content {
   position: relative;
-  z-index: 2;
-  max-width: 540px;
-  color: #ffffff; /* 确保在任何主题下，叠加在暗色图片之上的文字均为白色以实现高可读性 */
+  z-index: 1;
+  width: 100%;
+  max-width: 640px;
+  padding: 32px;
 }
 
 .eyebrow {
-  margin: 0 0 var(--fbz-space-3);
-  font-size: var(--fbz-font-size-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 7px;
+  margin-bottom: 12px;
+  border-radius: 4px;
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  color: var(--fbz-color-brand-500);
+  letter-spacing: 0.04em;
 }
 
 .title {
-  margin: 0 0 var(--fbz-space-3);
-  font-size: clamp(38px, 4.4vw, 56px);
-  line-height: 1.06;
-  font-weight: 800;
-  letter-spacing: -0.5px;
-  color: #ffffff;
-  text-shadow: 0 2px 24px rgba(0, 0, 0, 0.45);
+  margin: 0 0 8px;
+  color: var(--ui-text);
+  font-size: clamp(26px, 3.4vw, 38px);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
 }
 
 .meta {
   display: flex;
-  align-items: center;
   flex-wrap: wrap;
-  gap: var(--fbz-space-3);
-  margin-bottom: var(--fbz-space-4);
-  font-size: var(--fbz-font-size-md);
-  color: rgba(255, 255, 255, 0.85);
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
 
-  .dot {
-    width: 3px;
-    height: 3px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.4);
-  }
-
-  .tags {
-    display: inline-flex;
-    gap: var(--fbz-space-2);
-    margin-left: var(--fbz-space-2);
-  }
-
-  .tag {
-    padding: 2px 7px;
-    border: 1px solid rgba(255, 255, 255, 0.22);
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 3px;
-    font-size: var(--fbz-font-size-xs);
-    letter-spacing: 0.5px;
-    color: rgba(255, 255, 255, 0.85);
-  }
+.spec {
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 4px;
+  color: var(--ui-text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
 }
 
 .overview {
-  margin: 0 0 var(--fbz-space-6);
-  max-width: 500px;
-  font-size: var(--fbz-font-size-md);
-  line-height: 1.7;
-  color: rgba(255, 255, 255, 0.82);
   display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
+  margin: 0 0 20px;
   overflow: hidden;
+  color: var(--ui-text-muted);
+  font-size: 13.5px;
+  line-height: 1.65;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 
 .actions {
   display: flex;
-  gap: var(--fbz-space-3);
+  gap: 10px;
 }
 
-.btn {
-  height: 46px;
-  padding: 0 26px;
-  border: 1px solid transparent;
-  border-radius: var(--fbz-radius-control);
-  font-size: var(--fbz-font-size-md);
-  font-weight: 700;
+.hero-btn {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 20px;
+  border-radius: var(--ui-radius-md);
   text-decoration: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  transition:
-    background var(--fbz-motion-fast) ease,
-    border-color var(--fbz-motion-fast) ease,
-    box-shadow var(--fbz-motion-fast) ease,
-    transform var(--fbz-motion-fast) ease;
 
-  &:active {
-    transform: scale(0.96);
+  &.ghost {
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
+    background: transparent;
+
+    &:hover {
+      background: var(--ui-surface-hover);
+      border-color: var(--ui-border-strong);
+    }
   }
 }
 
-.btn-icon {
-  flex: 0 0 auto;
-}
-
-.btn-play {
-  color: #07120a;
-  background: var(--fbz-color-brand-500);
-
-  &:hover {
-    background: var(--fbz-color-brand-600);
-    box-shadow: 0 6px 20px color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
-    transform: translateY(-2px);
-  }
-}
-
-.btn-ghost {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.16);
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.18);
-    border-color: rgba(255, 255, 255, 0.35);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
-    transform: translateY(-2px);
-  }
-}
-
-.hive {
+.thumbs {
   position: absolute;
   z-index: 2;
-  right: var(--fbz-space-8);
-  top: 50%;
-  transform: translateY(-50%);
+  right: 20px;
+  bottom: 20px;
   display: flex;
-  gap: 10px;
+  gap: 8px;
 }
 
-.hive-col {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-
-  &.offset {
-    margin-top: 46px;
-  }
-}
-
-.hive-cell {
-  position: relative;
-  width: 76px;
-  height: 84px;
-  padding: 0;
-  border-radius: var(--fbz-radius-card);
+.thumb {
+  width: 72px;
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
   overflow: hidden;
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel);
+  padding: 0;
+  border: 1px solid var(--ui-glass-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-subtle);
   opacity: 0.55;
+  cursor: pointer;
   transition:
-    opacity var(--fbz-motion-base),
-    border-color var(--fbz-motion-base),
-    transform var(--fbz-motion-base);
+    opacity var(--ui-duration-fast),
+    border-color var(--ui-duration-fast);
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
 
   &:hover {
     opacity: 0.9;
@@ -390,90 +327,24 @@ function viewDetails() {
 
   &.active {
     opacity: 1;
-    border-color: var(--fbz-color-brand-500);
-    transform: scale(1.06);
-  }
-
-  img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+    border-color: var(--ui-accent);
+    box-shadow: 0 0 0 1px var(--ui-accent);
   }
 }
 
-.cell-ph {
-  position: absolute;
-  inset: 0;
-  display: block;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0)),
-    var(--fbz-color-panel-strong);
-}
-
-@media (max-width: 1024px) {
-  .title {
-    font-size: 38px;
-  }
-
-  .hive-cell {
-    width: 64px;
-    height: 72px;
-  }
-
-  .hive-col.offset {
-    margin-top: 40px;
+@media (max-width: 900px) {
+  .thumbs {
+    display: none;
   }
 }
 
 @media (max-width: 600px) {
   .hero {
-    height: auto;
-    min-height: 0;
-    padding: calc(var(--header-h, 56px) + 80px) var(--fbz-space-4) var(--fbz-space-6);
-    flex-direction: column;
-    align-items: stretch;
+    height: 340px;
   }
 
   .content {
-    max-width: 100%;
-  }
-
-  .title {
-    font-size: 30px;
-  }
-
-  .overview {
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-  }
-
-  .actions .btn {
-    flex: 1;
-    justify-content: center;
-  }
-
-  .hive {
-    position: static;
-    transform: none;
-    margin-top: var(--fbz-space-5);
-    justify-content: center;
-    gap: 8px;
-    width: 100%;
-  }
-
-  .hive-col {
-    flex-direction: row;
-    gap: 8px;
-
-    &.offset {
-      margin-top: 0;
-    }
-  }
-
-  .hive-cell {
-    width: 48px;
-    height: 64px;
+    padding: 20px;
   }
 }
 </style>

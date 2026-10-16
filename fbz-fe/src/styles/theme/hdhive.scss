@@ -1,0 +1,335 @@
+// C 端视觉作用域（HDHive 对齐）。
+//
+// 权威 token：docs/hdhive-tokens.css。只在 `html.fbz-c` 下生效——由 C 端布局通过
+// `useCSurface()` 挂上，后台（layouts/admin）不挂，因此 Admin 视觉保持冻结。
+// 旧 `--fbz-*` 变量在作用域内重映射到 HDHive，未重写的共享组件（弹窗等）也跟随新皮肤。
+
+// HDHive 暗色 token（权威：docs/hdhive-tokens.css）。播放器等需要恒定暗色的表面也复用。
+@mixin hd-dark-tokens {
+  --ui-background: #09090e;
+  --ui-surface: #111119;
+  --ui-surface-raised: #171722;
+  --ui-surface-hover: #20202c;
+  --ui-input: #0d0d14;
+  --ui-border: #282838;
+  --ui-border-strong: #3a3a50;
+  --ui-text: #eeeef6;
+  --ui-text-muted: #9c9cb2;
+  --ui-text-subtle: #707085;
+  --ui-accent: #d08700;
+  --ui-accent-hover: #f0b100;
+  --ui-accent-channel: 208 135 0;
+  --ui-accent-contrast: #0a0a0a;
+  --ui-danger: #fb7185;
+  --ui-danger-contrast: #19080c;
+  --ui-success: #34d399;
+  --ui-success-contrast: #06130e;
+  --ui-warning: #fbbf24;
+  --ui-warning-contrast: #171005;
+  --ui-overlay: rgb(2 3 8 / 72%);
+  --ui-glass: rgb(17 17 25 / 82%);
+  --ui-glass-strong: rgb(18 18 28 / 92%);
+  --ui-glass-border: rgb(255 255 255 / 14%);
+  --ui-glass-backdrop: rgb(2 3 8 / 56%);
+  --ui-shadow-surface: 0 16px 42px rgb(0 0 0 / 24%);
+  --ui-shadow-float: 0 24px 70px rgb(0 0 0 / 42%);
+  --ui-shadow-dialog: 0 28px 90px rgb(0 0 0 / 52%);
+  --ui-shadow-accent: 0 9px 24px rgb(var(--ui-accent-channel) / 18%);
+  --ui-scrim: 9 9 14;
+}
+
+html.fbz-c {
+  color-scheme: dark;
+
+  @include hd-dark-tokens;
+  --ui-focus: var(--ui-accent-hover);
+  --ui-header-height: 64px;
+  --ui-content-width: 1280px;
+  --ui-shell-width: 1600px;
+  --ui-shell-gutter: 24px;
+  --ui-radius-sm: 7px;
+  --ui-radius-md: 11px;
+  --ui-radius-lg: 16px;
+  --ui-font-sans: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --ui-font-mono: "Roboto Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --ui-duration-fast: 160ms;
+  --ui-duration-base: 220ms;
+  --ui-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  // 布局：头部高度沿用 --header-h 契约。
+  --header-h: var(--ui-header-height);
+
+  // 旧 token 重映射（共享组件 / 弹窗随作用域换皮）。
+  --fbz-color-bg: var(--ui-background);
+  --fbz-color-bg-strong: #050509;
+  --fbz-color-panel: var(--ui-surface);
+  --fbz-color-panel-strong: var(--ui-surface-raised);
+  --fbz-color-panel-elevated: var(--ui-surface-hover);
+  --fbz-color-line: var(--ui-border);
+  --fbz-color-line-bright: var(--ui-border-strong);
+  --fbz-color-line-soft: #1e1e2b;
+  --fbz-color-text: var(--ui-text);
+  --fbz-color-text-soft: #c2c2d4;
+  --fbz-color-text-muted: var(--ui-text-muted);
+  --fbz-color-text-disabled: var(--ui-text-subtle);
+  // 主题色设置（后台主题页）只作用于后台；C 端琥珀色是硬约束，压过内联变量。
+  --fbz-color-brand-500: var(--ui-accent) !important;
+  --fbz-color-brand-600: var(--ui-accent-hover) !important;
+  --fbz-color-focus: rgb(var(--ui-accent-channel) / 30%);
+  --fbz-color-danger-500: var(--ui-danger);
+  --fbz-color-amber-500: var(--ui-warning);
+  --fbz-radius-card: var(--ui-radius-md);
+  --fbz-radius-control: var(--ui-radius-sm);
+  --fbz-radius-hero: var(--ui-radius-lg);
+  --fbz-shadow-panel: var(--ui-shadow-float);
+  --fbz-shadow-focus: 0 0 0 3px rgb(var(--ui-accent-channel) / 22%);
+  --fbz-font-sans: var(--ui-font-sans);
+  --fbz-font-display: var(--ui-font-sans);
+
+  // daisyUI 语义映射（du-btn / du-input / du-modal …）。
+  --color-base-100: var(--ui-background);
+  --color-base-200: var(--ui-surface);
+  --color-base-300: var(--ui-surface-raised);
+  --color-base-content: var(--ui-text);
+  --color-primary: var(--ui-accent);
+  --color-primary-content: var(--ui-accent-contrast);
+  --color-secondary: var(--ui-surface-hover);
+  --color-secondary-content: var(--ui-text);
+  --color-accent: var(--ui-accent);
+  --color-accent-content: var(--ui-accent-contrast);
+  --color-neutral: var(--ui-surface-raised);
+  --color-neutral-content: var(--ui-text);
+  --color-success: var(--ui-success);
+  --color-success-content: var(--ui-success-contrast);
+  --color-warning: var(--ui-warning);
+  --color-warning-content: var(--ui-warning-contrast);
+  --color-error: var(--ui-danger);
+  --color-error-content: var(--ui-danger-contrast);
+  --radius-selector: var(--ui-radius-sm);
+  --radius-field: var(--ui-radius-sm);
+  --radius-box: var(--ui-radius-lg);
+
+  background: var(--ui-background);
+  font-family: var(--ui-font-sans);
+}
+
+html.fbz-c[data-theme="light"] {
+  color-scheme: light;
+
+  --ui-background: #f5f6f9;
+  --ui-surface: #ffffff;
+  --ui-surface-raised: #ffffff;
+  --ui-surface-hover: #eff0f5;
+  --ui-input: #fafafd;
+  --ui-border: #dcdeea;
+  --ui-border-strong: #c4c7d7;
+  --ui-text: #181822;
+  --ui-text-muted: #626276;
+  --ui-text-subtle: #89899c;
+  --ui-accent: #f0b100;
+  --ui-accent-hover: #d08700;
+  --ui-accent-channel: 240 177 0;
+  --ui-accent-contrast: #18140a;
+  --ui-danger: #be123c;
+  --ui-danger-contrast: #ffffff;
+  --ui-success: #047857;
+  --ui-success-contrast: #ffffff;
+  --ui-warning: #a16207;
+  --ui-warning-contrast: #ffffff;
+  --ui-overlay: rgb(25 25 38 / 42%);
+  --ui-glass: rgb(255 255 255 / 86%);
+  --ui-glass-strong: rgb(248 249 252 / 96%);
+  --ui-glass-border: rgb(220 222 234 / 88%);
+  --ui-glass-backdrop: rgb(25 25 38 / 24%);
+  --ui-shadow-surface: 0 14px 38px rgb(40 40 70 / 10%);
+  --ui-shadow-float: 0 24px 70px rgb(40 40 70 / 16%);
+  --ui-shadow-dialog: 0 28px 90px rgb(40 40 70 / 24%);
+  --ui-scrim: 245 246 249;
+
+  --fbz-color-bg-strong: #ffffff;
+  --fbz-color-line-soft: #e6e8f0;
+  --fbz-color-text-soft: #3c3c4c;
+}
+
+html.fbz-c body {
+  color: var(--ui-text);
+  background: var(--ui-background);
+  font-family: var(--ui-font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+html.fbz-c ::selection {
+  color: var(--ui-accent-contrast);
+  background: var(--ui-accent);
+}
+
+html.fbz-c :focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+html.fbz-c ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ui-text-subtle) 52%, transparent);
+  border-radius: 99px;
+}
+
+// daisyUI 控件在 C 端的统一密度。
+html.fbz-c {
+  .du-btn {
+    font-weight: 500;
+    font-size: 13px;
+    gap: 6px;
+  }
+
+  .du-btn-primary {
+    box-shadow: var(--ui-shadow-accent);
+
+    &:hover {
+      background: var(--ui-accent-hover);
+      border-color: var(--ui-accent-hover);
+    }
+  }
+
+  .du-input,
+  .du-select,
+  .du-textarea {
+    background: var(--ui-input);
+    border-color: var(--ui-border);
+    color: var(--ui-text);
+
+    &:focus,
+    &:focus-within {
+      border-color: rgb(var(--ui-accent-channel) / 60%);
+      outline: none;
+      box-shadow: 0 0 0 3px rgb(var(--ui-accent-channel) / 12%);
+    }
+  }
+
+  .du-modal-box {
+    background: var(--ui-surface-raised);
+    border: 1px solid var(--ui-border);
+    box-shadow: var(--ui-shadow-dialog);
+  }
+
+  .du-modal::backdrop,
+  .du-modal {
+    background-color: var(--ui-glass-backdrop);
+  }
+}
+
+// ───── C 端共享版式（非控件体系，仅页面骨架与排版） ─────
+
+html.fbz-c {
+  // 页面主容器：顶栏下方、居中、统一左右留白。
+  .c-page {
+    width: 100%;
+    max-width: var(--ui-shell-width);
+    margin: 0 auto;
+    padding: 24px var(--ui-shell-gutter) 96px;
+  }
+
+  // 详情页：剧照贴顶栏铺开，内容区分段留白。
+  .c-page.detail-page {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    padding-top: 0;
+  }
+
+  .c-page-title {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--ui-text);
+  }
+
+  .c-section-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ui-text);
+  }
+
+  .c-meta {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ui-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .c-dot {
+    display: inline-block;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--ui-text-subtle);
+    flex: 0 0 auto;
+  }
+
+  // 状态行（加载 / 错误）——不伪造数据，只陈述状态。
+  .c-state {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 40px 0;
+    color: var(--ui-text-muted);
+    font-size: 13px;
+
+    &.is-error {
+      color: var(--ui-danger);
+    }
+  }
+}
+
+@media (max-width: 600px) {
+  html.fbz-c {
+    --ui-header-height: 56px;
+    --ui-shell-gutter: 16px;
+
+    .c-page {
+      padding-top: 16px;
+    }
+  }
+}
+
+@keyframes c-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+html.fbz-c .c-spin {
+  animation: c-spin 900ms linear infinite;
+}
+
+// 恒定暗色表面（全屏播放器）：即使 C 端处于亮色主题、或从后台打开，也保持观影暗色。
+.c-force-dark {
+  color-scheme: dark;
+
+  @include hd-dark-tokens;
+
+  --ui-radius-sm: 7px;
+  --ui-radius-md: 11px;
+  --ui-radius-lg: 16px;
+  --ui-font-sans: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --ui-font-mono: "Roboto Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --ui-duration-fast: 160ms;
+  --ui-duration-base: 220ms;
+  --ui-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ui-focus: var(--ui-accent-hover);
+  --color-primary: var(--ui-accent);
+  --color-primary-content: var(--ui-accent-contrast);
+  --color-base-100: var(--ui-background);
+  --color-base-200: var(--ui-surface);
+  --color-base-300: var(--ui-surface-raised);
+  --color-base-content: var(--ui-text);
+
+  color: var(--ui-text);
+  font-family: var(--ui-font-sans);
+}

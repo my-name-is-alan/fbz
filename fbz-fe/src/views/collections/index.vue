@@ -37,19 +37,23 @@ onMounted(() => {
 </script>
 
 <template>
-  <main class="collections-overview">
+  <main class="c-page collections-overview">
     <header class="page-head">
-      <h1>合集</h1>
-      <p class="sub">{{ total }} 个合集 · BoxSet</p>
+      <h1 class="c-page-title"><BaseIcon name="collection" :size="22" class="lead" />合集</h1>
+      <p class="c-meta">{{ total }} 个合集 · BoxSet</p>
     </header>
 
-    <p v-if="loading" class="state-text">正在加载合集…</p>
-    <p v-else-if="error" class="state-text is-error">{{ error }}</p>
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />正在加载合集…
+    </p>
+    <p v-else-if="error" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />{{ error }}
+    </p>
     <BaseEmptyState
       v-else-if="!items.length"
-      icon="▣"
+      icon="collection"
       title="还没有合集"
-      description="后端已支持 Collections/BoxSet；创建合集后将显示在此，点开可看成员。"
+      description="管理员可在任意媒体卡片右键「加入合集」创建 BoxSet，创建后会显示在这里。"
     />
 
     <div v-else class="grid">
@@ -58,6 +62,7 @@ onMounted(() => {
         :key="item.id"
         :item="item"
         layout="poster"
+        :show-rating="false"
         :variant="(i % 2) as 0 | 1"
       />
     </div>
@@ -66,51 +71,36 @@ onMounted(() => {
 
 <style scoped lang="scss">
 .collections-overview {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-8)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
-  max-width: 1280px;
-  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .page-head {
-  margin-bottom: var(--fbz-space-6);
-
-  h1 {
-    margin: 0 0 var(--fbz-space-2);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 700;
+  .c-page-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
-  .sub {
-    margin: 0;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
+  .lead {
+    color: var(--ui-accent);
   }
-}
 
-.state-text {
-  margin: var(--fbz-space-8) 0;
-  color: var(--fbz-color-text-muted);
-
-  &.is-error {
-    color: var(--fbz-color-danger, #e57373);
+  .c-meta {
+    margin: 4px 0 0;
   }
 }
 
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: var(--fbz-space-5) var(--fbz-space-4);
+  gap: 20px 16px;
 }
 
 @media (max-width: 600px) {
-  .collections-overview {
-    padding: calc(var(--header-h, 60px) + var(--fbz-space-5)) var(--fbz-space-4) 60px;
-  }
-
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-    gap: var(--fbz-space-4) var(--fbz-space-3);
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   }
 }
 </style>

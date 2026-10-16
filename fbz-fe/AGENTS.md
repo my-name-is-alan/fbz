@@ -90,7 +90,8 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 - `uno.config.ts` 中的主题 token 必须与 `src/styles/theme/tokens.scss` 保持同步，优先引用 token 暴露的 CSS 变量，例如 `var(--fbz-color-brand-500)`。
 - 全局基础样式集中在 `src/style.scss`（含 `--header-h` 头部高度变量，桌面 60px / 手机 56px，布局与各页面顶部留白统一引用它）。
 - 字体：正文用 `--fbz-font-sans`（系统优先现代字栈 `ui-sans-serif, system-ui, PingFang SC, MiSans…`），品牌和数字展示与正文使用同一字栈，数字使用 tabular-nums，`--fbz-font-display` 与 sans 保持一致。新增展示型数字/Logo 用 display 字体，正文不要硬写字栈。
-- 设计基调：纯黑底（`--fbz-color-bg: #0a0a0b`）+ 单一主题色 `--fbz-color-brand-500: #1ed760`（Spotify 绿）。主题绿只用于强调态（导航激活、主按钮、进度条、卡片 hover 边框），其余一律白/灰阶；禁止多彩混用、装饰性渐变、滥用大圆角（卡片 4px / 控件 6px）。**例外**：媒体卡片的清晰度徽章用 `tmdb.ts` 的 `resolutionColors`（4K 绿 / 2K 黄绿 / 1080P 蓝 / 720P 橙，借鉴 ），这是功能性色标不算多彩装饰。
+- **C 端已改为 HDHive 视觉（见文末「C 端 HDHive 重写」）**；下面这条绿色基调只对后台（Admin 视觉冻结）仍然成立。
+- 设计基调（后台）：纯黑底（`--fbz-color-bg: #0a0a0b`）+ 单一主题色 `--fbz-color-brand-500: #1ed760`（Spotify 绿）。主题绿只用于强调态（导航激活、主按钮、进度条、卡片 hover 边框），其余一律白/灰阶；禁止多彩混用、装饰性渐变、滥用大圆角（卡片 4px / 控件 6px）。**例外**：媒体卡片的清晰度徽章用 `tmdb.ts` 的 `resolutionColors`（4K 绿 / 2K 黄绿 / 1080P 蓝 / 720P 橙，借鉴 ），这是功能性色标不算多彩装饰。
 - 横向滚动行一律用 `src/components/BaseScroller.vue`：隐藏原生横向滚动条（不要再出现裸露的横向滚动条），用 vueuse（`useEventListener`+`useResizeObserver`）按需在行首/行尾浮出**半透明渐变遮罩 + 居中 SVG 箭头**，仅在该方向还有内容可滚时显示，触摸设备隐藏。每列宽度由使用方通过 `:deep(.track) { --col: … }` 覆盖。`MediaRow`/`SimilarRow`/`CastRow` 均基于它。
 - 下拉选择统一用 `src/components/BaseSelect.vue`（包装 daisyUI select，使用原生 select 的键盘与可访问性行为）：`v-model` 绑值，`options` 为 `{ label, value }[]`，自带面板样式/选中态/键盘与点击外部关闭。版本选择、季选择、题材筛选均已用它。
 - 媒体卡片统一用 `src/components/media/MediaCard.vue`（纯 props 驱动：`item`/`layout`/`variant`/`port`），新增展示需求改这一个文件即可。其海报占位与圆角在 `MediaPoster.vue`。`CastRow` 演员头像列宽 64px（手机 56px），不要再放大。
@@ -195,3 +196,21 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 - App.vue 全局只挂载一个 PlaybackOverlay；默认布局不能重复挂载。电影、分集、首页入口必须保留 source.proxyUri 与 server 播放会话信息。
 - TMDB mock 已随远端移除，媒体与详情来自真实 API。保留远端音乐、照片、搜索、设置和插件功能。
 - 光鸭迁移重编号为 0097–0099；db/legacy_storage.rs 只对精确匹配的历史校验值做迁移记录兼容，禁止通用关闭 SQLx 校验。
+
+## C 端 HDHive 重写（2026-10-16）
+
+依据 `docs/CLAUDE_CODE_HANDOFF.md` §0（硬约束）/ §3（功能全集）与 `docs/hdhive-tokens.css`。只动 C 端；后台视觉、鉴权、STRM 策略未改。
+
+- **视觉作用域**：C 端 token 在 `src/styles/theme/hdhive.scss`，只在 `html.fbz-c` 下生效；`layouts/default.vue`、登录页、404 通过 `useCSurface()` 挂上，后台布局不挂，所以 Admin 视觉不变。作用域内把旧 `--fbz-*` 重映射到 HDHive，未重写的共享弹窗随之换皮；琥珀强调色 `#d08700` 用 `!important` 压过后台主题色设置。
+- **token**：背景 `#09090e`，surface / raised / hover `#111119 / #171722 / #20202c`，边框 `#282838 / #3a3a50`，文字 `#eeeef6 / #9c9cb2 / #707085`，强调 `#d08700 → #f0b100`。圆角只用 `--ui-radius-sm|md|lg`（7 / 11 / 16px），禁止 blob 大圆角。新 C 端组件直接用 `--ui-*`。
+- **恒定暗色表面**：全屏播放器、音乐栏挂 `.c-force-dark`（同一套暗色 token），亮色主题下也保持观影暗色。
+- **控件**：仍用 daisyUI（`du-btn` / `du-input` / `du-select` / `du-modal` …），在作用域内映射到 HDHive；共享版式类只有 `.c-page`、`.c-page-title`、`.c-section-title`、`.c-meta`、`.c-dot`、`.c-state`、`.c-spin`，不另起按钮 / 输入体系。
+- **图标**：只用 `BaseIcon`（Lucide）。模板里禁止 emoji 和字符图标（✓ ★ ♫ ▶ ← 等）；新形状先在 `BaseIcon` 的映射表登记（只加不改名）。`BaseEmptyState.icon` 只接受 BaseIcon 名称。
+- **复合状态（MediaCard）**：左上已看（Check）/ 收藏（Heart），右上分辨率 · 动态范围 · 多版本（Layers + 数量）· 非影视类型标识，底部进度条，单集 `SxxExx`。全部只在数据存在时显示——列表接口不带 MediaStreams，所以卡片上的分辨率 / HDR 只在条目已携带这些字段时出现，不推断、不造假。
+- **库类型是事实源**：`utils/libraryType.ts`（movies / tvshows / music / homevideos / mixed / livetv / books，对齐后端 `LibraryType::ALL`）。`MediaKind` 只是展示映射，homevideos / mixed / livetv 不再并进 movie / series；库详情按库类型透传 `IncludeItemTypes`（如 homevideos → `Video,Photo,Movie`）。路由用 `utils/libraryRoute.ts`。
+- **条目类型**：`utils/itemType.ts` 按 Emby `Type` 给出详情壳 / 路由 / 图标 / 文案；`MediaItem.itemType` 携带真实类型。`/movie/:id` 落到 Series / BoxSet / Album / Book 等会按类型转到对应壳；`/tv/:id` 支持 Series、Season（转到所属剧集并定位该季）、Episode（单集详情 + 剧集面包屑）。
+- **媒体信息（A/V）**：`service/modules/mediaInfo.ts` 把 PlaybackInfo 的 `MediaSourceDto` / `MediaStreamDto` 映射成视图模型（容器、时长、大小、码率、视频编码 / 档次 / 分辨率 / 位深、音轨、字幕内嵌 / 外挂、直接播放能力）。HDR / 杜比视界只认 Profile / 标题 / Codec / CodecTag 里的明确标记，绝不从 10bit 推断。`MediaInfoPanel` 用于电影 / 单集详情、分集弹窗和播放器信息面板。
+- **播放器**：`FullscreenPlayer` 逻辑未改（webplayer、进度上报、SyncPlay、Trickplay、外挂字幕挂轨、版本切换），界面改为玻璃控制条 + 音轨 / 字幕 / 版本 / 倍速弹出菜单 + 选集 / 同步观看 / 媒体信息侧栏；进度条上标出片头 / 片尾标记。`fetchPlaybackSource` 现在会把 `subtitleTracks` 与 `mediaInfo` 一并传给播放器（之前从卡片起播会丢外挂字幕）。
+- **库详情筛选**：题材 / 年份 / 标签 / 排除标签 / 已看未看 / 收藏 / 排序 / 分页全部与 URL query 双向同步（`genre`、`year`、`tag`、`exclude`、`played`、`fav`、`sort`、`desc`、`page`），激活的筛选以可移除 chip 展示。
+- **外挂字幕**：详情页「外挂字幕」弹窗走 `RemoteSearch/Subtitles` 搜索，管理员可 POST 下载为 sidecar（后端 `subtitle.remote.download` 审计）；删除外挂字幕后端仍是 409 边界，前端不提供入口。
+- **本机工具链备注**：仓库在很深的路径下时，Windows 无法从超过 260 字符的路径启动 `esbuild.exe` / `tsgolint.exe`，可设 `ESBUILD_BINARY_PATH` / `OXLINT_TSGOLINT_PATH` 指向短路径副本。`vp check` 不检查 `.vue` 模板类型，模板改动另用 vue-tsc 验证。

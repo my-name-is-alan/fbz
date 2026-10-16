@@ -209,7 +209,7 @@ function prevStep() {
         <section class="wizard-form-body">
           <!-- Step 1: Agreement -->
           <div v-if="currentStep === 1" class="wizard-step step-1">
-            <h1>欢迎使用 fbz 影视系统 🎬</h1>
+            <h1>欢迎使用 FBZ 媒体服务器</h1>
             <p class="subtitle">
               fbz 是一款全能型自托管影视媒体库管理系统。在您开始探索之前，我们需要达成以下使用协议：
             </p>
@@ -243,7 +243,7 @@ function prevStep() {
 
           <!-- Step 2: Create Admin Account -->
           <div v-if="currentStep === 2" class="wizard-step step-2">
-            <h1>创建管理员账号 👤</h1>
+            <h1>创建管理员账号</h1>
             <p class="subtitle">
               管理员账号拥有控制台最高权限，用于管理系统任务、搜刮引擎和全局设置。
             </p>
@@ -302,7 +302,7 @@ function prevStep() {
           <!-- Step 3: Create Media Library -->
           <div v-if="currentStep === 3" class="wizard-step step-3">
             <div class="step-header">
-              <h1>添加首个媒体库 📁</h1>
+              <h1>添加首个媒体库</h1>
               <label class="skip-toggle" for="wizard-skip-library">
                 <input id="wizard-skip-library" v-model="skipLibrary" type="checkbox" />
                 <span>稍后在控制台中添加</span>
@@ -320,7 +320,7 @@ function prevStep() {
                   class="wizard-library-card"
                 >
                   <div class="card-left">
-                    <span class="lib-icon">📁</span>
+                    <span class="lib-icon"><BaseIcon name="folder" :size="16" /></span>
                     <div class="lib-info">
                       <span class="name">{{ lib.name }}</span>
                       <span class="meta"
@@ -379,7 +379,7 @@ function prevStep() {
               </button>
             </div>
             <div v-else class="skip-tip">
-              <span class="skip-icon">💡</span>
+              <span class="skip-icon"><BaseIcon name="info" :size="16" /></span>
               <p>
                 已勾选跳过。初始化完成后，您可以在系统的“后台管理”->“媒体库设置”中随时导入和扫描媒体目录。
               </p>
@@ -388,7 +388,7 @@ function prevStep() {
 
           <!-- Step 4: Theme Preferences -->
           <div v-if="currentStep === 4" class="wizard-step step-4">
-            <h1>主题与偏好设置 🎨</h1>
+            <h1>主题与偏好设置</h1>
             <p class="subtitle">定制属于您的视觉风格。此项偏好后期可随时在“个人设置”中更改。</p>
 
             <div class="settings-group">
@@ -440,7 +440,9 @@ function prevStep() {
                   :aria-pressed="themeStore.brandColor === color.value"
                   @click="themeStore.setBrandColor(color.value)"
                 >
-                  <span class="check-mark">✓</span>
+                  <span class="check-mark"
+                    ><BaseIcon name="check" :size="12" :stroke-width="3"
+                  /></span>
                 </button>
 
                 <div class="custom-color-picker">
@@ -707,10 +709,13 @@ function prevStep() {
     transition: all var(--fbz-motion-fast);
 
     &::after {
-      content: "✓";
-      color: #07120a;
-      font-size: 11px;
-      font-weight: 900;
+      content: "";
+      width: 5px;
+      height: 9px;
+      margin-top: -2px;
+      border: solid #07120a;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
       opacity: 0;
     }
   }

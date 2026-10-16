@@ -1,11 +1,20 @@
 <script setup lang="ts">
+interface Crumb {
+  label: string;
+  to?: string;
+  icon?: string;
+}
+
 interface Props {
   title?: string;
   fallback?: string;
+  /** 层级面包屑（剧集 → 季 → 集 / 媒体库 → 条目）。 */
+  crumbs?: Crumb[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
   fallback: "/",
+  crumbs: () => [],
 });
 
 const router = useRouter();
@@ -15,88 +24,92 @@ function goBack() {
     router.back();
     return;
   }
-
-  router.push(props.fallback);
+  void router.push(props.fallback);
 }
 </script>
 
 <template>
   <div class="page-header">
     <button class="back-btn" type="button" aria-label="返回上一页" @click="goBack">
-      <span class="back-icon">‹</span>
-      <span class="back-label">返回</span>
+      <BaseIcon name="back" :size="16" />
+      <span>返回</span>
     </button>
-    <span v-if="props.title" class="page-title">{{ props.title }}</span>
+    <nav v-if="props.crumbs.length || props.title" class="crumbs" aria-label="面包屑">
+      <template v-for="(crumb, i) in props.crumbs" :key="`${crumb.label}-${i}`">
+        <RouterLink v-if="crumb.to" :to="crumb.to" class="crumb">
+          <BaseIcon v-if="crumb.icon" :name="crumb.icon" :size="13" />{{ crumb.label }}
+        </RouterLink>
+        <span v-else class="crumb">{{ crumb.label }}</span>
+        <BaseIcon name="right" :size="12" class="sep" />
+      </template>
+      <span v-if="props.title" class="crumb current">{{ props.title }}</span>
+    </nav>
   </div>
 </template>
 
 <style scoped lang="scss">
 .page-header {
-  position: fixed;
-  z-index: calc(var(--fbz-z-overlay) + 1);
-  top: calc(var(--header-h, 60px) + var(--fbz-space-3));
-  left: var(--fbz-space-8);
-  right: var(--fbz-space-8);
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-3);
-  pointer-events: none;
+  gap: 12px;
+  min-width: 0;
 }
 
 .back-btn {
-  pointer-events: auto;
-  height: 36px;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 12px 0 10px;
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(10, 10, 11, 0.68);
-  color: var(--fbz-color-text);
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 700;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  transition:
-    background var(--fbz-motion-fast),
-    border-color var(--fbz-motion-fast);
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px 0 8px;
+  border: 1px solid var(--ui-glass-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-glass);
+  color: var(--ui-text);
+  font-size: 12.5px;
+  backdrop-filter: blur(10px);
+  cursor: pointer;
 
   &:hover {
-    border-color: var(--fbz-color-line-bright);
-    background: rgba(20, 20, 22, 0.86);
+    border-color: var(--ui-border-strong);
+    background: var(--ui-surface-hover);
   }
 }
 
-.back-icon {
-  font-size: 22px;
-  line-height: 1;
-}
-
-.back-label {
-  line-height: 1;
-}
-
-.page-title {
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-  max-width: 48vw;
   overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--ui-text-subtle);
+  font-size: 12.5px;
   white-space: nowrap;
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-sm);
-  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
 }
 
-@media (max-width: 600px) {
-  .page-header {
-    top: calc(var(--header-h, 56px) + var(--fbz-space-2));
-    left: var(--fbz-space-4);
-    right: var(--fbz-space-4);
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text-muted);
+  text-decoration: none;
+  text-overflow: ellipsis;
+
+  &:is(a):hover {
+    color: var(--ui-accent);
   }
 
-  .page-title {
-    display: none;
+  &.current {
+    color: var(--ui-text);
   }
+}
+
+.sep {
+  flex: 0 0 auto;
+  opacity: 0.6;
 }
 </style>

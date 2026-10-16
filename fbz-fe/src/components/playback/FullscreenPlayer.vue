@@ -8,6 +8,7 @@ import { useSyncPlay } from "@/composables/useSyncPlay.ts";
 import type { SyncPlayCommand } from "@/service/modules/syncplay.ts";
 import { fetchTrickplay, trickplayFrame } from "@/service/modules/trickplay.ts";
 import type { TrickplayInfo } from "@/service/modules/trickplay.ts";
+import { resolutionLabel } from "@/service/modules/mediaInfo.ts";
 const props = defineProps<{
   item: PlaybackItem;
   playlist: PlaybackEpisode[];
@@ -47,7 +48,11 @@ const surface = ref<HTMLElement>();
 const phase = ref<"loading" | "ready" | "error">("loading");
 const error = ref("");
 const notice = ref("");
-const panel = ref<"episodes" | "settings" | "info" | "syncplay" | null>(null);
+const panel = ref<"episodes" | "info" | "syncplay" | null>(null);
+/** 底栏弹出菜单（音轨 / 字幕 / 版本 / 倍速）。 */
+type PlayerMenu = "audio" | "subtitle" | "version" | "speed";
+const menu = ref<PlayerMenu | null>(null);
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const playing = ref(false);
 const buffering = ref(false);
 const visible = ref(true);
@@ -273,7 +278,7 @@ function reveal() {
   visible.value = true;
   if (hideTimer) clearTimeout(hideTimer);
   hideTimer = setTimeout(() => {
-    if (playing.value && !panel.value) visible.value = false;
+    if (playing.value && !panel.value && !menu.value) visible.value = false;
   }, 3500);
 }
 async function load(resumeOverride?: number, newReport = true, autoPlay = true) {
@@ -381,7 +386,8 @@ async function load(resumeOverride?: number, newReport = true, autoPlay = true) 
       ? details.subtitles.findIndex(
           (t) =>
             ["ass", "ssa", "pgs", "srt", "vtt"].includes(t.format ?? "") &&
-            preferredRe.test(`${t.label ?? ""} ${t.format ?? ""} ${t.language ?? ""}`),
+            // webplayer 把语言写进 label（"… [chi]"），EngineTrack 没有独立 language 字段。
+            preferredRe.test(`${t.label ?? ""} ${t.format ?? ""}`),
         )
       : -1;
     const preferredExt = preferredRe
@@ -500,7 +506,8 @@ function goEpisode(id: string) {
 function goAdjacent(step: 1 | -1) {
   const target = props.playlist[props.currentEpisodeIndex + step];
   if (target && syncPlay.requestItem(target.id)) return;
-  emit(step > 0 ? "nextEpisode" : "previousEpisode");
+  if (step > 0) emit("nextEpisode");
+  else emit("previousEpisode");
 }
 // 组队列切到别的条目（他人切集）→ 本端跟随。
 watch(
@@ -512,9 +519,73 @@ watch(
   },
 );
 function openSyncPlay() {
+  menu.value = null;
   panel.value = panel.value === "syncplay" ? null : "syncplay";
   if (panel.value === "syncplay") void syncPlay.refresh();
 }
+function togglePanel(next: "episodes" | "info") {
+  menu.value = null;
+  panel.value = panel.value === next ? null : next;
+  reveal();
+}
+function toggleMenu(next: PlayerMenu) {
+  menu.value = menu.value === next ? null : next;
+  if (menu.value) panel.value = null;
+  reveal();
+}
+function pickAudio(value: string) {
+  menu.value = null;
+  if (audio.value === value) return;
+  audio.value = value;
+  void changeAudio();
+}
+function pickSubtitle(value: string) {
+  menu.value = null;
+  if (subtitle.value === value) return;
+  subtitle.value = value;
+  void changeSubtitle();
+}
+function pickVersion(value: string) {
+  menu.value = null;
+  activeMediaSourceId.value = value;
+}
+function pickSpeed(value: number) {
+  menu.value = null;
+  speed.value = String(value);
+}
+/** 服务端技术信息（PlaybackInfo MediaStreams）；音轨顺序与容器一致，用于补全编码 / 声道。 */
+const serverInfo = computed(() => props.item.mediaInfo);
+function audioDetail(index: number): string {
+  const tracks = info.value?.audio ?? [];
+  const server = serverInfo.value?.audio ?? [];
+  if (!server.length || server.length !== tracks.length) return "";
+  const s = server[index];
+  return [s?.codec, s?.layout].filter(Boolean).join(" ");
+}
+/** 顶栏规格徽章：实际解码分辨率优先，其次服务端流信息；动态范围只认服务端明确标记。 */
+const qualityBadges = computed(() => {
+  const badges: string[] = [];
+  const video = serverInfo.value?.video[0];
+  const res = height.value ? resolutionLabel(height.value, width.value) : video?.resolution;
+  if (res) badges.push(res);
+  if (video?.dynamicRange) badges.push(video.dynamicRange);
+  const a = serverInfo.value?.audio.find((x) => x.isDefault) ?? serverInfo.value?.audio[0];
+  if (a?.codec) badges.push([a.codec, a.layout].filter(Boolean).join(" "));
+  return badges;
+});
+/** 进度条上的片头 / 片尾标记位置（百分比）。 */
+const markerTicks = computed(() => {
+  const dur = duration.value;
+  if (!dur) return [];
+  return (props.item.chapters ?? [])
+    .filter(
+      (c) => c.markerType && c.markerType !== "Chapter" && c.startTime > 0 && c.startTime < dur,
+    )
+    .map((c) => ({ id: c.id, left: `${(c.startTime / dur) * 100}%`, title: c.title }));
+});
+const activeSubtitleLabel = computed(
+  () => subtitleOptions.value.find((o) => o.value === subtitle.value)?.label ?? "关闭字幕",
+);
 async function toggle() {
   if (phase.value !== "ready" || !video.value) return;
   if (!video.value.ended && syncPlay.requestPlayPause(video.value.paused)) {
@@ -646,7 +717,8 @@ useEventListener(window, "keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
-    if (panel.value) panel.value = null;
+    if (menu.value) menu.value = null;
+    else if (panel.value) panel.value = null;
     else void close();
     return;
   }
@@ -687,7 +759,8 @@ onBeforeUnmount(() => {
   <section
     ref="surface"
     tabindex="-1"
-    class="cinema-player"
+    class="cinema-player c-force-dark"
+    :class="{ 'chrome-hidden': !visible && !panel && !menu && phase === 'ready' }"
     role="dialog"
     aria-label="视频播放器"
     aria-modal="true"
@@ -712,938 +785,1485 @@ onBeforeUnmount(() => {
       "
       @canplay="syncPlay.reportReady()"
       @ended="onVideoEnded"
-      @click="toggle"
+      @click="
+        menu = null;
+        toggle();
+      "
     />
-    <div class="player-veil" :class="{ hidden: !visible && !panel && phase === 'ready' }" />
-    <header class="player-top" :class="{ hidden: !visible && !panel && phase === 'ready' }">
-      <button class="du-btn du-btn-ghost du-btn-circle" aria-label="关闭播放" @click="close">
-        <BaseIcon name="left" :size="23" />
+    <div class="veil-top" />
+    <div class="veil-bottom" />
+
+    <!-- 顶栏 -->
+    <header class="player-top">
+      <button class="pbtn" type="button" aria-label="关闭播放" @click="close">
+        <BaseIcon name="close" :size="22" />
       </button>
       <div class="now-title">
-        <span>{{ item.subtitle || "正在观看" }}</span>
         <h1>{{ item.title }}</h1>
+        <span>{{ item.subtitle || "正在观看" }}</span>
       </div>
-      <span v-if="height" class="quality-pill">{{ height }}p</span
-      ><button
+      <div class="top-badges">
+        <span v-for="b in qualityBadges" :key="b" class="q-badge">{{ b }}</span>
+        <span
+          v-if="mediaSourceOptions.length > 1"
+          class="q-badge"
+          :title="`${mediaSourceOptions.length} 个版本`"
+        >
+          <BaseIcon name="versions" :size="11" :stroke-width="2.2" />{{ mediaSourceOptions.length }}
+        </span>
+      </div>
+      <button
         v-if="playlist.length"
-        class="du-btn du-btn-ghost du-btn-circle"
-        aria-label="打开选集"
-        @click="panel = panel === 'episodes' ? null : 'episodes'"
+        class="pbtn"
+        :class="{ on: panel === 'episodes' }"
+        type="button"
+        aria-label="选集"
+        @click="togglePanel('episodes')"
       >
-        <BaseIcon name="list" :size="22" />
+        <BaseIcon name="playlist" :size="20" />
       </button>
     </header>
+
+    <!-- 中央状态 -->
     <div v-if="phase === 'loading'" class="player-state" role="status">
-      <span class="du-loading du-loading-spinner du-loading-lg" />
+      <BaseIcon name="loading" :size="34" class="c-spin" />
       <h2>{{ loadingLabel }}</h2>
       <p>首次加载音轨和字幕可能需要一点时间。</p>
     </div>
     <div v-else-if="phase === 'error'" class="player-state" role="alert">
-      <BaseIcon name="error" :size="36" />
+      <BaseIcon name="error" :size="34" />
       <h2>暂时无法播放</h2>
       <p>{{ error }}</p>
-      <div>
-        <button class="du-btn retry-button" @click="load(time, false)">
-          <BaseIcon name="refresh" :size="17" />重新加载</button
-        ><button class="du-btn du-btn-ghost" @click="close">返回媒体库</button>
+      <div class="state-actions">
+        <button class="du-btn du-btn-primary" type="button" @click="load(time, false)">
+          <BaseIcon name="refresh" :size="16" />重新加载
+        </button>
+        <button class="du-btn du-btn-ghost" type="button" @click="close">返回</button>
       </div>
     </div>
-    <div v-else-if="!playing && !panel" class="center-controls">
-      <button
-        class="du-btn du-btn-ghost du-btn-circle skip-button"
-        aria-label="快退 10 秒"
-        @click="seek(time - 10)"
-      >
-        <BaseIcon name="rewind" :size="25" /><small>10</small></button
-      ><button class="big-play" aria-label="播放" @click="toggle">
-        <BaseIcon name="play" :size="35" /></button
-      ><button
-        class="du-btn du-btn-ghost du-btn-circle skip-button"
-        aria-label="快进 10 秒"
-        @click="seek(time + 10)"
-      >
-        <BaseIcon name="forward" :size="25" /><small>10</small>
+    <div v-else-if="!playing && !panel && !menu" class="center-controls">
+      <button class="pbtn round" type="button" aria-label="快退 10 秒" @click="seek(time - 10)">
+        <BaseIcon name="rewind" :size="24" /><small>10</small>
+      </button>
+      <button class="big-play" type="button" aria-label="播放" @click="toggle">
+        <BaseIcon name="play" :size="34" fill />
+      </button>
+      <button class="pbtn round" type="button" aria-label="快进 10 秒" @click="seek(time + 10)">
+        <BaseIcon name="forward" :size="24" /><small>10</small>
       </button>
     </div>
-    <span
+    <BaseIcon
       v-if="buffering && playing && phase === 'ready'"
-      class="du-loading du-loading-spinner buffer-indicator"
+      name="loading"
+      :size="40"
+      class="c-spin buffer-indicator"
       aria-label="正在缓冲"
     />
-    <aside v-if="panel" class="player-panel">
+
+    <!-- Skip Intro / Credits（Chapters markers） -->
+    <div v-if="showSkipIntro || showSkipCredits" class="skip-markers">
+      <button v-if="showSkipIntro" type="button" class="skip-btn" @click="skipIntro">
+        <BaseIcon name="next" :size="16" />跳过片头
+      </button>
+      <button v-if="showSkipCredits" type="button" class="skip-btn" @click="skipCredits">
+        <BaseIcon name="next" :size="16" />{{ hasNextEpisode ? "跳过片尾 · 下一集" : "跳过片尾" }}
+      </button>
+    </div>
+
+    <!-- 侧面板：选集 / 同步观看 / 媒体信息 -->
+    <aside v-if="panel" class="player-panel" @pointerdown.stop>
       <header>
         <h2>
-          {{
-            panel === "episodes"
-              ? "选集"
-              : panel === "settings"
-                ? "播放设置"
-                : panel === "syncplay"
-                  ? "同步观看"
-                  : "媒体信息"
-          }}
+          <BaseIcon
+            :name="panel === 'episodes' ? 'playlist' : panel === 'syncplay' ? 'users' : 'info'"
+            :size="16"
+          />
+          {{ panel === "episodes" ? "选集" : panel === "syncplay" ? "同步观看" : "媒体信息" }}
         </h2>
-        <button
-          class="du-btn du-btn-ghost du-btn-circle du-btn-sm"
-          aria-label="关闭面板"
-          @click="panel = null"
-        >
-          <BaseIcon name="close" />
+        <button class="pbtn sm" type="button" aria-label="关闭面板" @click="panel = null">
+          <BaseIcon name="close" :size="16" />
         </button>
       </header>
-      <template v-if="panel === 'episodes'"
-        ><div class="episode-queue">
-          <button
-            v-for="episode in playlist"
-            :key="episode.id"
-            :class="{ active: episode.id === item.id }"
-            @click="goEpisode(episode.id)"
-          >
-            <div class="queue-image">
-              <img
-                v-if="episode.backdrop || episode.poster"
-                :src="episode.backdrop || episode.poster"
-                alt=""
-              /><BaseIcon v-else name="tv" :size="25" /><span>{{
+
+      <div v-if="panel === 'episodes'" class="episode-queue">
+        <button
+          v-for="episode in playlist"
+          :key="episode.id"
+          type="button"
+          :class="{ active: episode.id === item.id }"
+          @click="goEpisode(episode.id)"
+        >
+          <div class="queue-image">
+            <img
+              v-if="episode.backdrop || episode.poster"
+              :src="episode.backdrop || episode.poster"
+              alt=""
+            />
+            <BaseIcon v-else name="tv-minimal" :size="22" />
+            <span class="ep-no">E{{ String(episode.episodeNumber).padStart(2, "0") }}</span>
+          </div>
+          <div class="queue-text">
+            <strong>{{ episode.subtitle || `第 ${episode.episodeNumber} 集` }}</strong>
+            <small>
+              S{{ String(episode.seasonNumber).padStart(2, "0") }}E{{
                 String(episode.episodeNumber).padStart(2, "0")
-              }}</span>
-            </div>
-            <div>
-              <strong>第 {{ episode.seasonNumber }} 季 · 第 {{ episode.episodeNumber }} 集</strong
-              ><small>{{
-                episode.id === item.id
-                  ? "正在观看"
-                  : episode.duration
-                    ? `${Math.round(episode.duration / 60)} 分钟`
-                    : "播放这一集"
-              }}</small>
-            </div>
-            <BaseIcon v-if="episode.id === item.id" name="play" :size="15" />
-          </button></div></template
-      ><template v-else-if="panel === 'syncplay'"
-        ><div class="syncplay-panel">
-          <template v-if="syncPlay.state.value.group">
-            <p class="setting-note">
-              {{ syncPlay.state.value.group.GroupName }} · {{ syncPlay.state.value.group.State }}
-            </p>
-            <p class="setting-note">
-              成员：{{ syncPlay.state.value.group.Participants.join("、") }}
-            </p>
+              }}
+              <template v-if="episode.id === item.id"> · 正在观看</template>
+              <template v-else-if="episode.duration">
+                · {{ Math.round(episode.duration / 60) }} 分钟</template
+              >
+            </small>
+          </div>
+          <BaseIcon v-if="episode.id === item.id" name="audio" :size="16" class="now" />
+        </button>
+      </div>
+
+      <div v-else-if="panel === 'syncplay'" class="syncplay-panel">
+        <template v-if="syncPlay.state.value.group">
+          <div class="sync-card">
+            <strong
+              ><BaseIcon name="users" :size="15" />{{
+                syncPlay.state.value.group.GroupName
+              }}</strong
+            >
+            <span class="sync-state">{{ syncPlay.state.value.group.State }}</span>
+            <p>成员：{{ syncPlay.state.value.group.Participants.join("、") }}</p>
+          </div>
+          <div class="sync-row">
             <button
-              class="du-btn du-btn-ghost"
-              :class="{ 'du-btn-active': syncPlay.state.value.shuffleMode === 'Shuffle' }"
+              class="chip-btn"
+              :class="{ on: syncPlay.state.value.shuffleMode === 'Shuffle' }"
+              type="button"
               :disabled="syncPlay.busy.value || syncPlay.state.value.queue.length < 2"
               @click="syncPlay.toggleShuffle()"
             >
-              <BaseIcon name="refresh" :size="17" />随机播放：{{
+              <BaseIcon name="shuffle" :size="15" />随机：{{
                 syncPlay.state.value.shuffleMode === "Shuffle" ? "开" : "关"
               }}
             </button>
             <button
-              class="du-btn du-btn-ghost"
-              :class="{ 'du-btn-active': syncPlay.state.value.repeatMode !== 'RepeatNone' }"
+              class="chip-btn"
+              :class="{ on: syncPlay.state.value.repeatMode !== 'RepeatNone' }"
+              type="button"
               :disabled="syncPlay.busy.value"
               @click="syncPlay.cycleRepeat()"
             >
-              <BaseIcon name="list" :size="17" />循环：{{
+              <BaseIcon name="repeat" :size="15" />{{
                 REPEAT_LABELS[syncPlay.state.value.repeatMode]
               }}
             </button>
-            <template v-if="syncPlay.state.value.queue.length">
-              <p class="setting-note">同步队列</p>
-              <div
-                v-for="(entry, index) in syncPlay.state.value.queue"
-                :key="entry.PlaylistItemId"
-                class="sync-queue-row"
+          </div>
+          <template v-if="syncPlay.state.value.queue.length">
+            <p class="panel-label">同步队列</p>
+            <div
+              v-for="(entry, index) in syncPlay.state.value.queue"
+              :key="entry.PlaylistItemId"
+              class="sync-queue-row"
+            >
+              <span :class="{ 'is-current': index === syncPlay.state.value.playingIndex }">
+                {{ syncQueueLabel(entry.ItemId, index) }}
+              </span>
+              <button
+                class="pbtn sm"
+                type="button"
+                aria-label="上移"
+                :disabled="syncPlay.busy.value || index === 0"
+                @click="syncPlay.moveQueueItem(entry.PlaylistItemId, index - 1)"
               >
-                <span :class="{ 'is-current': index === syncPlay.state.value.playingIndex }">{{
-                  syncQueueLabel(entry.ItemId, index)
-                }}</span>
-                <button
-                  class="du-btn du-btn-ghost"
-                  :disabled="syncPlay.busy.value || index === 0"
-                  @click="syncPlay.moveQueueItem(entry.PlaylistItemId, index - 1)"
-                >
-                  上移
-                </button>
-                <button
-                  class="du-btn du-btn-ghost"
-                  :disabled="syncPlay.busy.value"
-                  @click="syncPlay.removeQueueItem(entry.PlaylistItemId)"
-                >
-                  移除
-                </button>
-              </div>
-            </template>
-            <button
-              v-if="nextEpisodeForQueue"
-              class="du-btn du-btn-ghost"
-              :disabled="syncPlay.busy.value"
-              @click="syncPlay.queueNext(nextEpisodeForQueue.id)"
-            >
-              <BaseIcon name="list" :size="17" />下一集加入同步队列
-            </button>
-            <button
-              class="du-btn du-btn-ghost"
-              :disabled="syncPlay.busy.value"
-              @click="syncPlay.leave()"
-            >
-              <BaseIcon name="logout" :size="17" />退出同步观看
-            </button>
+                <BaseIcon name="up" :size="15" />
+              </button>
+              <button
+                class="pbtn sm"
+                type="button"
+                aria-label="移除"
+                :disabled="syncPlay.busy.value"
+                @click="syncPlay.removeQueueItem(entry.PlaylistItemId)"
+              >
+                <BaseIcon name="close" :size="15" />
+              </button>
+            </div>
           </template>
-          <template v-else>
-            <label
-              >新建群组<input
-                v-model="syncGroupName"
-                class="du-input du-input-sm"
-                placeholder="群组名称（可选）"
-            /></label>
-            <button
-              class="du-btn du-btn-ghost"
-              :disabled="syncPlay.busy.value"
-              @click="
-                syncPlay.create(
-                  syncGroupName,
-                  item.id,
-                  time,
-                  playlist.map((e) => e.id),
-                )
-              "
-            >
-              <BaseIcon name="plus" :size="17" />创建并同步当前视频
-            </button>
-            <p v-if="!syncPlay.groups.value.length" class="setting-note">暂无可加入的群组。</p>
-            <button
-              v-for="group in syncPlay.groups.value"
-              :key="group.GroupId"
-              class="du-btn du-btn-ghost"
-              :disabled="syncPlay.busy.value"
-              @click="syncPlay.join(group.GroupId)"
-            >
-              <BaseIcon name="user" :size="17" />加入 {{ group.GroupName }}（{{
-                group.Participants.length
-              }}人）
-            </button>
-          </template>
-          <p v-if="syncPlay.error.value" class="setting-note">{{ syncPlay.error.value }}</p>
-        </div></template
-      ><template v-else-if="panel === 'settings'"
-        ><label v-if="mediaSourceOptions.length > 1"
-          >版本<BaseSelect v-model="activeMediaSourceId" :options="mediaSourceOptions"
-        /></label>
-        <label
-          >播放速度<BaseSelect
-            v-model="speed"
-            :options="
-              [0.5, 0.75, 1, 1.25, 1.5, 2].map((s) => ({ label: `${s}×`, value: String(s) }))
-            " /></label
-        ><label v-if="audioOptions.length"
-          >音轨<BaseSelect
-            v-model="audio"
-            :options="audioOptions"
-            @update:model-value="changeAudio" /></label
-        ><label
-          >字幕<BaseSelect
-            v-model="subtitle"
-            :options="subtitleOptions"
-            @update:model-value="changeSubtitle"
-        /></label>
-        <p class="setting-note">
-          {{
-            subtitleOptions.length > 1
-              ? "支持的内嵌字幕可在此切换。"
-              : "当前媒体没有可切换的内嵌字幕。"
-          }}
-        </p>
-        <button class="du-btn du-btn-ghost media-info-button" @click="panel = 'info'">
-          <BaseIcon name="info" :size="17" />媒体信息<BaseIcon name="right" :size="16" /></button
-      ></template>
-      <dl v-else class="technical-info">
-        <div>
-          <dt>播放器</dt>
-          <dd>webplayer</dd>
-        </div>
-        <div>
-          <dt>分辨率</dt>
-          <dd>{{ width && height ? `${width} × ${height}` : "—" }}</dd>
-        </div>
-        <div>
-          <dt>时长</dt>
-          <dd>{{ stamp(duration) }}</dd>
-        </div>
-        <div>
-          <dt>播放方式</dt>
-          <dd>{{ info?.native ? "浏览器原生播放" : "浏览器内重封装" }}</dd>
-        </div>
-        <div>
-          <dt>音轨</dt>
-          <dd>{{ audioOptions[Number(audio)]?.label || "—" }}</dd>
-        </div>
-        <div v-if="mediaSourceOptions.length">
-          <dt>版本</dt>
-          <dd>
-            {{ mediaSourceOptions.find((s) => s.value === activeMediaSourceId)?.label || "—" }}
-          </dd>
-        </div>
-      </dl>
+          <button
+            v-if="nextEpisodeForQueue"
+            class="chip-btn wide"
+            type="button"
+            :disabled="syncPlay.busy.value"
+            @click="syncPlay.queueNext(nextEpisodeForQueue.id)"
+          >
+            <BaseIcon name="playlist-add" :size="15" />下一集加入同步队列
+          </button>
+          <button
+            class="chip-btn wide danger"
+            type="button"
+            :disabled="syncPlay.busy.value"
+            @click="syncPlay.leave()"
+          >
+            <BaseIcon name="logout" :size="15" />退出同步观看
+          </button>
+        </template>
+        <template v-else>
+          <label class="field">
+            <span class="panel-label">新建群组</span>
+            <input
+              v-model="syncGroupName"
+              class="du-input du-input-sm"
+              placeholder="群组名称（可选）"
+            />
+          </label>
+          <button
+            class="du-btn du-btn-primary du-btn-sm"
+            type="button"
+            :disabled="syncPlay.busy.value"
+            @click="
+              syncPlay.create(
+                syncGroupName,
+                item.id,
+                time,
+                playlist.map((e) => e.id),
+              )
+            "
+          >
+            <BaseIcon name="plus" :size="15" />创建并同步当前视频
+          </button>
+          <p class="panel-label">可加入的群组</p>
+          <p v-if="!syncPlay.groups.value.length" class="panel-note">暂无可加入的群组。</p>
+          <button
+            v-for="group in syncPlay.groups.value"
+            :key="group.GroupId"
+            class="chip-btn wide"
+            type="button"
+            :disabled="syncPlay.busy.value"
+            @click="syncPlay.join(group.GroupId)"
+          >
+            <BaseIcon name="users" :size="15" />加入 {{ group.GroupName }}（{{
+              group.Participants.length
+            }}
+            人）
+          </button>
+        </template>
+        <p v-if="syncPlay.error.value" class="panel-note error">{{ syncPlay.error.value }}</p>
+      </div>
+
+      <div v-else class="info-panel">
+        <dl class="engine-info">
+          <div>
+            <dt>播放器</dt>
+            <dd>webplayer</dd>
+          </div>
+          <div>
+            <dt>播放方式</dt>
+            <dd>{{ info?.native ? "浏览器原生播放" : "浏览器内重封装" }}</dd>
+          </div>
+          <div>
+            <dt>解码画面</dt>
+            <dd>{{ width && height ? `${width} × ${height}` : "—" }}</dd>
+          </div>
+          <div>
+            <dt>时长</dt>
+            <dd>{{ stamp(duration) }}</dd>
+          </div>
+          <div>
+            <dt>当前音轨</dt>
+            <dd>{{ audioOptions[Number(audio)]?.label || "—" }}</dd>
+          </div>
+          <div>
+            <dt>当前字幕</dt>
+            <dd>{{ activeSubtitleLabel }}</dd>
+          </div>
+          <div v-if="mediaSourceOptions.length">
+            <dt>版本</dt>
+            <dd>
+              {{ mediaSourceOptions.find((s) => s.value === activeMediaSourceId)?.label || "—" }}
+            </dd>
+          </div>
+        </dl>
+        <MediaInfoPanel v-if="serverInfo" :sources="[serverInfo]" compact />
+        <p v-else class="panel-note">服务端未返回该版本的流信息。</p>
+      </div>
     </aside>
-    <div
-      v-if="showSkipIntro || showSkipCredits"
-      class="skip-markers"
-      :class="{ hidden: !visible && !panel && phase === 'ready' }"
-    >
-      <button v-if="showSkipIntro" type="button" class="skip-marker-btn" @click="skipIntro">
-        跳过片头
-      </button>
-      <button v-if="showSkipCredits" type="button" class="skip-marker-btn" @click="skipCredits">
-        {{ hasNextEpisode ? "跳过片尾 · 下一集" : "跳过片尾" }}
-      </button>
-    </div>
-    <footer class="player-bottom" :class="{ hidden: !visible && !panel && phase === 'ready' }">
+
+    <!-- 底栏 -->
+    <footer class="player-bottom" @pointerdown.stop>
       <p v-if="notice" class="player-notice" role="status">
         <BaseIcon name="info" :size="15" />{{ notice }}
       </p>
-      <div class="bottom-caption">
-        <div>
-          <span>{{ item.subtitle || "私人媒体库" }}</span>
-          <h2>{{ item.title }}</h2>
-        </div>
-        <button v-if="hasNextEpisode" class="du-btn next-episode" @click="goAdjacent(1)">
-          下一集<BaseIcon name="next" :size="17" />
-        </button>
-      </div>
-      <div class="seek-row">
-        <div
-          v-if="previewFrame"
-          class="trickplay-preview"
-          :style="{
-            left: previewLeft,
-            width: `${previewFrame.width}px`,
-            height: `${previewFrame.height}px`,
-            backgroundImage: `url(${previewFrame.url})`,
-            backgroundPosition: `${previewFrame.offsetX}px ${previewFrame.offsetY}px`,
-            backgroundSize: `${previewFrame.sheetWidth}px ${previewFrame.sheetHeight}px`,
-          }"
-        >
-          <span>{{ stamp(previewSeconds ?? 0) }}</span>
-        </div>
-        <span>{{ stamp(scrubbing ? scrub : time) }}</span
-        ><input
-          class="du-range du-range-xs"
-          type="range"
-          min="0"
-          :max="duration || 1"
-          step=".1"
-          :value="scrubbing ? scrub : time"
-          :disabled="phase !== 'ready'"
-          aria-label="播放进度"
-          @pointermove="onSeekHover"
-          @pointerleave="hoverSeconds = null"
-          :style="{ '--range-progress': `${progress}%` }"
-          @input="
-            scrubbing = true;
-            scrub = Number(($event.target as HTMLInputElement).value);
-          "
-          @change="seek(Number(($event.target as HTMLInputElement).value))"
-        /><span>{{ stamp(duration) }}</span>
-      </div>
-      <div class="control-row">
-        <div class="left-controls">
+
+      <!-- 弹出菜单 -->
+      <div v-if="menu" class="menu-pop" role="menu" :aria-label="menu">
+        <template v-if="menu === 'audio'">
+          <p class="menu-title"><BaseIcon name="audio" :size="14" />音轨</p>
           <button
-            class="du-btn du-btn-ghost du-btn-circle"
-            :aria-label="playing ? '暂停' : '播放'"
-            :disabled="phase !== 'ready'"
-            @click="toggle"
+            v-for="opt in audioOptions"
+            :key="opt.value"
+            type="button"
+            role="menuitemradio"
+            class="menu-item"
+            :aria-checked="audio === opt.value"
+            @click="pickAudio(opt.value)"
           >
-            <BaseIcon :name="playing ? 'pause' : 'play'" :size="23" /></button
-          ><button
-            v-if="playlist.length"
-            class="du-btn du-btn-ghost du-btn-circle"
-            aria-label="上一集"
-            :disabled="!hasPreviousEpisode"
-            @click="goAdjacent(-1)"
-          >
-            <BaseIcon name="previous" /></button
-          ><button
-            v-if="playlist.length"
-            class="du-btn du-btn-ghost du-btn-circle"
-            aria-label="下一集"
-            :disabled="!hasNextEpisode"
-            @click="goAdjacent(1)"
-          >
-            <BaseIcon name="next" />
+            <BaseIcon name="check" :size="15" class="tick" :class="{ on: audio === opt.value }" />
+            <span class="mi-label">{{ opt.label }}</span>
+            <small v-if="audioDetail(Number(opt.value))">{{
+              audioDetail(Number(opt.value))
+            }}</small>
           </button>
-          <div class="volume-control">
-            <button
-              class="du-btn du-btn-ghost du-btn-circle"
-              :aria-label="muted ? '取消静音' : '静音'"
-              @click="muted = !muted"
+          <p v-if="!audioOptions.length" class="menu-empty">没有可切换的音轨</p>
+        </template>
+        <template v-else-if="menu === 'subtitle'">
+          <p class="menu-title"><BaseIcon name="subtitles" :size="14" />字幕</p>
+          <button
+            v-for="opt in subtitleOptions"
+            :key="opt.value"
+            type="button"
+            role="menuitemradio"
+            class="menu-item"
+            :aria-checked="subtitle === opt.value"
+            @click="pickSubtitle(opt.value)"
+          >
+            <BaseIcon
+              name="check"
+              :size="15"
+              class="tick"
+              :class="{ on: subtitle === opt.value }"
+            />
+            <span class="mi-label">{{ opt.label }}</span>
+            <small v-if="opt.value.startsWith('ext:')" class="ext">外挂</small>
+            <small v-else-if="opt.value !== '-1'">内嵌</small>
+          </button>
+          <p v-if="subtitleOptions.length <= 1" class="menu-empty">当前媒体没有可切换的字幕</p>
+        </template>
+        <template v-else-if="menu === 'version'">
+          <p class="menu-title"><BaseIcon name="versions" :size="14" />版本</p>
+          <button
+            v-for="opt in mediaSourceOptions"
+            :key="opt.value"
+            type="button"
+            role="menuitemradio"
+            class="menu-item"
+            :aria-checked="activeMediaSourceId === opt.value"
+            @click="pickVersion(opt.value)"
+          >
+            <BaseIcon
+              name="check"
+              :size="15"
+              class="tick"
+              :class="{ on: activeMediaSourceId === opt.value }"
+            />
+            <span class="mi-label">{{ opt.label }}</span>
+          </button>
+        </template>
+        <template v-else>
+          <p class="menu-title"><BaseIcon name="speed" :size="14" />播放速度</p>
+          <button
+            v-for="s in SPEEDS"
+            :key="s"
+            type="button"
+            role="menuitemradio"
+            class="menu-item"
+            :aria-checked="Number(speed) === s"
+            @click="pickSpeed(s)"
+          >
+            <BaseIcon name="check" :size="15" class="tick" :class="{ on: Number(speed) === s }" />
+            <span class="mi-label">{{ s === 1 ? "正常" : `${s}×` }}</span>
+          </button>
+        </template>
+      </div>
+
+      <div class="control-panel">
+        <div class="seek-row">
+          <span class="t">{{ stamp(scrubbing ? scrub : time) }}</span>
+          <div class="seek-wrap" :style="{ '--range-progress': `${progress}%` }">
+            <div
+              v-if="previewFrame"
+              class="trickplay-preview"
+              :style="{
+                left: previewLeft,
+                width: `${previewFrame.width}px`,
+                height: `${previewFrame.height}px`,
+                backgroundImage: `url(${previewFrame.url})`,
+                backgroundPosition: `${previewFrame.offsetX}px ${previewFrame.offsetY}px`,
+                backgroundSize: `${previewFrame.sheetWidth}px ${previewFrame.sheetHeight}px`,
+              }"
             >
-              <BaseIcon :name="muted || !volume ? 'mute' : 'volume'" /></button
-            ><input
-              v-model.number="volume"
-              class="du-range du-range-xs"
+              <span>{{ stamp(previewSeconds ?? 0) }}</span>
+            </div>
+            <span
+              v-for="tick in markerTicks"
+              :key="tick.id"
+              class="marker-tick"
+              :style="{ left: tick.left }"
+              :title="tick.title"
+            />
+            <input
+              class="seek"
               type="range"
               min="0"
-              max="1"
-              step=".02"
-              aria-label="音量"
+              :max="duration || 1"
+              step=".1"
+              :value="scrubbing ? scrub : time"
+              :disabled="phase !== 'ready'"
+              aria-label="播放进度"
+              @pointermove="onSeekHover"
+              @pointerleave="hoverSeconds = null"
+              @input="
+                scrubbing = true;
+                scrub = Number(($event.target as HTMLInputElement).value);
+              "
+              @change="seek(Number(($event.target as HTMLInputElement).value))"
             />
           </div>
+          <span class="t dim"
+            >-{{ stamp(Math.max(0, duration - (scrubbing ? scrub : time))) }}</span
+          >
         </div>
-        <div class="right-controls">
-          <button
-            class="du-btn du-btn-ghost du-btn-circle"
-            :class="{ 'du-btn-active': syncPlay.active.value }"
-            aria-label="同步观看"
-            @click="openSyncPlay"
-          >
-            <BaseIcon name="user" :size="21" /></button
-          ><button
-            class="du-btn du-btn-ghost du-btn-circle"
-            aria-label="音轨和字幕"
-            @click="panel = panel === 'settings' ? null : 'settings'"
-          >
-            <BaseIcon name="subtitles" :size="22" /></button
-          ><button
-            class="du-btn du-btn-ghost du-btn-circle"
-            aria-label="播放设置"
-            @click="panel = panel === 'settings' ? null : 'settings'"
-          >
-            <BaseIcon name="settings" :size="21" /></button
-          ><button
-            class="du-btn du-btn-ghost du-btn-circle"
-            :aria-label="fullscreen ? '退出全屏' : '进入全屏'"
-            @click="toggleFullscreen"
-          >
-            <BaseIcon :name="fullscreen ? 'minimize' : 'fullscreen'" :size="21" />
-          </button>
+
+        <div class="control-row">
+          <div class="left-controls">
+            <button
+              class="play-main"
+              type="button"
+              :aria-label="playing ? '暂停' : '播放'"
+              :disabled="phase !== 'ready'"
+              @click="toggle"
+            >
+              <BaseIcon :name="playing ? 'pause' : 'play'" :size="22" :fill="true" />
+            </button>
+            <button
+              v-if="playlist.length"
+              class="pbtn"
+              type="button"
+              aria-label="上一集"
+              :disabled="!hasPreviousEpisode"
+              @click="goAdjacent(-1)"
+            >
+              <BaseIcon name="previous" :size="20" />
+            </button>
+            <button
+              class="pbtn hide-sm"
+              type="button"
+              aria-label="快退 10 秒"
+              :disabled="phase !== 'ready'"
+              @click="seek(time - 10)"
+            >
+              <BaseIcon name="rewind" :size="19" />
+            </button>
+            <button
+              class="pbtn hide-sm"
+              type="button"
+              aria-label="快进 10 秒"
+              :disabled="phase !== 'ready'"
+              @click="seek(time + 10)"
+            >
+              <BaseIcon name="forward" :size="19" />
+            </button>
+            <button
+              v-if="playlist.length"
+              class="pbtn"
+              type="button"
+              aria-label="下一集"
+              :disabled="!hasNextEpisode"
+              @click="goAdjacent(1)"
+            >
+              <BaseIcon name="next" :size="20" />
+            </button>
+            <div class="volume-control">
+              <button
+                class="pbtn"
+                type="button"
+                :aria-label="muted ? '取消静音' : '静音'"
+                @click="muted = !muted"
+              >
+                <BaseIcon :name="muted || !volume ? 'mute' : 'volume'" :size="20" />
+              </button>
+              <input
+                v-model.number="volume"
+                class="vol"
+                type="range"
+                min="0"
+                max="1"
+                step=".02"
+                aria-label="音量"
+                :style="{ '--range-progress': `${muted ? 0 : volume * 100}%` }"
+              />
+            </div>
+          </div>
+
+          <div class="right-controls">
+            <button
+              class="pbtn"
+              :class="{ on: syncPlay.active.value || panel === 'syncplay' }"
+              type="button"
+              aria-label="同步观看"
+              title="同步观看"
+              @click="openSyncPlay"
+            >
+              <BaseIcon name="users" :size="19" />
+            </button>
+            <button
+              class="pbtn"
+              :class="{ on: menu === 'audio' }"
+              type="button"
+              aria-label="音轨"
+              title="音轨"
+              :disabled="!audioOptions.length"
+              @click="toggleMenu('audio')"
+            >
+              <BaseIcon name="audio" :size="19" />
+            </button>
+            <button
+              class="pbtn"
+              :class="{ on: menu === 'subtitle', lit: subtitle !== '-1' }"
+              type="button"
+              aria-label="字幕"
+              title="字幕"
+              @click="toggleMenu('subtitle')"
+            >
+              <BaseIcon name="subtitles" :size="19" />
+            </button>
+            <button
+              v-if="mediaSourceOptions.length > 1"
+              class="pbtn"
+              :class="{ on: menu === 'version' }"
+              type="button"
+              aria-label="版本"
+              title="版本"
+              @click="toggleMenu('version')"
+            >
+              <BaseIcon name="versions" :size="19" />
+            </button>
+            <button
+              class="pbtn speed"
+              :class="{ on: menu === 'speed', lit: speed !== '1' }"
+              type="button"
+              aria-label="播放速度"
+              title="播放速度"
+              @click="toggleMenu('speed')"
+            >
+              <span v-if="speed !== '1'">{{ speed }}×</span>
+              <BaseIcon v-else name="speed" :size="19" />
+            </button>
+            <button
+              class="pbtn"
+              :class="{ on: panel === 'info' }"
+              type="button"
+              aria-label="媒体信息"
+              title="媒体信息"
+              @click="togglePanel('info')"
+            >
+              <BaseIcon name="info" :size="19" />
+            </button>
+            <button
+              class="pbtn"
+              type="button"
+              :aria-label="fullscreen ? '退出全屏' : '进入全屏'"
+              @click="toggleFullscreen"
+            >
+              <BaseIcon :name="fullscreen ? 'minimize' : 'fullscreen'" :size="19" />
+            </button>
+          </div>
         </div>
       </div>
     </footer>
   </section>
 </template>
+
 <style scoped lang="scss">
-.trickplay-preview {
-  position: absolute;
-  bottom: 28px;
-  transform: translateX(-50%);
-  max-width: 40vw;
-  border-radius: 6px;
-  background-repeat: no-repeat;
-  box-shadow: 0 6px 24px #0009;
-  pointer-events: none;
-}
-.trickplay-preview span {
-  position: absolute;
-  bottom: 4px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 11px;
-  color: #fff;
-  text-shadow: 0 1px 2px #000;
-}
-.syncplay-panel {
-  display: grid;
-  gap: 0.6rem;
-}
 .cinema-player {
-  --fbz-color-bg: #080a0d;
-  --fbz-color-panel: #171b21;
-  --fbz-color-panel-strong: #242a32;
-  --fbz-color-panel-elevated: #303842;
-  --fbz-color-text: #f4f5f7;
-  --fbz-color-text-soft: #c7ccd3;
-  --fbz-color-text-muted: #9098a4;
-  --fbz-color-line: #323a45;
-  --fbz-color-line-soft: #242b35;
   position: fixed;
   inset: 0;
-  z-index: 90;
-  background: #030405;
-  color: #f4f5f7;
-  isolation: isolate;
+  z-index: 100;
   overflow: hidden;
+  background: #000;
+  outline: none;
+  user-select: none;
+
+  video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+  }
+
+  // 控件统一淡入淡出；隐藏时不再拦截指针，视频可直接点击。
+  .veil-top,
+  .veil-bottom,
+  .player-top,
+  .player-bottom,
+  .skip-markers {
+    transition: opacity 260ms var(--ui-ease-out);
+  }
+
+  &.chrome-hidden {
+    cursor: none;
+
+    .veil-top,
+    .veil-bottom,
+    .player-top,
+    .player-bottom {
+      opacity: 0;
+      pointer-events: none;
+    }
+  }
 }
-.cinema-player video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-}
-.player-veil {
+
+.veil-top,
+.veil-bottom {
   position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(180deg, #05080dc9, transparent 28%, transparent 46%, #05080dea);
-  transition: opacity 0.25s;
-}
-.player-top {
-  position: absolute;
-  top: 0;
   left: 0;
   right: 0;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  padding: 28px 36px;
-  transition: opacity 0.25s;
-}
-.du-btn {
-  color: #e8ebf0;
-}
-.du-btn:hover {
-  background: #ffffff15;
-}
-.now-title {
-  min-width: 0;
-  flex: 1;
-}
-.now-title > span {
-  color: #a8b0bc;
-  font-size: 11px;
-  letter-spacing: 0.5px;
-}
-.now-title h1 {
-  font-size: 15px;
-  font-weight: 550;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin: 5px 0 0;
-  max-width: 70vw;
-}
-.quality-pill {
-  border: 1px solid #ffffff35;
-  padding: 3px 8px;
-  font-size: 10px;
-  border-radius: 5px;
-  color: #cdd3dc;
-}
-.hidden {
-  opacity: 0;
   pointer-events: none;
 }
-.player-state {
-  position: absolute;
-  left: 50%;
-  top: 45%;
-  transform: translate(-50%, -50%);
-  text-align: center;
-  display: grid;
-  justify-items: center;
-  gap: 18px;
-  width: min(430px, calc(100% - 40px));
-  padding: 30px;
-  background: #090d13bb;
-  backdrop-filter: blur(12px);
-  border-radius: 18px;
-}
-.player-state h2 {
-  font-size: 21px;
-  font-weight: 550;
-  margin: 0;
-}
-.player-state p {
-  font-size: 13px;
-  line-height: 1.8;
-  color: #aeb6c3;
-  margin: 0;
-}
-.player-state > div {
-  display: flex;
-  gap: 12px;
-  margin-top: 8px;
-}
-.retry-button {
-  background: #f3f4f5;
-  color: #131820;
-  border: 0;
-}
-.center-controls {
-  position: absolute;
-  top: 45%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  gap: 35px;
-}
-.big-play {
-  width: 90px;
-  height: 90px;
-  border: 1.5px solid #ffffffe0;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  background: #0b101933;
-  backdrop-filter: blur(4px);
-  padding-left: 4px;
-  transition: background 0.2s;
-}
-.big-play:hover {
-  background: #ffffff25;
-}
-.skip-button {
-  position: relative;
-}
-.skip-button small {
-  position: absolute;
-  font-size: 9px;
-  bottom: 4px;
-}
-.buffer-indicator {
-  position: absolute;
-  top: 48%;
-  left: 49%;
-  color: white;
-}
-.player-bottom {
-  position: absolute;
-  inset: auto 0 0;
-  padding: 20px 44px 25px;
-  transition: opacity 0.25s;
-}
-.bottom-caption {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  margin-bottom: 23px;
-  gap: 20px;
-}
-.bottom-caption span {
-  font-size: 11px;
-  color: #a8b0bc;
-}
-.bottom-caption h2 {
-  font-size: 27px;
-  letter-spacing: -0.6px;
-  font-weight: 550;
-  margin: 8px 0 0;
-  max-width: 65vw;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.next-episode {
-  font-size: 12px;
-  background: #ffffff12;
-  border: 1px solid #ffffff20;
-}
-.seek-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-.seek-row > span {
-  font-size: 11px;
-  color: #c1c8d3;
-  font-variant-numeric: tabular-nums;
-  min-width: 45px;
-}
-.seek-row > span:last-child {
-  text-align: right;
-}
-.du-range {
-  --range-thumb: var(--fbz-color-brand-500);
-  --range-bg: #ffffff28;
-  --range-fill: 1;
-  color: var(--fbz-color-brand-500);
-  height: 15px;
-}
-.control-row,
-.left-controls,
-.right-controls,
-.volume-control {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.control-row {
-  justify-content: space-between;
-  margin-top: 10px;
-}
-.control-row .du-btn {
-  width: 38px;
-  height: 38px;
-  min-height: 0;
-}
-.volume-control .du-range {
-  width: 85px;
-  color: #dce1e8;
-}
-.player-notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #e6c98b;
-  font-size: 12px;
-  margin-bottom: 16px;
-}
-.player-panel {
-  position: absolute;
-  right: 24px;
-  top: 98px;
-  bottom: 185px;
-  width: 350px;
-  background: #141a22ee;
-  border: 1px solid #ffffff15;
-  border-radius: 16px;
-  backdrop-filter: blur(20px);
-  padding: 22px;
-  z-index: 3;
-  overflow: auto;
-}
-.player-panel > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 23px;
-}
-.player-panel h2 {
-  font-size: 18px;
-  font-weight: 550;
-  margin: 0;
-}
-.player-panel label {
-  display: grid;
-  gap: 10px;
-  font-size: 12px;
-  color: #aeb7c3;
-  margin-bottom: 22px;
-}
-.setting-note {
-  font-size: 11px;
-  line-height: 1.8;
-  color: #8e98a7;
-}
-.media-info-button {
-  width: 100%;
-  justify-content: flex-start;
-  margin-top: 25px;
-  border-top: 1px solid #ffffff10;
-  border-radius: 0;
-  padding-top: 20px;
-}
-.media-info-button svg:last-child {
-  margin-left: auto;
-}
-.episode-queue {
-  display: grid;
-  gap: 10px;
-}
-.episode-queue > button {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  text-align: left;
-  padding: 8px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: transparent;
-  color: #c4ccd8;
-}
-.episode-queue > button.active {
-  border-color: var(--fbz-color-brand-500);
-  background: #ffffff06;
-}
-.queue-image {
-  width: 82px;
-  height: 53px;
-  border-radius: 5px;
-  overflow: hidden;
-  position: relative;
-  background: #252c37;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-}
-.queue-image img {
-  height: 100%;
-  width: 100%;
-  object-fit: cover;
-}
-.queue-image span {
-  position: absolute;
-  bottom: 3px;
-  left: 5px;
-  font-size: 10px;
-  color: #fff;
-  text-shadow: 0 1px 5px #000;
-}
-.episode-queue strong {
-  display: block;
-  font-size: 12px;
-  font-weight: 550;
-}
-.episode-queue small {
-  display: block;
-  margin-top: 6px;
-  font-size: 10px;
-  color: #8994a4;
-}
-.technical-info > div {
-  padding: 16px 0;
-  border-bottom: 1px solid #ffffff10;
-  display: flex;
-  gap: 15px;
-  justify-content: space-between;
-  font-size: 12px;
-}
-.technical-info dt {
-  color: #8f9aaa;
-  white-space: nowrap;
-}
-.technical-info dd {
-  text-align: right;
-  margin: 0;
-  color: #d5dbe5;
-}
-.cinema-player :is(button, input, select):focus-visible {
-  outline: 2px solid var(--fbz-color-brand-500);
-  outline-offset: 3px;
-}
-@media (max-width: 650px) {
-  .player-top {
-    padding: 20px 16px;
-    gap: 9px;
-  }
-  .now-title h1 {
-    font-size: 12px;
-    max-width: 58vw;
-  }
-  .quality-pill {
-    display: none;
-  }
-  .player-top > .du-btn {
-    height: 34px;
-    width: 34px;
-    min-height: 0;
-  }
-  .player-bottom {
-    padding: 18px 17px calc(15px + env(safe-area-inset-bottom));
-  }
-  .bottom-caption h2 {
-    font-size: 18px;
-    max-width: 85vw;
-  }
-  .bottom-caption {
-    margin-bottom: 17px;
-  }
-  .next-episode {
-    display: none;
-  }
-  .volume-control {
-    display: none;
-  }
-  .seek-row {
-    gap: 8px;
-  }
-  .seek-row > span {
-    font-size: 10px;
-    min-width: 33px;
-  }
-  .control-row {
-    margin-top: 9px;
-  }
-  .center-controls {
-    gap: 20px;
-  }
-  .big-play {
-    width: 75px;
-    height: 75px;
-  }
-  .player-panel {
-    left: 0;
-    right: 0;
-    top: auto;
-    bottom: 0;
-    width: auto;
-    max-height: 68dvh;
-    border-radius: 18px 18px 0 0;
-    padding: 22px 22px calc(25px + env(safe-area-inset-bottom));
-  }
-  .episode-queue {
-    max-height: 48dvh;
-    overflow: auto;
-  }
-  .player-state {
-    top: 43%;
-    padding: 24px;
-  }
-  .player-state h2 {
-    font-size: 18px;
-  }
-  .player-state p {
-    font-size: 12px;
-  }
-}
-.seek-row .du-range {
-  flex: 1;
-  width: 100%;
-  min-width: 0;
-}
-.player-top.hidden:focus-within,
-.player-bottom.hidden:focus-within {
-  opacity: 1;
-  pointer-events: auto;
+
+.veil-top {
+  top: 0;
+  height: 160px;
+  background: linear-gradient(180deg, rgb(0 0 0 / 72%), transparent);
 }
 
-.skip-markers {
+.veil-bottom {
+  bottom: 0;
+  height: 260px;
+  background: linear-gradient(0deg, rgb(2 3 8 / 92%), rgb(2 3 8 / 50%) 55%, transparent);
+}
+
+/* ---------- 通用按钮 ---------- */
+.pbtn {
+  position: relative;
+  min-width: 40px;
+  height: 40px;
+  display: inline-grid;
+  grid-auto-flow: column;
+  place-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-md);
+  background: transparent;
+  color: var(--ui-text);
+  cursor: pointer;
+  transition:
+    background var(--ui-duration-fast),
+    color var(--ui-duration-fast),
+    border-color var(--ui-duration-fast);
+
+  &:hover:not(:disabled) {
+    background: rgb(255 255 255 / 10%);
+  }
+
+  &:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  &.on {
+    border-color: rgb(var(--ui-accent-channel) / 55%);
+    background: rgb(var(--ui-accent-channel) / 16%);
+    color: var(--ui-accent-hover);
+  }
+
+  &.lit {
+    color: var(--ui-accent-hover);
+  }
+
+  &.sm {
+    min-width: 30px;
+    height: 30px;
+    padding: 0 6px;
+    border-radius: var(--ui-radius-sm);
+  }
+
+  &.round {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: rgb(0 0 0 / 35%);
+    backdrop-filter: blur(8px);
+
+    small {
+      position: absolute;
+      bottom: 9px;
+      font-size: 9px;
+      font-weight: 700;
+    }
+  }
+
+  &.speed span {
+    font-family: var(--ui-font-mono);
+    font-size: 12px;
+    font-weight: 700;
+  }
+}
+
+/* ---------- 顶栏 ---------- */
+.player-top {
   position: absolute;
-  right: clamp(16px, 4vw, 36px);
-  bottom: calc(118px + env(safe-area-inset-bottom, 0px));
-  z-index: 5;
+  inset: 0 0 auto 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 24px;
+}
+
+.now-title {
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  transition: opacity var(--fbz-motion-fast);
 
-  &.hidden {
-    opacity: 0;
-    pointer-events: none;
+  h1 {
+    margin: 0;
+    overflow: hidden;
+    color: #fff;
+    font-size: 16px;
+    font-weight: 600;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-shadow: 0 1px 6px rgb(0 0 0 / 60%);
+  }
+
+  span {
+    color: var(--ui-text-muted);
+    font-size: 12px;
   }
 }
 
-.skip-marker-btn {
-  height: 40px;
-  padding: 0 16px;
-  border-radius: 999px;
-  border: 1px solid rgb(255 255 255 / 28%);
-  background: rgb(0 0 0 / 55%);
+.top-badges {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.q-badge {
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 4px;
+  background: rgb(0 0 0 / 35%);
   color: #fff;
-  font-size: 14px;
+  font-size: 10.5px;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  backdrop-filter: blur(8px);
+}
+
+/* ---------- 中央 ---------- */
+.player-state {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: #fff;
+  text-align: center;
+  background: rgb(2 3 8 / 60%);
+
+  h2 {
+    margin: 8px 0 0;
+    font-size: 17px;
+    font-weight: 600;
+  }
+
+  p {
+    max-width: 440px;
+    margin: 0;
+    color: var(--ui-text-muted);
+    font-size: 13px;
+  }
+}
+
+.state-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.center-controls {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  transform: translate(-50%, -50%);
+}
+
+.big-play {
+  width: 76px;
+  height: 76px;
+  display: grid;
+  place-items: center;
+  padding-left: 4px;
+  border: 0;
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
+  box-shadow: var(--ui-shadow-accent);
   cursor: pointer;
 
   &:hover {
-    background: rgb(0 0 0 / 72%);
-    border-color: rgb(255 255 255 / 45%);
+    background: var(--ui-accent-hover);
   }
 }
-.sync-queue-row {
+
+.buffer-indicator {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  margin: -20px 0 0 -20px;
+  color: #fff;
+}
+
+/* ---------- Skip ---------- */
+.skip-markers {
+  position: absolute;
+  right: 32px;
+  bottom: 168px;
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+}
+
+.skip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid rgb(255 255 255 / 30%);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-glass-strong);
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent-hover);
+  }
+}
+
+/* ---------- 底栏 ---------- */
+.player-bottom {
+  position: absolute;
+  inset: auto 0 0 0;
+  z-index: 4;
+  padding: 0 24px 24px;
+}
+
+.player-notice {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-glass-strong);
+  color: var(--ui-text);
+  font-size: 12.5px;
+}
+
+.control-panel {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 14px 16px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-glass);
+  box-shadow: var(--ui-shadow-dialog);
+  backdrop-filter: blur(20px);
+}
+
+.seek-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  .t {
+    flex: 0 0 auto;
+    min-width: 52px;
+    color: var(--ui-text);
+    font-family: var(--ui-font-mono);
+    font-size: 12px;
+    text-align: right;
+
+    &.dim {
+      color: var(--ui-text-subtle);
+      text-align: left;
+    }
+  }
+}
+
+.seek-wrap {
+  position: relative;
+  flex: 1;
+  height: 20px;
+  display: flex;
+  align-items: center;
+}
+
+.marker-tick {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  width: 3px;
+  height: 10px;
+  margin: -5px 0 0 -1px;
+  border-radius: 2px;
+  background: var(--ui-accent-hover);
+  pointer-events: none;
+}
+
+input[type="range"] {
+  width: 100%;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+
+  &::-webkit-slider-runnable-track {
+    height: 5px;
+    border-radius: 99px;
+    background: linear-gradient(
+      90deg,
+      var(--ui-accent) 0 var(--range-progress, 0%),
+      rgb(255 255 255 / 18%) var(--range-progress, 0%) 100%
+    );
+  }
+
+  &::-moz-range-track {
+    height: 5px;
+    border-radius: 99px;
+    background: rgb(255 255 255 / 18%);
+  }
+
+  &::-moz-range-progress {
+    height: 5px;
+    border-radius: 99px;
+    background: var(--ui-accent);
+  }
+
+  &::-webkit-slider-thumb {
+    width: 14px;
+    height: 14px;
+    margin-top: -4.5px;
+    appearance: none;
+    border: 0;
+    border-radius: 50%;
+    background: var(--ui-accent-hover);
+    box-shadow: 0 0 10px rgb(var(--ui-accent-channel) / 60%);
+    opacity: 0;
+    transition: opacity var(--ui-duration-fast);
+  }
+
+  &::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--ui-accent-hover);
+  }
+
+  &:hover::-webkit-slider-thumb,
+  &:focus-visible::-webkit-slider-thumb {
+    opacity: 1;
+  }
+
+  &:disabled {
+    cursor: default;
+  }
+}
+
+.seek-wrap input[type="range"] {
+  --range-progress: inherit;
+}
+
+.trickplay-preview {
+  position: absolute;
+  bottom: 22px;
+  z-index: 3;
+  overflow: hidden;
+  border: 2px solid rgb(255 255 255 / 85%);
+  border-radius: var(--ui-radius-sm);
+  background-repeat: no-repeat;
+  box-shadow: var(--ui-shadow-float);
+  transform: translateX(-50%);
+  pointer-events: none;
+
+  span {
+    position: absolute;
+    left: 50%;
+    bottom: 4px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgb(0 0 0 / 72%);
+    color: #fff;
+    font-family: var(--ui-font-mono);
+    font-size: 11px;
+    transform: translateX(-50%);
+  }
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.left-controls,
+.right-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.play-main {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  margin-right: 6px;
+  border: 0;
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
+  box-shadow: var(--ui-shadow-accent);
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    background: var(--ui-accent-hover);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+  }
+}
+
+.volume-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+
+  .vol {
+    width: 90px;
+  }
+}
+
+/* ---------- 弹出菜单 ---------- */
+.menu-pop {
+  position: absolute;
+  right: max(24px, calc((100% - 1280px) / 2));
+  bottom: calc(100% - 14px);
+  z-index: 5;
+  width: 300px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-glass-strong);
+  box-shadow: var(--ui-shadow-float);
+  backdrop-filter: blur(20px);
+}
+
+.menu-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px 6px;
+  color: var(--ui-text-subtle);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.menu-item {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--ui-surface-hover);
+  }
+
+  &[aria-checked="true"] {
+    color: var(--ui-accent-hover);
+  }
+
+  .tick {
+    opacity: 0;
+
+    &.on {
+      opacity: 1;
+    }
+  }
+
+  .mi-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  small {
+    flex: 0 0 auto;
+    color: var(--ui-text-subtle);
+    font-family: var(--ui-font-mono);
+    font-size: 11px;
+
+    &.ext {
+      padding: 0 5px;
+      border: 1px solid rgb(var(--ui-accent-channel) / 50%);
+      border-radius: 4px;
+      color: var(--ui-accent-hover);
+      font-family: var(--ui-font-sans);
+    }
+  }
+}
+
+.menu-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--ui-text-subtle);
+  font-size: 12.5px;
+}
+
+/* ---------- 侧面板 ---------- */
+.player-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: min(400px, 100%);
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--ui-border);
+  background: var(--ui-glass-strong);
+  backdrop-filter: blur(24px);
+  box-shadow: var(--ui-shadow-dialog);
+
+  > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 16px 12px;
+    border-bottom: 1px solid var(--ui-border);
+
+    h2 {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0;
+      color: var(--ui-text);
+      font-size: 15px;
+      font-weight: 600;
+    }
+  }
+
+  > div {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px 24px;
+  }
+}
+
+.episode-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px;
+    border: 1px solid transparent;
+    border-radius: var(--ui-radius-md);
+    background: transparent;
+    color: var(--ui-text);
+    text-align: left;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--ui-surface-hover);
+    }
+
+    &.active {
+      border-color: rgb(var(--ui-accent-channel) / 45%);
+      background: rgb(var(--ui-accent-channel) / 10%);
+    }
+  }
+
+  .queue-image {
+    position: relative;
+    flex: 0 0 auto;
+    width: 120px;
+    aspect-ratio: 16 / 9;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    border-radius: var(--ui-radius-sm);
+    background: var(--ui-surface-raised);
+    color: var(--ui-text-subtle);
+
+    img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+  }
+
+  .ep-no {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: rgb(0 0 0 / 70%);
+    color: #fff;
+    font-family: var(--ui-font-mono);
+    font-size: 10px;
+  }
+
+  .queue-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+
+    strong {
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    small {
+      color: var(--ui-text-subtle);
+      font-size: 11.5px;
+    }
+  }
+
+  .now {
+    color: var(--ui-accent-hover);
+  }
+}
+
+.syncplay-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sync-card {
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
+
+  strong {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+  }
+
+  p {
+    margin: 6px 0 0;
+    color: var(--ui-text-muted);
+    font-size: 12.5px;
+  }
+}
+
+.sync-state {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--ui-accent-hover);
+  font-size: 12px;
+}
+
+.sync-row {
+  display: flex;
+  gap: 8px;
+}
+
+.chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font-size: 12.5px;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-surface-hover);
+  }
+
+  &:disabled {
+    opacity: 0.45;
+  }
+
+  &.on {
+    border-color: rgb(var(--ui-accent-channel) / 55%);
+    color: var(--ui-accent-hover);
+  }
+
+  &.wide {
+    width: 100%;
+  }
+
+  &.danger:hover:not(:disabled) {
+    color: var(--ui-danger);
+  }
+}
+
+.sync-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12.5px;
 
   span {
     flex: 1;
-    min-width: 0;
-    font-size: 13px;
-    opacity: 0.8;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--ui-text-muted);
+
+    &.is-current {
+      color: var(--ui-accent-hover);
+      font-weight: 600;
+    }
+  }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.panel-label {
+  margin: 6px 0 0;
+  color: var(--ui-text-subtle);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.panel-note {
+  margin: 0;
+  color: var(--ui-text-muted);
+  font-size: 12.5px;
+
+  &.error {
+    color: var(--ui-danger);
+  }
+}
+
+.info-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.engine-info {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
+
+  div {
+    display: flex;
+    gap: 10px;
+    font-size: 12.5px;
   }
 
-  .is-current {
-    opacity: 1;
-    font-weight: 700;
+  dt {
+    flex: 0 0 72px;
+    color: var(--ui-text-subtle);
+  }
+
+  dd {
+    margin: 0;
+    color: var(--ui-text);
+  }
+}
+
+.info-panel :deep(.summary) {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.info-panel :deep(.sum.caps) {
+  grid-column: span 2;
+}
+
+@media (max-width: 760px) {
+  .player-top {
+    padding: 12px;
+  }
+
+  .top-badges {
+    display: none;
+  }
+
+  .player-bottom {
+    padding: 0 8px 8px;
+  }
+
+  .control-panel {
+    padding: 10px;
+  }
+
+  .volume-control .vol,
+  .hide-sm {
+    display: none;
+  }
+
+  .skip-markers {
+    right: 12px;
+    bottom: 150px;
+  }
+
+  .menu-pop {
+    right: 8px;
+    left: 8px;
+    width: auto;
   }
 }
 </style>

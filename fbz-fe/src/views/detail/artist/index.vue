@@ -28,96 +28,158 @@ const yearRange = computed(() => (detail.value ? albumYearRange(detail.value.alb
 </script>
 
 <template>
-  <main class="artist-detail">
+  <main class="c-page artist-detail">
     <PageHeader :title="detail?.name ?? '艺术家'" fallback="/library" />
 
-    <p v-if="loading" class="hint">加载中…</p>
-    <p v-else-if="failed" class="hint">无法加载该艺术家。</p>
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />加载中…
+    </p>
+    <p v-else-if="failed" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />无法加载该艺术家。
+    </p>
 
     <template v-else-if="detail">
       <header class="head">
-        <h1>{{ detail.name }}</h1>
-        <p class="sub">
-          {{ detail.albums.length }} 张专辑<span v-if="yearRange"> · {{ yearRange }}</span>
-        </p>
+        <div class="avatar"><BaseIcon name="artist" :size="40" :stroke-width="1.3" /></div>
+        <div>
+          <span class="type-chip"><BaseIcon name="artist" :size="12" />艺术家</span>
+          <h1>{{ detail.name }}</h1>
+          <p class="c-meta">
+            {{ detail.albums.length }} 张专辑<template v-if="yearRange">
+              · {{ yearRange }}</template
+            >
+          </p>
+        </div>
       </header>
 
-      <p v-if="!detail.albums.length" class="hint">暂无专辑。</p>
-      <div v-else class="grid">
-        <RouterLink
-          v-for="(album, i) in detail.albums"
-          :key="album.id"
-          :to="`/album/${album.id}`"
-          class="album-card"
-        >
-          <MediaPoster :src="album.poster" :title="album.title" :variant="(i % 2) as 0 | 1" />
-          <span class="title">{{ album.title }}</span>
-          <span v-if="album.year" class="year">{{ album.year }}</span>
-        </RouterLink>
-      </div>
+      <BaseEmptyState v-if="!detail.albums.length" compact icon="album" title="暂无专辑" />
+      <section v-else class="albums">
+        <h2 class="c-section-title"><BaseIcon name="album" :size="16" class="lead" />专辑</h2>
+        <div class="grid">
+          <RouterLink
+            v-for="(album, i) in detail.albums"
+            :key="album.id"
+            :to="`/album/${album.id}`"
+            class="album-card"
+          >
+            <div class="cover">
+              <MediaPoster
+                :src="album.poster"
+                :title="album.title"
+                ratio="square"
+                icon="album"
+                :variant="(i % 2) as 0 | 1"
+              />
+            </div>
+            <span class="title" :title="album.title">{{ album.title }}</span>
+            <span v-if="album.year" class="c-meta">{{ album.year }}</span>
+          </RouterLink>
+        </div>
+      </section>
     </template>
   </main>
 </template>
 
 <style scoped lang="scss">
 .artist-detail {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-6)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
-}
-
-.hint {
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-md);
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .head {
-  margin-bottom: var(--fbz-space-6);
+  display: flex;
+  align-items: center;
+  gap: 20px;
 
   h1 {
-    margin: 0 0 var(--fbz-space-2);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 800;
+    margin: 8px 0 4px;
+    color: var(--ui-text);
+    font-size: clamp(24px, 3vw, 36px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
+}
 
-  .sub {
-    margin: 0;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-md);
+.avatar {
+  width: 120px;
+  height: 120px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ui-border);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 30% 25%, rgb(var(--ui-accent-channel) / 14%), transparent 60%),
+    var(--ui-surface-raised);
+  color: var(--ui-text-subtle);
+}
+
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 5px;
+  color: var(--ui-text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.albums {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .lead {
+    color: var(--ui-text-subtle);
   }
 }
 
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: var(--fbz-space-5);
+  gap: 20px 16px;
 }
 
 .album-card {
   display: flex;
   flex-direction: column;
-  gap: var(--fbz-space-2);
-  text-decoration: none;
+  gap: 2px;
+  min-width: 0;
   color: inherit;
+  text-decoration: none;
 
-  .title {
-    font-size: var(--fbz-font-size-sm);
-    font-weight: 600;
-  }
+  &:hover {
+    .cover {
+      border-color: var(--ui-border-strong);
+      transform: translateY(-2px);
+    }
 
-  .year {
-    font-size: var(--fbz-font-size-xs);
-    color: var(--fbz-color-text-muted);
+    .title {
+      color: var(--ui-accent-hover);
+    }
   }
 }
 
-@media (max-width: 600px) {
-  .artist-detail {
-    padding: calc(var(--header-h, 56px) + var(--fbz-space-4)) var(--fbz-space-4) 60px;
-  }
+.cover {
+  margin-bottom: 6px;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  transition:
+    transform var(--ui-duration-base) var(--ui-ease-out),
+    border-color var(--ui-duration-fast);
+}
 
-  .grid {
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-    gap: var(--fbz-space-4);
-  }
+.title {
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: color var(--ui-duration-fast);
 }
 </style>

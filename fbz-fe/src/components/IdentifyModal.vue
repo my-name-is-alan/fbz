@@ -113,7 +113,7 @@ useEventListener(window, "keydown", (e) => {
             aria-label="关闭"
             @click="uiStore.closeIdentifyManager"
           >
-            ✕
+            <BaseIcon name="close" :size="16" />
           </button>
         </header>
 

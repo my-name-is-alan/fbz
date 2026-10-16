@@ -3,14 +3,20 @@ import type { CastMember } from "@/types/media.ts";
 
 interface Props {
   cast: CastMember[];
+  title?: string;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  title: "演职人员",
+});
 </script>
 
 <template>
   <section v-if="props.cast.length" class="cast-row">
-    <h2 class="section-title">演职人员</h2>
+    <h2 class="c-section-title">
+      <BaseIcon name="users" :size="16" class="lead" />{{ props.title }}
+      <span class="n">{{ props.cast.length }}</span>
+    </h2>
 
     <BaseScroller class="scroller" col-width="var(--cast-col)" gap="var(--cast-gap)">
       <RouterLink
@@ -26,17 +32,12 @@ const props = defineProps<Props>();
             :alt="member.name"
             loading="lazy"
           />
-          <div v-else class="avatar-ph">
-            <svg class="silhouette-svg" viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
-              />
-            </svg>
-            <span class="initial">{{ member.name.charAt(0) }}</span>
-          </div>
+          <BaseIcon v-else name="user-round" :size="30" :stroke-width="1.4" />
         </div>
         <p class="name" :title="member.name">{{ member.name }}</p>
-        <p class="character" :title="member.character">{{ member.character }}</p>
+        <p v-if="member.character" class="character" :title="member.character">
+          饰 {{ member.character }}
+        </p>
       </RouterLink>
     </BaseScroller>
   </section>
@@ -44,51 +45,59 @@ const props = defineProps<Props>();
 
 <style scoped lang="scss">
 .cast-row {
-  --cast-col: 96px;
-  --cast-gap: var(--fbz-space-4);
+  --cast-col: 92px;
+  --cast-gap: 14px;
 
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 0 var(--fbz-space-8) var(--fbz-space-8);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .lead,
+  .n {
+    color: var(--ui-text-subtle);
+  }
+
+  .n {
+    font-size: 12px;
+    font-weight: 500;
+  }
 }
 
-.section-title {
-  margin: 0 0 var(--fbz-space-4);
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: -0.2px;
+.scroller :deep(.track) {
+  padding: 4px 2px 8px;
 }
 
 .cast-card {
-  text-decoration: none;
-  color: inherit;
   display: flex;
   flex-direction: column;
   align-items: center;
+  min-width: 0;
+  color: inherit;
+  text-align: center;
+  text-decoration: none;
+
+  &:hover {
+    .avatar {
+      border-color: var(--ui-accent);
+    }
+
+    .name {
+      color: var(--ui-accent-hover);
+    }
+  }
 }
 
 .avatar {
-  position: relative;
-  width: var(--cast-col);
-  height: var(--cast-col);
-  aspect-ratio: 1;
-  border-radius: 50%;
+  width: 80px;
+  height: 80px;
+  display: grid;
+  place-items: center;
   overflow: hidden;
-  border: 1px solid var(--fbz-color-line-soft);
-  background: var(--fbz-color-panel);
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-  transition:
-    border-color var(--fbz-motion-base),
-    box-shadow var(--fbz-motion-base),
-    transform var(--fbz-motion-base);
-
-  .cast-card:hover & {
-    border-color: var(--fbz-color-brand-500);
-    box-shadow:
-      0 8px 18px color-mix(in srgb, var(--fbz-color-brand-500) 20%, transparent),
-      0 4px 8px rgba(0, 0, 0, 0.3);
-    transform: scale(1.06) translateY(-2px);
-  }
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 50%;
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-subtle);
+  transition: border-color var(--ui-duration-fast);
 
   img {
     width: 100%;
@@ -97,77 +106,37 @@ const props = defineProps<Props>();
   }
 }
 
-.avatar-ph {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: var(--fbz-color-panel-strong);
-  color: var(--fbz-color-text-disabled);
-
-  .silhouette-svg {
-    width: 45%;
-    height: 45%;
-    opacity: 0.7;
-    margin-bottom: 2px;
-  }
-
-  .initial {
-    font-size: var(--fbz-font-size-xs);
-    font-weight: 800;
-    color: var(--fbz-color-text-muted);
-    font-family: var(--fbz-font-display);
-    text-transform: uppercase;
-  }
+.name,
+.character {
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .name {
-  margin: 10px 0 3px;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.3;
-  text-align: center;
-  width: 100%;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--fbz-color-text);
-  transition: color var(--fbz-motion-fast);
-
-  .cast-card:hover & {
-    color: var(--fbz-color-brand-500);
-  }
+  margin-top: 8px;
+  color: var(--ui-text);
+  font-size: 12.5px;
+  font-weight: 500;
+  transition: color var(--ui-duration-fast);
 }
 
 .character {
-  margin: 0;
+  margin-top: 2px;
+  color: var(--ui-text-muted);
   font-size: 11px;
-  line-height: 1.25;
-  color: var(--fbz-color-text-muted);
-  text-align: center;
-  width: 100%;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 @media (max-width: 600px) {
   .cast-row {
-    --cast-col: 80px;
-    --cast-gap: 12px;
-
-    padding: 0 var(--fbz-space-4) var(--fbz-space-5);
+    --cast-col: 76px;
   }
 
-  .name {
-    font-size: 11px;
-    margin-top: 8px;
-  }
-
-  .character {
-    font-size: 10px;
+  .avatar {
+    width: 64px;
+    height: 64px;
   }
 }
 </style>

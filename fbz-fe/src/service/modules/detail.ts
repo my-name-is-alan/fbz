@@ -13,6 +13,14 @@
  * 页面展示真实空态，不再回退到设计态 mock。
  */
 import { embyRequest, mediaImageUrl } from "@/service/request.ts";
+import {
+  sourceBadges,
+  sourceLabel,
+  toMediaSourceInfo,
+  type MediaSourceDto,
+  type MediaSourceInfo,
+} from "@/service/modules/mediaInfo.ts";
+import { itemTypeMeta } from "@/utils/itemType.ts";
 import type {
   CastMember,
   CollectionDetail,
@@ -29,6 +37,15 @@ export interface DetailViewModel {
   /** 面向路由 / 播放的 id（后端为 public_id）。 */
   id: string;
   detailType: "movie" | "tv";
+  /** 后端真实条目类型（Movie / Video / Series / Season / Episode …）。 */
+  itemType: string;
+  /** 父级 id（Episode → Season，Season → Series）。 */
+  parentId?: string;
+  /** 单集 / 季的季号、集号。 */
+  seasonNumber?: number;
+  episodeNumber?: number;
+  /** 首播日期（YYYY-MM-DD）。 */
+  premiereDate?: string;
   title: string;
   /** 海报绝对地址（已带鉴权）；无图为 undefined，交 MediaPoster 渲染占位。 */
   poster?: string;
@@ -48,6 +65,8 @@ export interface DetailViewModel {
   directors?: string;
   /** 主创（剧集）。 */
   creators?: string;
+  /** 编剧。 */
+  writers?: string;
   /** 原名，与标题不同才给值。 */
   originalTitle?: string;
   /** 用户收藏状态（UserData.IsFavorite）。 */
@@ -62,6 +81,10 @@ export interface DetailViewModel {
   similar: MediaItem[];
   /** 播放版本（每个 MediaSource 一个版本，含规格 tag 与字幕语言）。 */
   versions: MediaVersion[];
+  /** 完整技术信息（每个 MediaSource 一份），驱动「媒体信息」面板。 */
+  mediaSources: MediaSourceInfo[];
+  /** 章节 / 片头片尾标记数量（Chapters）。 */
+  chapterCount: number;
 }
 
 /* ---------- 后端 DTO 形状（PascalCase，仅取详情页用得到的字段） ---------- */
@@ -93,6 +116,8 @@ interface BaseItemDto {
   BackdropImageTags?: string[] | null;
   People?: BaseItemPersonDto[] | null;
   UserData?: UserDataDto | null;
+  ParentId?: string | null;
+  Chapters?: unknown[] | null;
 }
 
 /** Emby 用户播放数据（进度 / 已看标记）。 */
@@ -122,21 +147,8 @@ interface SimilarResultDto {
   Items?: BaseItemDto[];
 }
 
-/** PlaybackInfo 里的单条媒体流（只取详情页展示用得到的字段）。 */
-interface MediaStreamDto {
-  Type: string; // Video / Audio / Subtitle
-  Codec?: string | null;
-  Language?: string | null;
-  DisplayTitle?: string | null;
-  Width?: number | null;
-  Height?: number | null;
-  Channels?: number | null;
-}
-
-interface PlaybackMediaSourceDto {
-  Id?: string;
-  Container?: string | null;
-  MediaStreams?: MediaStreamDto[] | null;
+/** PlaybackInfo 的 MediaSource（技术字段见 mediaInfo.ts；此处补播放地址字段）。 */
+interface PlaybackMediaSourceDto extends MediaSourceDto {
   /** 直出流地址（后端已把 api_key 拼进 URL，可直接播放）。 */
   DirectStreamUrl?: string | null;
   /** HLS 转码地址（`/emby/Videos/{id}/master.m3u8?...&api_key=...`）。 */
@@ -177,6 +189,11 @@ function detailTypeOf(itemType: string): "movie" | "tv" {
   return itemType === "Series" || itemType === "Season" || itemType === "Episode" ? "tv" : "movie";
 }
 
+/** 卡片副标题：年份 · 真实类型文案（不再一律写「电影」）。 */
+function cardMeta(dto: BaseItemDto): string {
+  return `${dto.ProductionYear ?? "—"} · ${itemTypeMeta(dto.Type).label}`;
+}
+
 /** 后端条目 → 相似行卡片 MediaItem（海报指向 Primary 端点，无图时 MediaPoster 兜底）。 */
 function similarToMediaItem(dto: BaseItemDto): MediaItem {
   const detailType = detailTypeOf(dto.Type);
@@ -185,11 +202,13 @@ function similarToMediaItem(dto: BaseItemDto): MediaItem {
     libraryId: detailType === "tv" ? "series" : "movie",
     detailType,
     title: dto.Name,
-    meta: `${dto.ProductionYear ?? "—"} · ${detailType === "tv" ? "剧集" : "电影"}`,
+    meta: cardMeta(dto),
     poster: mediaImageUrl(`/Items/${dto.Id}/Images/Primary`),
     year: dto.ProductionYear ?? undefined,
     rating: dto.CommunityRating ?? undefined,
     isFavorite: dto.UserData?.IsFavorite ?? false,
+    isPlayed: dto.UserData?.Played ?? false,
+    itemType: dto.Type,
   };
 }
 
@@ -215,52 +234,28 @@ async function fetchImageTypes(id: string): Promise<Set<string>> {
   }
 }
 
-/** 分辨率高度 → 清晰度标签（与卡片徽章口径一致）。 */
-function resolutionTag(height: number | null | undefined): string | undefined {
-  if (!height) return undefined;
-  if (height >= 2000) return "4K";
-  if (height >= 1400) return "2K";
-  if (height >= 1000) return "1080P";
-  if (height >= 700) return "720P";
-  return `${height}P`;
-}
-
-/** 单个 MediaSource → 播放版本（规格 tag + 字幕语言 + 版本标签）。 */
-function mediaSourceToVersion(source: PlaybackMediaSourceDto, index: number): MediaVersion {
-  const streams = source.MediaStreams ?? [];
-
-  const tags: string[] = [];
-  const video = streams.find((s) => s.Type === "Video");
-  const res = video ? resolutionTag(video.Height) : undefined;
-  if (res) tags.push(res);
-  if (video?.Codec) tags.push(video.Codec.toUpperCase());
-  if (source.Container) tags.push(source.Container.toUpperCase());
-  const audio = streams.find((s) => s.Type === "Audio");
-  if (audio?.Codec) {
-    const ch = audio.Channels ? `${audio.Channels}ch` : "";
-    tags.push(`${audio.Codec.toUpperCase()}${ch ? ` ${ch}` : ""}`);
-  }
-
-  const subtitles = streams
-    .filter((s) => s.Type === "Subtitle")
-    .map((s) => s.Language || s.DisplayTitle || "未知")
+/** 单个 MediaSource 视图模型 → 播放版本（规格 tag + 字幕语言 + 版本标签）。 */
+function sourceToVersion(info: MediaSourceInfo, index: number): MediaVersion {
+  const subtitles = info.subtitles
+    .map((sub) => sub.language || sub.title || "未知")
     .filter((v, i, arr) => arr.indexOf(v) === i);
-
-  // 版本标签：清晰度 + 容器（如 "1080P · MKV"），信息不足时退化为「版本 N」。
-  const labelParts = [res, source.Container?.toUpperCase()].filter(Boolean);
-  const label = labelParts.length ? labelParts.join(" · ") : `版本 ${index + 1}`;
-
-  return { id: source.Id ?? `source-${index}`, label, tags, subtitles };
+  return {
+    id: info.id,
+    label: sourceLabel(info, index),
+    tags: sourceBadges(info),
+    subtitles,
+    info,
+  };
 }
 
 /**
- * 从 PlaybackInfo 组装播放版本。后端对多文件条目会返回多个 MediaSource
- * （多版本），每个版本一条记录；失败或无流时返回空数组（DetailHero 优雅降级）。
+ * 从 PlaybackInfo 取完整 MediaSources（多版本 = 多条）。失败或无流时返回空数组，
+ * 详情页的版本选择与媒体信息面板随之隐藏，不伪造。
  */
-async function fetchPlaybackVersions(id: string): Promise<MediaVersion[]> {
+export async function fetchMediaSources(id: string): Promise<MediaSourceInfo[]> {
   try {
     const { data } = await embyRequest.get<PlaybackInfoResponseDto>(`/Items/${id}/PlaybackInfo`);
-    return (data.MediaSources ?? []).map(mediaSourceToVersion);
+    return (data.MediaSources ?? []).map((source, index) => toMediaSourceInfo(source, index));
   } catch {
     return [];
   }
@@ -303,12 +298,13 @@ async function backendDetail(
     return undefined;
   }
 
-  // 剧集（series）没有自己的媒体源，PlaybackInfo 必然 404（版本属于具体分集），
-  // 跳过请求避免每次进剧集详情页都产生一条控制台 404 噪音。
-  const [imageTypes, similar, versions] = await Promise.all([
+  // 剧集 / 季没有自己的媒体源，PlaybackInfo 必然 404（版本属于具体分集），
+  // 跳过请求避免控制台 404 噪音；单集与电影 / 视频类才取媒体源。
+  const hasOwnMedia = item.Type !== "Series" && item.Type !== "Season";
+  const [imageTypes, similar, mediaSources] = await Promise.all([
     fetchImageTypes(id),
-    fetchSimilar(id),
-    detailType === "movie" ? fetchPlaybackVersions(id) : Promise.resolve([]),
+    item.Type === "Episode" ? Promise.resolve([]) : fetchSimilar(id),
+    hasOwnMedia ? fetchMediaSources(id) : Promise.resolve([]),
   ]);
 
   const runtimeSeconds = ticksToSeconds(item.RunTimeTicks);
@@ -319,6 +315,7 @@ async function backendDetail(
 
   const people = item.People ?? [];
   const directors = peopleRoleNames(people, "Director");
+  const writers = peopleRoleNames(people, "Writer");
 
   // 续播位置：有进度且未看完才给（已看完显示"重新播放"而不是续播）。
   const positionSeconds = ticksToSeconds(item.UserData?.PlaybackPositionTicks);
@@ -330,6 +327,14 @@ async function backendDetail(
     source: "backend",
     id: item.Id,
     detailType,
+    itemType: item.Type,
+    parentId: item.ParentId ?? undefined,
+    seasonNumber:
+      item.Type === "Season"
+        ? (item.IndexNumber ?? undefined)
+        : (item.ParentIndexNumber ?? undefined),
+    episodeNumber: item.Type === "Episode" ? (item.IndexNumber ?? undefined) : undefined,
+    premiereDate: item.PremiereDate?.slice(0, 10) ?? undefined,
     title: item.Name,
     poster: imageTypes.has("Primary") ? mediaImageUrl(`/Items/${id}/Images/Primary`) : undefined,
     backdrop: imageTypes.has("Backdrop")
@@ -343,13 +348,16 @@ async function backendDetail(
     runtimeSeconds,
     directors: detailType === "movie" ? directors || undefined : undefined,
     creators: detailType === "tv" ? directors || undefined : undefined,
+    writers: writers || undefined,
     originalTitle: item.OriginalTitle ?? undefined,
     isFavorite: item.UserData?.IsFavorite ?? false,
     played,
     resumePositionSeconds,
     cast: peopleToCast(people),
     similar,
-    versions,
+    versions: mediaSources.map(sourceToVersion),
+    mediaSources,
+    chapterCount: item.Chapters?.length ?? 0,
   };
 }
 
@@ -384,7 +392,7 @@ async function fetchPersonCredits(personId: string): Promise<PersonCredit[]> {
         params: {
           personIds: personId,
           recursive: true,
-          includeItemTypes: "Movie,Series",
+          includeItemTypes: "Movie,Series,Video,Episode",
           enableImages: true,
           limit: 100,
         },
@@ -417,11 +425,13 @@ function collectionPartToMediaItem(dto: BaseItemDto): MediaItem {
     libraryId: detailType === "tv" ? "series" : "movie",
     detailType,
     title: dto.Name,
-    meta: `${dto.ProductionYear ?? "—"} · ${detailType === "tv" ? "剧集" : "电影"}`,
+    meta: cardMeta(dto),
     poster: dto.ImageTags?.Primary ? mediaImageUrl(`/Items/${dto.Id}/Images/Primary`) : undefined,
     year: dto.ProductionYear ?? undefined,
     rating: dto.CommunityRating ?? undefined,
     isFavorite: dto.UserData?.IsFavorite ?? false,
+    isPlayed: dto.UserData?.Played ?? false,
+    itemType: dto.Type,
   };
 }
 
@@ -630,6 +640,10 @@ export interface PlaybackSourceResult {
   mediaSources?: { id: string; label: string }[];
   chapters?: import("@/stores/playback.ts").PlaybackChapter[];
   duration?: number;
+  /** PlaybackInfo 外挂字幕轨（DeliveryUrl）；播放器据此挂轨。 */
+  subtitleTracks?: import("@/stores/playback.ts").PlaybackTrack[];
+  /** 当前所选 MediaSource 的技术信息（播放器「媒体信息」面板）。 */
+  mediaInfo?: MediaSourceInfo;
 }
 
 export async function fetchPlaybackSource(
@@ -646,6 +660,8 @@ export async function fetchPlaybackSource(
       mediaSources: prepared.mediaSources,
       duration: prepared.duration,
       chapters: prepared.chapters,
+      subtitleTracks: prepared.subtitleTracks,
+      mediaInfo: prepared.mediaInfo,
     };
   } catch {
     return null;
@@ -660,4 +676,20 @@ export async function deleteMediaItem(itemId: string, deleteFiles = false): Prom
   await embyRequest.delete(`/Items/${encodeURIComponent(itemId)}`, {
     params: { DeleteFiles: deleteFiles },
   });
+}
+
+/**
+ * 单集 / 季的剧集上下文（SeriesId / SeriesName）。Emby BaseItemDto 未下发 SeriesId，
+ * 走受权限保护的 presentation 补齐接口；失败返回空对象（页面退化为无面包屑）。
+ */
+export async function fetchSeriesContext(
+  itemId: string,
+): Promise<{ seriesId?: string; seriesName?: string }> {
+  try {
+    const { enrich } = await import("./server.ts");
+    const [item] = await enrich([{ Id: itemId, Name: "", Type: "Episode" }]);
+    return { seriesId: item?.SeriesId, seriesName: item?.SeriesName };
+  } catch {
+    return {};
+  }
 }

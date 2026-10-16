@@ -1,5 +1,17 @@
-/** 媒体库类型 —— 用户可创建任意多个、任意类型的库 */
-export type MediaKind = "movie" | "series" | "anime" | "documentary" | "music" | "book";
+/**
+ * 媒体库展示分组 —— 只是 `libraryType`（后端 CollectionType）的展示映射，不是事实源。
+ * homevideo / mixed / livetv 各自保留，不并进 movie / series（见 utils/libraryType.ts）。
+ */
+export type MediaKind =
+  | "movie"
+  | "series"
+  | "anime"
+  | "documentary"
+  | "music"
+  | "book"
+  | "homevideo"
+  | "mixed"
+  | "livetv";
 
 export interface MediaLibrary {
   scrapers?: string[];
@@ -17,7 +29,10 @@ export interface MediaLibrary {
    * 无则视图继续用文字占位，不盲拼库级图片端点。
    */
   cover?: string;
-  /** 后端规范库类型（movies / tvshows / music / mixed 等）。 */
+  /**
+   * 后端规范库类型（movies / tvshows / music / homevideos / mixed / livetv / books）。
+   * 这是库类型的事实源；`kind` 只是展示分组。
+   */
   libraryType?: string;
   /** 后端物理路径配置；管理弹窗按需填充。 */
   paths?: string[];
@@ -62,6 +77,17 @@ export interface MediaItem {
   progress?: number;
   /** 播放列表成员 EntryId（删/移用）；仅播放列表成员携带。 */
   playlistItemId?: string;
+  /** 后端真实条目类型（Emby `Type`：Movie / Series / Episode / BoxSet / Video …）。 */
+  itemType?: string;
+  /** 单集所属剧集 id（卡片进剧集详情用）。 */
+  seriesId?: string;
+  /** 单集季号 / 集号（`SxxExx` 角标）。 */
+  seasonNumber?: number;
+  episodeNumber?: number;
+  /** 可播放版本数（MediaSources 数量）；>1 时卡片显示多版本暗示。 */
+  versionCount?: number;
+  /** 动态范围（仅 DTO 明确给出时，如 HDR10 / Dolby Vision）。 */
+  dynamicRange?: string;
 }
 
 /** 单库列表的排序方式 */
@@ -86,6 +112,8 @@ export interface FeaturedItem {
   backdrop?: string;
   /** 缩略图地址；为空时渲染占位块 */
   thumb?: string;
+  /** 详情路由类型（BFF 下发）；缺省按 movie。 */
+  detailType?: "movie" | "tv";
 }
 
 /** 首页内容行 */
@@ -255,4 +283,6 @@ export interface MediaVersion {
   tags: string[];
   /** 字幕语言 */
   subtitles: string[];
+  /** 完整技术信息（MediaSources / MediaStreams 真字段）。 */
+  info?: import("@/service/modules/mediaInfo.ts").MediaSourceInfo;
 }

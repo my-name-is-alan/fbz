@@ -56,6 +56,15 @@ export interface RemoteSubtitleInfo {
   ProviderName?: string | null;
   Name?: string | null;
   Format?: string | null;
+  Author?: string | null;
+  Comment?: string | null;
+  DateCreated?: string | null;
+  CommunityRating?: number | null;
+  DownloadCount?: number | null;
+  IsHashMatch?: boolean | null;
+  IsForced?: boolean | null;
+  IsHearingImpaired?: boolean | null;
+  Language?: string | null;
 }
 
 /** GET /Items/{id}/RemoteSearch/Subtitles/{language} —— 无 provider 时为空数组。 */
@@ -69,4 +78,20 @@ export async function searchRemoteSubtitles(
     { params: mediaSourceId ? { mediaSourceId } : undefined },
   );
   return Array.isArray(data) ? data : [];
+}
+
+/**
+ * POST /Items/{id}/RemoteSearch/Subtitles/{subtitleId} —— 下载远程字幕并写为外挂 sidecar。
+ * 后端要求管服权限（`subtitle.remote.download` 审计）。
+ */
+export async function downloadRemoteSubtitle(
+  itemId: string,
+  subtitleId: string,
+  mediaSourceId?: string,
+): Promise<void> {
+  await embyRequest.post(
+    `/Items/${encodeURIComponent(itemId)}/RemoteSearch/Subtitles/${encodeURIComponent(subtitleId)}`,
+    null,
+    { params: mediaSourceId ? { mediaSourceId } : undefined },
+  );
 }
