@@ -70,37 +70,50 @@ onMounted(() => {
 </script>
 
 <template>
-  <main class="playlists-overview">
+  <main class="c-page playlists-overview">
     <header class="page-head">
-      <div class="head-text">
-        <h1>播放列表</h1>
-        <p class="sub">{{ playlists.length }} 个列表</p>
+      <div>
+        <h1 class="c-page-title"><BaseIcon name="playlist" :size="22" class="lead" />播放列表</h1>
+        <p class="c-meta">{{ playlists.length }} 个列表 · 可共享给其他用户</p>
       </div>
       <button
-        class="btn-create"
+        class="du-btn du-btn-primary du-btn-sm"
         type="button"
-        :disabled="!!error && !authStore.userId"
+        :disabled="!authStore.userId"
         @click="openCreate"
       >
-        新建
+        <BaseIcon name="plus" :size="15" />新建播放列表
       </button>
     </header>
 
-    <p v-if="loading" class="state-text">正在加载播放列表…</p>
-    <p v-else-if="error" class="state-text is-error">{{ error }}</p>
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />正在加载播放列表…
+    </p>
+    <p v-else-if="error" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />{{ error }}
+    </p>
     <BaseEmptyState
       v-else-if="!playlists.length"
-      icon="♫"
+      icon="playlist"
       title="还没有播放列表"
-      description="点击右上角「新建」，或在媒体卡片右键「加入播放列表」。"
-    />
+      description="点击右上角「新建播放列表」，或在任意媒体卡片右键「加入播放列表」。"
+    >
+      <button class="du-btn du-btn-primary" type="button" @click="openCreate">
+        <BaseIcon name="plus" :size="16" />新建播放列表
+      </button>
+    </BaseEmptyState>
 
-    <ul v-else class="list" role="list">
-      <li v-for="pl in playlists" :key="pl.id">
+    <ul v-else class="grid" role="list">
+      <li v-for="(pl, i) in playlists" :key="pl.id">
         <RouterLink :to="`/playlists/${pl.id}`" class="pl-card">
-          <span class="pl-ic" aria-hidden="true">♫</span>
-          <span class="pl-name">{{ pl.name }}</span>
-          <span class="pl-arrow" aria-hidden="true">›</span>
+          <span class="pl-cover" :class="`tone-${i % 4}`">
+            <BaseIcon name="playlist" :size="30" :stroke-width="1.4" />
+          </span>
+          <span class="pl-body">
+            <span class="pl-name">{{ pl.name }}</span>
+            <span class="c-meta">播放列表</span>
+          </span>
+          <BaseIcon name="right" :size="16" class="pl-arrow" />
         </RouterLink>
       </li>
     </ul>
@@ -115,7 +128,7 @@ onMounted(() => {
         <span class="field-label">名称</span>
         <input
           v-model="createName"
-          class="field-input"
+          class="du-input field-input"
           type="text"
           maxlength="256"
           placeholder="例如：周末片单"
@@ -123,11 +136,23 @@ onMounted(() => {
         />
       </label>
       <template #actions>
-        <button class="btn-ghost" type="button" :disabled="creating" @click="createOpen = false">
+        <button
+          class="du-btn du-btn-ghost"
+          type="button"
+          :disabled="creating"
+          @click="createOpen = false"
+        >
           取消
         </button>
-        <button class="btn-primary" type="button" :disabled="creating" @click="submitCreate">
-          {{ creating ? "创建中…" : "创建" }}
+        <button
+          class="du-btn du-btn-primary"
+          type="button"
+          :disabled="creating"
+          @click="submitCreate"
+        >
+          <BaseIcon v-if="creating" name="loading" :size="15" class="c-spin" />{{
+            creating ? "创建中…" : "创建"
+          }}
         </button>
       </template>
     </BaseModal>
@@ -136,139 +161,136 @@ onMounted(() => {
 
 <style scoped lang="scss">
 .playlists-overview {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-8)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
-  max-width: 960px;
-  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .page-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: var(--fbz-space-4);
-  margin-bottom: var(--fbz-space-6);
+  gap: 16px;
 
-  h1 {
-    margin: 0 0 var(--fbz-space-2);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 700;
+  .c-page-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
-  .sub {
-    margin: 0;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
+  .lead {
+    color: var(--ui-accent);
   }
-}
 
-.btn-create,
-.btn-primary {
-  appearance: none;
-  border: none;
-  border-radius: 999px;
-  padding: 10px 18px;
-  font-weight: 700;
-  cursor: pointer;
-  background: var(--fbz-color-brand-500);
-  color: #fff;
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  .c-meta {
+    margin: 4px 0 0;
   }
 }
 
-.btn-ghost {
-  appearance: none;
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 999px;
-  padding: 10px 18px;
-  font-weight: 600;
-  cursor: pointer;
-  background: transparent;
-  color: inherit;
-}
-
-.state-text {
-  margin: var(--fbz-space-8) 0;
-  color: var(--fbz-color-text-muted);
-
-  &.is-error {
-    color: var(--fbz-color-danger, #e57373);
-  }
-}
-
-.list {
-  list-style: none;
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
   margin: 0;
   padding: 0;
-  display: grid;
-  gap: var(--fbz-space-3);
+  list-style: none;
 }
 
 .pl-card {
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-3);
-  padding: var(--fbz-space-4) var(--fbz-space-5);
-  border-radius: 10px;
-  background: var(--fbz-color-panel, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--fbz-color-line);
+  gap: 14px;
+  padding: 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface);
   color: inherit;
   text-decoration: none;
-  transition: background var(--fbz-motion-base, 0.15s ease);
+  transition:
+    border-color var(--ui-duration-fast),
+    background var(--ui-duration-fast);
 
   &:hover {
-    background: var(--fbz-color-panel-strong, rgba(255, 255, 255, 0.08));
+    border-color: var(--ui-border-strong);
+    background: var(--ui-surface-hover);
+
+    .pl-name {
+      color: var(--ui-accent-hover);
+    }
+
+    .pl-arrow {
+      color: var(--ui-accent);
+      transform: translateX(2px);
+    }
   }
 }
 
-.pl-ic {
-  width: 36px;
-  height: 36px;
+.pl-cover {
+  flex: 0 0 auto;
+  width: 64px;
+  height: 64px;
   display: grid;
-  place-content: center;
-  border-radius: 8px;
-  background: var(--fbz-color-bg-strong, rgba(0, 0, 0, 0.25));
-  color: var(--fbz-color-brand-500);
-  font-size: 16px;
+  place-items: center;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-muted);
+
+  &.tone-1 {
+    background: linear-gradient(
+      135deg,
+      rgb(var(--ui-accent-channel) / 16%),
+      var(--ui-surface-raised)
+    );
+  }
+
+  &.tone-2 {
+    background: linear-gradient(135deg, rgb(52 211 153 / 12%), var(--ui-surface-raised));
+  }
+
+  &.tone-3 {
+    background: linear-gradient(135deg, rgb(251 113 133 / 12%), var(--ui-surface-raised));
+  }
+}
+
+.pl-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .pl-name {
-  flex: 1;
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 14px;
   font-weight: 600;
-  font-size: var(--fbz-font-size-md, 15px);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: color var(--ui-duration-fast);
 }
 
 .pl-arrow {
-  color: var(--fbz-color-text-muted);
-  font-size: 20px;
+  color: var(--ui-text-subtle);
+  transition:
+    color var(--ui-duration-fast),
+    transform var(--ui-duration-fast);
 }
 
 .field {
-  display: grid;
-  gap: var(--fbz-space-2);
-}
-
-.field-label {
-  font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .field-input {
-  appearance: none;
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: var(--fbz-color-bg-strong, rgba(0, 0, 0, 0.2));
-  color: inherit;
-  font-size: var(--fbz-font-size-md, 15px);
+  width: 100%;
 }
 
-@media (max-width: 600px) {
-  .playlists-overview {
-    padding: calc(var(--header-h, 60px) + var(--fbz-space-5)) var(--fbz-space-4) 60px;
-  }
+.field-label {
+  color: var(--ui-text-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 </style>

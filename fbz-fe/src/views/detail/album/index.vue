@@ -47,33 +47,57 @@ const playingId = computed(() => player.current?.id);
 </script>
 
 <template>
-  <main class="album-detail">
+  <main class="c-page album-detail">
     <PageHeader :title="detail?.title ?? '专辑'" fallback="/library" />
 
-    <p v-if="loading" class="hint">加载中…</p>
-    <p v-else-if="failed" class="hint">无法加载该专辑。</p>
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />加载中…
+    </p>
+    <p v-else-if="failed" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />无法加载该专辑。
+    </p>
 
     <template v-else-if="detail">
       <header class="head">
-        <MediaPoster class="cover" :src="detail.poster" :title="detail.title" />
+        <div class="cover">
+          <MediaPoster :src="detail.poster" :title="detail.title" ratio="square" icon="album" />
+        </div>
         <div class="meta">
+          <span class="type-chip"><BaseIcon name="album" :size="12" />专辑</span>
           <h1>{{ detail.title }}</h1>
-          <p class="sub">
-            {{ detail.tracks.length }} 首<span v-if="detail.year"> · {{ detail.year }}</span>
+          <p class="c-meta">
+            {{ detail.tracks.length }} 首<template v-if="detail.year">
+              · {{ detail.year }}</template
+            >
           </p>
+          <button
+            v-if="detail.tracks.length"
+            class="du-btn du-btn-primary play-all"
+            type="button"
+            @click="playFrom(0)"
+          >
+            <BaseIcon name="play" :size="16" fill />播放全部
+          </button>
         </div>
       </header>
 
-      <p v-if="!detail.tracks.length" class="hint">暂无曲目。</p>
+      <BaseEmptyState v-if="!detail.tracks.length" compact icon="music" title="暂无曲目" />
       <ol v-else class="tracks">
         <li
           v-for="(track, i) in detail.tracks"
           :key="track.id"
           class="track"
           :class="{ playing: track.id === playingId }"
+          role="button"
+          tabindex="0"
           @click="playFrom(i)"
+          @keydown.enter.prevent="playFrom(i)"
         >
-          <span class="idx">{{ track.id === playingId ? "♪" : i + 1 }}</span>
+          <span class="idx">
+            <BaseIcon v-if="track.id === playingId" name="audio" :size="15" />
+            <template v-else>{{ i + 1 }}</template>
+          </span>
+          <BaseIcon name="play" :size="13" fill class="hover-play" />
           <span class="title">{{ track.title }}</span>
           <span class="dur">{{ formatDuration(track.duration) }}</span>
         </li>
@@ -84,93 +108,143 @@ const playingId = computed(() => player.current?.id);
 
 <style scoped lang="scss">
 .album-detail {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-6)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
-}
-
-.hint {
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-md);
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .head {
   display: flex;
-  gap: var(--fbz-space-5);
   align-items: flex-end;
-  margin-bottom: var(--fbz-space-6);
+  gap: 24px;
+}
 
-  .cover {
-    width: 200px;
-    flex: none;
-  }
+.cover {
+  flex: 0 0 auto;
+  width: 200px;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  box-shadow: var(--ui-shadow-float);
+}
 
-  .meta {
-    h1 {
-      margin: 0 0 var(--fbz-space-2);
-      font-size: var(--fbz-font-size-xl);
-      font-weight: 800;
-    }
+.meta {
+  min-width: 0;
 
-    .sub {
-      margin: 0;
-      color: var(--fbz-color-text-muted);
-      font-size: var(--fbz-font-size-md);
-    }
+  h1 {
+    margin: 8px 0 4px;
+    color: var(--ui-text);
+    font-size: clamp(24px, 3vw, 36px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
 }
 
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 5px;
+  color: var(--ui-text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.play-all {
+  height: 38px;
+  margin-top: 14px;
+  border-radius: var(--ui-radius-md);
+}
+
 .tracks {
-  list-style: none;
   margin: 0;
   padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-surface);
+  list-style: none;
 }
 
 .track {
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-4);
-  padding: var(--fbz-space-3) var(--fbz-space-3);
-  border-bottom: 1px solid var(--fbz-color-line-soft);
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--ui-border);
   cursor: pointer;
-  transition: background var(--fbz-motion-fast);
+  outline: none;
 
-  &:hover {
-    background: var(--fbz-color-panel);
+  &:last-child {
+    border-bottom: 0;
   }
 
-  &.playing {
-    .idx,
-    .title {
-      color: var(--fbz-color-brand-500);
+  &:hover,
+  &:focus-visible {
+    background: var(--ui-surface-hover);
+
+    .idx {
+      display: none;
+    }
+
+    .hover-play {
+      display: inline-block;
     }
   }
 
-  .idx {
-    width: 2ch;
-    text-align: right;
-    color: var(--fbz-color-text-muted);
-    font-variant-numeric: tabular-nums;
-  }
+  &.playing {
+    background: rgb(var(--ui-accent-channel) / 8%);
 
-  .title {
-    flex: 1;
-    font-size: var(--fbz-font-size-md);
-  }
-
-  .dur {
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
-    font-variant-numeric: tabular-nums;
+    .idx,
+    .title {
+      color: var(--ui-accent-hover);
+    }
   }
 }
 
+.idx {
+  width: 22px;
+  display: inline-flex;
+  justify-content: flex-end;
+  color: var(--ui-text-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: 12px;
+}
+
+.hover-play {
+  display: none;
+  width: 22px;
+  color: var(--ui-accent);
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 13.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dur {
+  color: var(--ui-text-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: 12px;
+}
+
 @media (max-width: 600px) {
-  .album-detail {
-    padding: calc(var(--header-h, 56px) + var(--fbz-space-4)) var(--fbz-space-4) 60px;
+  .head {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
-  .head .cover {
-    width: 120px;
+  .cover {
+    width: 150px;
   }
 }
 </style>

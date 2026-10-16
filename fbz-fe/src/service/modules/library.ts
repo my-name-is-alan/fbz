@@ -9,6 +9,7 @@
  */
 import { embyRequest, mediaImageUrl } from "@/service/request.ts";
 import type { MediaItem } from "@/types/media.ts";
+import { itemTypeMeta } from "@/utils/itemType.ts";
 
 /**
  * 后端 `BaseItemDto` 的关键子集（仅取列表网格需要的字段）。
@@ -25,6 +26,10 @@ interface BaseItemDto {
   RunTimeTicks?: number | null;
   /** 题材列表；取首个供客户端筛选展示。 */
   Genres?: string[] | null;
+  /** 集号 / 季号（Episode / Season）。 */
+  IndexNumber?: number | null;
+  ParentIndexNumber?: number | null;
+  ParentId?: string | null;
   /** 图片标签表，含 Primary 时表示该条目有主海报。 */
   ImageTags?: Record<string, string> | null;
   UserData?: {
@@ -119,7 +124,7 @@ export function toMediaItem(dto: BaseItemDto, libraryId: string): MediaItem {
     !played && position > 0 && runtime > 0
       ? Math.min(100, Math.max(0, (position / runtime) * 100))
       : undefined;
-  const typeLabel = detailType === "tv" ? "剧集" : detailType === "collection" ? "合集" : "电影";
+  const typeLabel = itemTypeMeta(dto.Type).label;
   return {
     id: dto.Id,
     libraryId: detailType === "collection" ? "collection" : libraryId,
@@ -133,6 +138,9 @@ export function toMediaItem(dto: BaseItemDto, libraryId: string): MediaItem {
     isFavorite: dto.UserData?.IsFavorite ?? false,
     isPlayed: played,
     progress,
+    itemType: dto.Type,
+    seasonNumber: dto.ParentIndexNumber ?? undefined,
+    episodeNumber: dto.IndexNumber ?? undefined,
   };
 }
 
@@ -188,6 +196,7 @@ export async function fetchLibraryItems(query: LibraryItemsQuery): Promise<Libra
 export async function fetchLibraryCover(
   userId: string,
   libraryId: string,
+  itemTypes?: string,
 ): Promise<string | undefined> {
   const result = await fetchLibraryItems({
     userId,
@@ -196,7 +205,7 @@ export async function fetchLibraryCover(
     limit: 1,
     sortBy: "DateCreated",
     sortOrder: "Descending",
-    includeItemTypes: "Movie,Series,MusicAlbum",
+    includeItemTypes: itemTypes ?? "Movie,Series,MusicAlbum,Video,Book",
   });
   return result.items[0]?.poster;
 }
@@ -208,12 +217,13 @@ export async function fetchLibraryCover(
 export async function fetchLibraryFilters(
   userId: string,
   libraryId?: string,
+  includeItemTypes = "Movie,Series",
 ): Promise<LibraryFiltersResult> {
   const { data } = await embyRequest.get<ItemsFiltersDto>("/Items/Filters", {
     params: {
       userId,
       parentId: libraryId || undefined,
-      includeItemTypes: "Movie,Series",
+      includeItemTypes,
     },
   });
   return {

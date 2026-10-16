@@ -1,43 +1,16 @@
 import type { MediaKind, MediaLibrary } from "@/types/media.ts";
 import { fetchNavigation } from "@/service/modules/navigation.ts";
 import type { LibrarySettings } from "@/types/admin.ts";
+import { kindForLibraryType, normalizeLibraryType } from "@/utils/libraryType.ts";
 
 /**
- * 后端 kind（导航 BFF 已做 library_type → 展示类型的 best-effort 映射）→ 前端 MediaKind。
- * BFF 给的是 movie/series/music/mixed/livetv；前端的 anime/documentary 是用户语义，
- * 后端无法区分，故归入最接近的 movie/series，待展示层扩展。
+ * 库类型以后端 `collectionType` / `libraryType` 为事实源（Emby CollectionType 词汇）；
+ * `kind` 只是展示分组，由 utils/libraryType.ts 一处映射——homevideos / mixed / livetv
+ * 不再并进 movie / series。BFF 的 best-effort `kind` 仅在 collectionType 缺失时兜底。
  */
-function kindFromBackendKind(kind: string): MediaKind {
-  switch (kind) {
-    case "series":
-    case "livetv":
-      return "series";
-    case "music":
-      return "music";
-    case "books":
-      return "book";
-    case "movie":
-    case "mixed":
-    default:
-      return "movie";
-  }
-}
-
-function kindFromLibraryType(libraryType: string): MediaKind {
-  switch (libraryType) {
-    case "tvshows":
-    case "livetv":
-      return "series";
-    case "music":
-      return "music";
-    case "books":
-      return "book";
-    case "movies":
-    case "homevideos":
-    case "mixed":
-    default:
-      return "movie";
-  }
+function kindFromBackend(collectionType: string, backendKind: string): MediaKind {
+  if (normalizeLibraryType(collectionType)) return kindForLibraryType(collectionType);
+  return kindForLibraryType(backendKind);
 }
 
 /**
@@ -66,9 +39,9 @@ export const useLibraryStore = defineStore("library", () => {
       libraries.value = nav.libraries.map((lib) => ({
         id: lib.id,
         name: lib.name,
-        kind: kindFromBackendKind(lib.kind),
+        kind: kindFromBackend(lib.collectionType, lib.kind),
         count: lib.count,
-        libraryType: lib.collectionType,
+        libraryType: normalizeLibraryType(lib.collectionType) ?? lib.collectionType,
       }));
       loaded.value = true;
       return true;
@@ -85,7 +58,7 @@ export const useLibraryStore = defineStore("library", () => {
     libraries.value = settings.map((lib) => ({
       id: lib.id,
       name: lib.name,
-      kind: kindFromLibraryType(lib.libraryType),
+      kind: kindForLibraryType(lib.libraryType),
       count: getById(lib.id)?.count ?? 0,
       libraryType: lib.libraryType,
       metadataLanguage: lib.preferredMetadataLanguage ?? undefined,

@@ -1,47 +1,178 @@
 <script setup lang="ts">
 import type { DetailViewModel, EpisodeSummary } from "@/service/modules/detail.ts";
-import { fetchEpisodes, fetchPlaybackSource, loadTvDetail } from "@/service/modules/detail.ts";
-import { searchRemoteSubtitles } from "@/service/modules/metadata.ts";
-import { setFavorite } from "@/service/modules/userData.ts";
+import type { MediaSourceInfo } from "@/service/modules/mediaInfo.ts";
+import {
+  fetchEpisodes,
+  fetchMediaSources,
+  fetchPlaybackSource,
+  fetchSeriesContext,
+  loadTvDetail,
+} from "@/service/modules/detail.ts";
+import { useDetailActions } from "@/composables/useDetailActions.ts";
 import { useAuthStore } from "@/stores/auth.ts";
 import type { PlaybackEpisode } from "@/stores/playback.ts";
 import { usePlaybackStore } from "@/stores/playback.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import { episodeCode, itemTypeMeta } from "@/utils/itemType.ts";
 
-/** SeasonEpisodes 抛出的播放载荷：命中集 + 同季全集。 */
+/**
+ * 剧集层级：Series → Season → Episode（ParentIndexNumber / IndexNumber / SeriesName）。
+ * - Series：季 / 集导航 + 续看定位
+ * - Season：转到所属剧集（季集导航内定位该季）
+ * - Episode：单集详情（SxxExx、剧集面包屑、媒体信息、同季播放列表）
+ */
 interface EpisodePlayPayload {
   episode: EpisodeSummary;
   episodes: EpisodeSummary[];
 }
 
 const route = useRoute();
+const router = useRouter();
 const playback = usePlaybackStore();
 const uiStore = useUiStore();
 const authStore = useAuthStore();
 const routeId = computed(() => String(route.params.id));
 
 const detail = ref<DetailViewModel>();
-const togglingFavorite = shallowRef(false);
+const loading = ref(true);
 const resolvingPlay = shallowRef(false);
+const versionId = ref("");
+const subtitleOpen = ref(false);
+const series = ref<{ seriesId?: string; seriesName?: string }>({});
+
+/** 分集媒体信息弹窗。 */
+const infoOpen = ref(false);
+const infoTitle = ref("");
+const infoSources = ref<MediaSourceInfo[]>([]);
+const infoActiveId = ref("");
+const infoLoading = ref(false);
+
+const { toggleFavorite, togglePlayed, openMore, editMetadata } = useDetailActions(
+  detail,
+  "/library",
+);
+
+const isEpisode = computed(() => detail.value?.itemType === "Episode");
+const typeMeta = computed(() => itemTypeMeta(detail.value?.itemType));
+const seriesId = computed(() => (isEpisode.value ? series.value.seriesId : detail.value?.id));
+const showTitle = computed(() =>
+  isEpisode.value ? (series.value.seriesName ?? "") : (detail.value?.title ?? ""),
+);
+const epCode = computed(() =>
+  isEpisode.value ? episodeCode(detail.value?.seasonNumber, detail.value?.episodeNumber) : "",
+);
 
 watch(
   routeId,
-  async (v) => {
-    detail.value = await loadTvDetail(v);
+  async (id) => {
+    loading.value = true;
+    series.value = {};
+    const loaded = await loadTvDetail(id);
+    if (routeId.value !== id) return;
+    if (loaded?.itemType === "Season" && loaded.parentId) {
+      await router.replace({ path: `/tv/${loaded.parentId}`, query: { season: loaded.id } });
+      return;
+    }
+    detail.value = loaded;
+    loading.value = false;
+    if (loaded?.itemType === "Episode") {
+      const ctx = await fetchSeriesContext(loaded.id);
+      if (routeId.value === id) series.value = ctx;
+    }
   },
   { immediate: true },
 );
 
+const crumbs = computed(() => {
+  if (!isEpisode.value || !series.value.seriesId) return [];
+  return [
+    { label: series.value.seriesName ?? "剧集", to: `/tv/${series.value.seriesId}`, icon: "tv" },
+  ];
+});
+
+/** 分集标题：「剧名 SxxExx」。 */
+function episodeLabel(episode: EpisodeSummary, index: number): string {
+  const code = episodeCode(episode.seasonNumber, episode.episodeNumber ?? index + 1);
+  return `${showTitle.value} ${code}`.trim();
+}
+
+function toPlaybackPlaylist(episodes: EpisodeSummary[]): PlaybackEpisode[] {
+  return episodes.map((episode, index) => ({
+    id: episode.id,
+    seasonNumber: episode.seasonNumber ?? 0,
+    episodeNumber: episode.episodeNumber ?? index + 1,
+    title: episodeLabel(episode, index),
+    subtitle: episode.name,
+    duration: episode.runtimeSeconds ?? 0,
+    poster: episode.poster,
+  }));
+}
+
+/** 播放某一集：取真实流地址后连同同季播放列表一并打开播放器（带续播位置）。 */
+async function playEpisode({ episode, episodes }: EpisodePlayPayload, fromStart = false) {
+  const tv = detail.value;
+  if (!tv) return;
+  const playlist = toPlaybackPlaylist(episodes);
+  const index = episodes.findIndex((entry) => entry.id === episode.id);
+  const source = await fetchPlaybackSource(episode.id);
+  if (!source) {
+    uiStore.showToast("该分集暂无可播放媒体源。", "warning");
+    return;
+  }
+  const startPositionSeconds =
+    !fromStart && !episode.played && episode.progressPercent && episode.runtimeSeconds
+      ? Math.floor((episode.progressPercent / 100) * episode.runtimeSeconds)
+      : 0;
+  playback.open({
+    type: "episode",
+    id: episode.id,
+    title: episodeLabel(episode, index < 0 ? 0 : index),
+    subtitle: episode.name,
+    poster: episode.poster ?? tv.poster,
+    backdrop: tv.backdrop,
+    tags: source.mediaInfo ? undefined : tv.versions[0]?.tags,
+    duration: source.duration ?? episode.runtimeSeconds,
+    startPositionSeconds,
+    playlist,
+    source,
+    server: source.server,
+    mediaSources: source.mediaSources,
+    chapters: source.chapters,
+    subtitleTracks: source.subtitleTracks,
+    mediaInfo: source.mediaInfo,
+  });
+}
+
 /**
- * 剧集主播放键：解析「继续观看」目标集（有进度且未看完的最靠后一集 →
- * 第一个未看完集 → 第一集）后直接播放，避免打开没有流的空播放器。
+ * 主播放键。Series：解析「继续观看」目标集（有进度且未看完的最靠后一集 → 第一个未看完 →
+ * 第一集）。Episode：播放本集（同季为播放列表）。
  */
-async function playTv() {
+async function playMain(fromStart = false) {
   const tv = detail.value;
   if (!tv || resolvingPlay.value) return;
-
   resolvingPlay.value = true;
   try {
+    if (isEpisode.value) {
+      const sid = series.value.seriesId;
+      const seasonEpisodes = sid ? await fetchEpisodes(sid, tv.parentId) : [];
+      const self: EpisodeSummary = seasonEpisodes.find((e) => e.id === tv.id) ?? {
+        id: tv.id,
+        episodeNumber: tv.episodeNumber ?? null,
+        seasonNumber: tv.seasonNumber ?? null,
+        name: tv.title,
+        runtimeSeconds: tv.runtimeSeconds,
+        played: tv.played,
+        progressPercent:
+          tv.resumePositionSeconds && tv.runtimeSeconds
+            ? (tv.resumePositionSeconds / tv.runtimeSeconds) * 100
+            : undefined,
+      };
+      await playEpisode(
+        { episode: self, episodes: seasonEpisodes.length ? seasonEpisodes : [self] },
+        fromStart,
+      );
+      return;
+    }
     const episodes = await fetchEpisodes(tv.id);
     if (!episodes.length) {
       uiStore.showToast("该剧集还没有可播放的分集。", "warning");
@@ -59,237 +190,193 @@ async function playTv() {
   }
 }
 
-/** 收藏切换：乐观更新，失败回滚并提示。 */
-async function toggleFavorite() {
-  const tv = detail.value;
-  const userId = authStore.userId;
-  if (!tv || !userId || togglingFavorite.value) return;
-
-  const next = !tv.isFavorite;
-  togglingFavorite.value = true;
-  detail.value = { ...tv, isFavorite: next };
+async function showEpisodeInfo(episode: EpisodeSummary) {
+  infoOpen.value = true;
+  infoTitle.value = `${episodeCode(episode.seasonNumber, episode.episodeNumber)} · ${episode.name}`;
+  infoSources.value = [];
+  infoLoading.value = true;
   try {
-    await setFavorite(userId, tv.id, next);
-  } catch {
-    detail.value = { ...tv, isFavorite: !next };
-    uiStore.showToast("更新收藏状态失败。", "error");
+    infoSources.value = await fetchMediaSources(episode.id);
+    infoActiveId.value = infoSources.value[0]?.id ?? "";
   } finally {
-    togglingFavorite.value = false;
+    infoLoading.value = false;
   }
 }
 
-const searchingSubs = shallowRef(false);
-
-async function searchExternalSubtitles() {
-  const series = detail.value;
-  if (!series || searchingSubs.value) return;
-  searchingSubs.value = true;
-  try {
-    const results = await searchRemoteSubtitles(series.id, "chi");
-    if (!results.length) {
-      uiStore.showToast("暂无可用的外挂字幕源（服务端未配置字幕 provider）。", "info");
-      return;
-    }
-    uiStore.showToast(`找到 ${results.length} 条外挂字幕候选。`, "success");
-  } catch {
-    uiStore.showToast("搜索外挂字幕失败，请稍后重试。", "error");
-  } finally {
-    searchingSubs.value = false;
-  }
-}
-
-/** 打开元数据管理弹层：用详情视图模型拼一个最小 MediaItem 传入。 */
-function editMetadata() {
+async function reloadSources() {
   const tv = detail.value;
   if (!tv) return;
-  const yearSeg = tv.meta.find((m) => /^\d{4}$/.test(m));
-  uiStore.openMetadataManager({
-    id: tv.id,
-    libraryId: "series",
-    detailType: "tv",
-    title: tv.title,
-    meta: tv.meta.join(" · "),
-    poster: tv.poster,
-    year: yearSeg ? Number(yearSeg) : undefined,
-    rating: tv.rating ?? undefined,
-    isFavorite: tv.isFavorite,
-  });
+  const fresh = await loadTvDetail(tv.id);
+  if (fresh && detail.value?.id === fresh.id) detail.value = fresh;
 }
 
-/** 同季分集 → 播放列表（id 用真实集 public_id，供 store 切集时重取流地址）。 */
-function toPlaybackPlaylist(episodes: EpisodeSummary[]): PlaybackEpisode[] {
-  return episodes.map((episode, index) => ({
-    id: episode.id,
-    seasonNumber: episode.seasonNumber ?? 0,
-    episodeNumber: episode.episodeNumber ?? index + 1,
-    title: episodeLabel(episode, index),
-    subtitle: episode.name,
-    duration: episode.runtimeSeconds ?? 0,
-    poster: episode.poster,
-  }));
-}
+const activeSource = computed(
+  () =>
+    detail.value?.mediaSources.find((s) => s.id === versionId.value) ??
+    detail.value?.mediaSources[0],
+);
 
-/** 分集标题：优先真实季/集号，缺省用顺序兜底。 */
-function episodeLabel(episode: EpisodeSummary, index: number): string {
-  const seasonNo = episode.seasonNumber;
-  const episodeNo = episode.episodeNumber ?? index + 1;
-  const prefix = seasonNo != null ? `S${seasonNo} ` : "";
-  return `${detail.value?.title ?? ""} ${prefix}E${episodeNo}`.trim();
-}
+const heroMeta = computed(() => {
+  const d = detail.value;
+  if (!d) return [];
+  return epCode.value ? [epCode.value, ...d.meta] : d.meta;
+});
 
-/** 播放某一集：取真实流地址后连同同季播放列表一并打开播放器（带续播位置）。 */
-async function playEpisode({ episode, episodes }: EpisodePlayPayload) {
-  const tv = detail.value;
-  if (!tv) return;
-
-  const playlist = toPlaybackPlaylist(episodes);
-  const index = episodes.findIndex((entry) => entry.id === episode.id);
-  const source = await fetchPlaybackSource(episode.id);
-  // 分集续播：有进度且未看完时从上次位置继续。
-  const startPositionSeconds =
-    !episode.played && episode.progressPercent && episode.runtimeSeconds
-      ? Math.floor((episode.progressPercent / 100) * episode.runtimeSeconds)
-      : undefined;
-
-  playback.open({
-    type: "episode",
-    id: episode.id,
-    title: episodeLabel(episode, index < 0 ? 0 : index),
-    subtitle: episode.name,
-    poster: episode.poster ?? tv.poster,
-    backdrop: tv.backdrop,
-    tags: tv.versions[0]?.tags,
-    duration: source?.duration ?? episode.runtimeSeconds,
-    startPositionSeconds: startPositionSeconds ?? 0,
-    playlist,
-    source: source ?? undefined,
-    server: source?.server,
-    mediaSources: source?.mediaSources,
-    chapters: source?.chapters,
-  });
-}
+const facts = computed(() => {
+  const d = detail.value;
+  if (!d) return [];
+  return [
+    { label: isEpisode.value ? "导演" : "主创", value: d.creators },
+    { label: "编剧", value: d.writers },
+    { label: "原名", value: d.originalTitle !== d.title ? d.originalTitle : undefined },
+    { label: "分级", value: d.officialRating },
+    { label: "首播", value: d.premiereDate },
+  ].filter((f) => f.value);
+});
 </script>
 
 <template>
-  <main v-if="detail" class="detail-view">
-    <PageHeader :title="detail.title" fallback="/library/series" />
-
+  <main v-if="detail" class="c-page detail-page">
     <DetailHero
+      v-model:version-id="versionId"
       :title="detail.title"
+      :original-title="detail.originalTitle"
       :poster="detail.poster"
       :backdrop="detail.backdrop"
-      :meta="detail.meta"
+      :poster-ratio="isEpisode ? 'wide' : 'poster'"
+      :meta="heroMeta"
       :genres="detail.genres"
       :official-rating="detail.officialRating"
       :overview="detail.overview"
       :rating="detail.rating"
+      :type-label="
+        isEpisode && series.seriesName ? `${series.seriesName} · ${typeMeta.label}` : typeMeta.label
+      "
+      :type-icon="typeMeta.icon"
+      :versions="detail.versions"
       :is-favorite="detail.isFavorite"
-      @play="playTv"
+      :played="detail.played"
+      :resume-position-seconds="isEpisode ? detail.resumePositionSeconds : undefined"
+      :busy="resolvingPlay"
+      show-played-toggle
+      show-more
+      @play="() => playMain(isEpisode)"
+      @resume="() => playMain(false)"
       @toggle-favorite="toggleFavorite"
+      @toggle-played="togglePlayed"
+      @more="openMore"
     >
-      <template #extra>
+      <template #header>
+        <PageHeader :title="detail.title" :crumbs="crumbs" fallback="/library" />
+      </template>
+      <template #actions>
+        <button type="button" class="du-btn act" @click="subtitleOpen = true">
+          <BaseIcon name="subtitles" :size="16" />外挂字幕
+        </button>
+        <button v-if="authStore.isAdmin" type="button" class="du-btn act" @click="editMetadata">
+          <BaseIcon name="edit" :size="15" />编辑元数据
+        </button>
+      </template>
+      <template v-if="facts.length" #facts>
         <dl class="facts">
-          <div v-if="detail.creators" class="fact">
-            <dt>主创</dt>
-            <dd>{{ detail.creators }}</dd>
-          </div>
-          <div v-if="detail.originalTitle" class="fact">
-            <dt>原名</dt>
-            <dd>{{ detail.originalTitle }}</dd>
+          <div v-for="fact in facts" :key="fact.label" class="fact">
+            <dt>{{ fact.label }}</dt>
+            <dd>{{ fact.value }}</dd>
           </div>
         </dl>
-        <div class="hero-extra-actions">
-          <button type="button" class="edit-meta-btn" @click="searchExternalSubtitles">
-            {{ searchingSubs ? "搜索字幕中…" : "外挂字幕" }}
-          </button>
-          <button type="button" class="edit-meta-btn" @click="editMetadata">编辑元数据</button>
-        </div>
       </template>
     </DetailHero>
 
-    <SeasonEpisodes
-      :series-id="detail.id"
-      :show-title="detail.title"
-      :backdrop="detail.backdrop"
-      @play-episode="playEpisode"
+    <MediaInfoPanel
+      v-if="isEpisode && detail.mediaSources.length"
+      v-model:active-id="versionId"
+      :sources="detail.mediaSources"
+      :chapter-count="detail.chapterCount"
     />
 
-    <CastRow :cast="detail.cast" />
+    <SeasonEpisodes
+      v-if="seriesId"
+      :series-id="seriesId"
+      :show-title="showTitle"
+      :backdrop="detail.backdrop"
+      :initial-season-id="isEpisode ? detail.parentId : (route.query.season as string | undefined)"
+      :current-episode-id="isEpisode ? detail.id : undefined"
+      @play-episode="playEpisode"
+      @show-info="showEpisodeInfo"
+    />
+
+    <CastRow :cast="detail.cast" :title="isEpisode ? '本集演职人员' : '演职人员'" />
     <SimilarRow :items="detail.similar" />
+
+    <RemoteSubtitleModal
+      :open="subtitleOpen"
+      :item-id="detail.id"
+      :title="detail.title"
+      :media-source-id="activeSource?.id"
+      :existing="activeSource?.subtitles"
+      @close="subtitleOpen = false"
+      @downloaded="reloadSources"
+    />
+
+    <BaseModal
+      :open="infoOpen"
+      title="媒体信息"
+      :description="infoTitle"
+      wide
+      @close="infoOpen = false"
+    >
+      <p v-if="infoLoading" class="c-state">
+        <BaseIcon name="loading" :size="15" class="c-spin" />读取 PlaybackInfo…
+      </p>
+      <MediaInfoPanel
+        v-else-if="infoSources.length"
+        v-model:active-id="infoActiveId"
+        :sources="infoSources"
+        compact
+      />
+      <p v-else class="c-state"><BaseIcon name="info" :size="15" />该分集没有可用的媒体源信息。</p>
+    </BaseModal>
   </main>
 
-  <main v-else class="detail-missing">
-    <p>未找到该剧集</p>
-    <RouterLink to="/" class="link">返回首页</RouterLink>
+  <main v-else-if="loading" class="c-page">
+    <p class="c-state"><BaseIcon name="loading" :size="16" class="c-spin" />正在加载剧集…</p>
+  </main>
+
+  <main v-else class="c-page">
+    <BaseEmptyState
+      icon="search-x"
+      title="未找到该剧集"
+      description="条目可能已被删除，或当前账号没有访问该媒体库的权限。"
+    >
+      <RouterLink to="/" class="du-btn du-btn-ghost"
+        ><BaseIcon name="home" :size="15" />返回首页</RouterLink
+      >
+    </BaseEmptyState>
   </main>
 </template>
 
 <style scoped lang="scss">
 .facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 32px;
+  max-width: 880px;
   margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--fbz-space-2);
 }
 
 .fact {
   display: flex;
-  gap: var(--fbz-space-3);
-  font-size: var(--fbz-font-size-md);
+  gap: 12px;
+  font-size: 13px;
 
   dt {
-    flex: 0 0 64px;
-    color: var(--fbz-color-text-muted);
+    flex: 0 0 48px;
+    color: var(--ui-text-subtle);
   }
 
   dd {
     margin: 0;
-    color: var(--fbz-color-text-soft);
+    color: var(--ui-text);
   }
-}
-
-.link {
-  color: var(--fbz-color-brand-500);
-  text-decoration: none;
-
-  &:hover {
-    text-decoration: underline;
-  }
-}
-
-.hero-extra-actions {
-  margin-top: var(--fbz-space-3);
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--fbz-space-2);
-}
-
-.edit-meta-btn {
-  margin-top: var(--fbz-space-3);
-  height: 34px;
-  padding: 0 16px;
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid var(--fbz-color-line);
-  background: var(--fbz-color-panel-strong);
-  color: var(--fbz-color-text-soft);
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 700;
-  cursor: pointer;
-  transition: all var(--fbz-motion-fast);
-
-  &:hover {
-    border-color: var(--fbz-color-brand-500);
-    color: var(--fbz-color-brand-500);
-    background: color-mix(in srgb, var(--fbz-color-brand-500) 6%, transparent);
-  }
-}
-
-.detail-missing {
-  min-height: 100vh;
-  display: grid;
-  place-content: center;
-  gap: var(--fbz-space-3);
-  text-align: center;
-  color: var(--fbz-color-text-muted);
 }
 </style>

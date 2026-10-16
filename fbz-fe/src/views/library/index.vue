@@ -4,6 +4,7 @@ import { useUiStore } from "@/stores/ui.ts";
 import { useAuthStore } from "@/stores/auth.ts";
 import { fetchLibraryCover } from "@/service/modules/library.ts";
 import { libraryRoute } from "@/utils/libraryRoute.ts";
+import { LIBRARY_TYPES, libraryTypeMeta, normalizeLibraryType } from "@/utils/libraryType.ts";
 import type { MediaLibrary } from "@/types/media.ts";
 
 const libraryStore = useLibraryStore();
@@ -11,8 +12,8 @@ const uiStore = useUiStore();
 const authStore = useAuthStore();
 const { libraries, totalCount, loading, error } = storeToRefs(libraryStore);
 
-const fmt = new Intl.NumberFormat("en-US");
-/** 库 id → 封面 URL（有 ImageTags 才写入；失败保持空，继续文字占位）。 */
+const fmt = new Intl.NumberFormat("zh-CN");
+/** 库 id → 封面 URL（有 ImageTags 才写入；失败保持空，继续图标占位）。 */
 const covers = ref<Record<string, string>>({});
 let coverGeneration = 0;
 
@@ -25,7 +26,13 @@ async function enrichCovers(libs: MediaLibrary[]) {
     libs.map(async (lib) => {
       if (next[lib.id]) return;
       try {
-        const cover = await fetchLibraryCover(userId, lib.id);
+        const cover = await fetchLibraryCover(
+          userId,
+          lib.id,
+          normalizeLibraryType(lib.libraryType)
+            ? libraryTypeMeta(lib.libraryType).itemTypes
+            : undefined,
+        );
         if (cover) next[lib.id] = cover;
       } catch {
         // 单库封面失败不影响总览。
@@ -40,13 +47,23 @@ onMounted(() => {
   if (!libraryStore.loaded) void libraryStore.loadFromBackend();
 });
 
-watch(
-  libraries,
-  (libs) => {
-    void enrichCovers(libs);
-  },
-  { immediate: true },
-);
+watch(libraries, (libs) => void enrichCovers(libs), { immediate: true });
+
+/** 库类型分布（顶部摘要；库本身保持服务端 / 后台「库排序」给出的顺序，不按类型重排）。 */
+const typeSummary = computed(() => {
+  const counts = new Map<string, number>();
+  for (const lib of libraries.value) {
+    const key = normalizeLibraryType(lib.libraryType) ?? "other";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...LIBRARY_TYPES, "other" as const]
+    .filter((key) => counts.has(key))
+    .map((key) => ({
+      key,
+      meta: key === "other" ? libraryTypeMeta(undefined) : libraryTypeMeta(key),
+      count: counts.get(key)!,
+    }));
+});
 
 function onLibraryContextMenu(e: MouseEvent, lib: MediaLibrary) {
   if (!authStore.isAdmin) return;
@@ -59,193 +76,247 @@ function coverOf(lib: MediaLibrary): string | undefined {
 </script>
 
 <template>
-  <main class="library-overview">
+  <main class="c-page library-overview">
     <header class="page-head">
-      <h1>媒体库</h1>
-      <p class="sub">{{ libraries.length }} 个库 · 共 {{ fmt.format(totalCount) }} 个条目</p>
+      <div>
+        <h1 class="c-page-title">媒体库</h1>
+        <p class="c-meta">{{ libraries.length }} 个库 · 共 {{ fmt.format(totalCount) }} 个条目</p>
+      </div>
+      <div v-if="authStore.isAdmin" class="head-actions">
+        <button
+          class="du-btn du-btn-sm du-btn-ghost"
+          type="button"
+          @click="uiStore.openLibraryEditor(null)"
+        >
+          <BaseIcon name="plus" :size="15" />新建媒体库
+        </button>
+        <RouterLink class="du-btn du-btn-sm du-btn-ghost" to="/admin/libraries">
+          <BaseIcon name="settings" :size="15" />管理
+        </RouterLink>
+      </div>
     </header>
 
-    <p v-if="loading" class="state-text">正在从服务器加载媒体库...</p>
-    <p v-else-if="error" class="state-text is-error">{{ error }}</p>
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />正在加载媒体库…
+    </p>
+    <p v-else-if="error" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />{{ error }}
+    </p>
     <BaseEmptyState
       v-else-if="!libraries.length"
-      icon="📚"
+      icon="library-big"
       title="还没有创建媒体库"
       description="先创建一个媒体库，选择服务器上后端可访问的目录，保存后系统会自动扫描并预提取元数据。"
     >
-      <button class="empty-cta" type="button" @click="uiStore.openLibraryEditor(null)">
-        新建媒体库
+      <button
+        v-if="authStore.isAdmin"
+        class="du-btn du-btn-primary"
+        type="button"
+        @click="uiStore.openLibraryEditor(null)"
+      >
+        <BaseIcon name="plus" :size="16" />新建媒体库
       </button>
-      <RouterLink class="empty-cta secondary" to="/admin/libraries">媒体库管理</RouterLink>
     </BaseEmptyState>
 
-    <div v-else class="grid">
-      <RouterLink
-        v-for="(lib, i) in libraries"
-        :key="lib.id"
-        :to="libraryRoute(lib)"
-        class="lib-card"
-        @contextmenu.prevent="onLibraryContextMenu($event, lib)"
-      >
-        <div class="cover" :class="{ alt: i % 2 === 1, 'has-image': !!coverOf(lib) }">
-          <MediaPoster
-            v-if="coverOf(lib)"
-            :src="coverOf(lib)"
-            :title="lib.name"
-            ratio="wide"
-            :variant="(i % 2) as 0 | 1"
-          />
-          <span v-else class="cover-name">{{ lib.name }}</span>
-        </div>
-        <div class="info">
-          <span class="name">{{ lib.name }}</span>
-          <span class="count">{{ fmt.format(lib.count) }}</span>
-        </div>
-      </RouterLink>
-    </div>
+    <template v-else>
+      <div class="type-summary">
+        <span v-for="t in typeSummary" :key="t.key" class="ts-chip">
+          <BaseIcon :name="t.meta.icon" :size="13" />{{ t.meta.label }}<b>{{ t.count }}</b>
+        </span>
+      </div>
+      <div class="grid">
+        <RouterLink
+          v-for="(lib, i) in libraries"
+          :key="lib.id"
+          :to="libraryRoute(lib)"
+          class="lib-card"
+          @contextmenu.prevent="onLibraryContextMenu($event, lib)"
+        >
+          <div class="cover">
+            <MediaPoster
+              v-if="coverOf(lib)"
+              :src="coverOf(lib)"
+              :title="lib.name"
+              ratio="wide"
+              :variant="(i % 2) as 0 | 1"
+            />
+            <div v-else class="cover-ph">
+              <BaseIcon
+                :name="libraryTypeMeta(lib.libraryType).icon"
+                :size="34"
+                :stroke-width="1.3"
+              />
+            </div>
+            <span class="type-badge">
+              <BaseIcon
+                :name="libraryTypeMeta(lib.libraryType).icon"
+                :size="12"
+                :stroke-width="2"
+              />{{ libraryTypeMeta(lib.libraryType).label }}
+            </span>
+            <span v-if="lib.isHidden" class="hidden-badge" title="已隐藏">
+              <BaseIcon name="eye-off" :size="12" />
+            </span>
+          </div>
+          <div class="info">
+            <span class="name">{{ lib.name }}</span>
+            <span class="count">{{ fmt.format(lib.count) }}</span>
+          </div>
+        </RouterLink>
+      </div>
+    </template>
   </main>
 </template>
 
 <style scoped lang="scss">
 .library-overview {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-8)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
 }
 
 .page-head {
-  margin-bottom: var(--fbz-space-6);
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
 
-  h1 {
-    margin: 0 0 var(--fbz-space-2);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 800;
+  .c-meta {
+    margin: 4px 0 0;
   }
+}
 
-  .sub {
-    margin: 0;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-md);
+.head-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.type-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: -12px;
+}
+
+.ts-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface);
+  color: var(--ui-text-muted);
+  font-size: 12px;
+
+  b {
+    color: var(--ui-text);
+    font-weight: 600;
   }
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: var(--fbz-space-5);
-}
-
-.state-text {
-  margin: var(--fbz-space-8) 0 0;
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-md);
-
-  &.is-error {
-    color: var(--fbz-color-danger-500);
-  }
-}
-
-.empty-cta {
-  height: 38px;
-  padding: 0 18px;
-  border-radius: var(--fbz-radius-control);
-  border: 1px solid transparent;
-  background: var(--fbz-color-brand-500);
-  color: #04160b;
-  font-size: var(--fbz-font-size-md);
-  font-weight: 700;
-  text-decoration: none;
-  display: inline-flex;
-  align-items: center;
-  cursor: pointer;
-  transition:
-    background var(--fbz-motion-fast),
-    border-color var(--fbz-motion-fast);
-
-  &:hover {
-    background: color-mix(in srgb, var(--fbz-color-brand-500) 88%, white);
-  }
-
-  &.secondary {
-    background: transparent;
-    border-color: var(--fbz-color-line);
-    color: var(--fbz-color-text-soft);
-
-    &:hover {
-      border-color: var(--fbz-color-line-bright);
-      color: var(--fbz-color-text);
-    }
-  }
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
 }
 
 .lib-card {
-  text-decoration: none;
   color: inherit;
+  text-decoration: none;
+
+  &:hover .cover {
+    border-color: rgb(var(--ui-accent-channel) / 60%);
+    transform: translateY(-2px);
+  }
+
+  &:hover .name {
+    color: var(--ui-accent-hover);
+  }
 }
 
 .cover {
+  position: relative;
   aspect-ratio: 16 / 9;
-  border-radius: var(--fbz-radius-card);
-  border: 1px solid var(--fbz-color-line-soft);
-  background: var(--fbz-color-panel);
-  display: grid;
-  place-content: center;
   overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-raised);
   transition:
-    border-color var(--fbz-motion-fast),
-    transform var(--fbz-motion-fast);
-
-  &.alt {
-    background: var(--fbz-color-panel-strong);
-  }
-
-  &.has-image {
-    place-content: stretch;
-  }
+    border-color var(--ui-duration-fast),
+    transform var(--ui-duration-base) var(--ui-ease-out);
 
   :deep(.media-poster) {
-    width: 100%;
     height: 100%;
-    aspect-ratio: auto;
-    border-radius: 0;
-  }
-
-  .lib-card:hover & {
-    border-color: var(--fbz-color-brand-500);
-    transform: translateY(-3px);
   }
 }
 
-.cover-name {
-  font-size: var(--fbz-font-size-lg);
-  font-weight: 700;
-  color: var(--fbz-color-text-muted);
+.cover-ph {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ui-border-strong);
+  background:
+    radial-gradient(circle at 30% 20%, rgb(var(--ui-accent-channel) / 6%), transparent 60%),
+    var(--ui-surface-raised);
+}
+
+.type-badge,
+.hidden-badge {
+  position: absolute;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgb(0 0 0 / 62%);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  backdrop-filter: blur(6px);
+}
+
+.type-badge {
+  left: 8px;
+}
+
+.hidden-badge {
+  right: 8px;
 }
 
 .info {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-top: var(--fbz-space-3);
+  gap: 8px;
+  padding: 8px 2px 0;
 
   .name {
-    font-size: var(--fbz-font-size-md);
+    overflow: hidden;
+    color: var(--ui-text);
+    font-size: 13.5px;
     font-weight: 600;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    transition: color var(--ui-duration-fast);
   }
 
   .count {
-    font-size: var(--fbz-font-size-sm);
-    color: var(--fbz-color-text-muted);
+    flex: 0 0 auto;
+    color: var(--ui-text-subtle);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
   }
 }
 
 @media (max-width: 600px) {
-  .library-overview {
-    padding: calc(var(--header-h, 56px) + var(--fbz-space-5)) var(--fbz-space-4) 60px;
-  }
-
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: var(--fbz-space-4);
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
   }
 }
 </style>

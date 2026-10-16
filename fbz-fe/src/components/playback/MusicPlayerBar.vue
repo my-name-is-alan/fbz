@@ -150,7 +150,7 @@ const progress = computed(() => (duration.value > 0 ? currentTime.value / durati
 <template>
   <Teleport to="body">
     <Transition name="music-bar-slide">
-      <div v-if="current" class="music-bar" role="region" aria-label="音乐播放栏">
+      <div v-if="current" class="music-bar c-force-dark" role="region" aria-label="音乐播放栏">
         <audio
           ref="audioRef"
           @play="
@@ -167,46 +167,63 @@ const progress = computed(() => (duration.value > 0 ? currentTime.value / durati
         />
 
         <div class="now-playing">
-          <MediaPoster class="cover" :src="current.poster" :title="current.title" />
+          <div class="cover">
+            <MediaPoster :src="current.poster" :title="current.title" ratio="square" icon="music" />
+          </div>
           <div class="meta">
             <span class="title">{{ current.title }}</span>
             <span v-if="current.subtitle" class="subtitle">{{ current.subtitle }}</span>
           </div>
         </div>
 
-        <div class="controls">
-          <button
-            class="ctl"
-            :disabled="!hasPrevious"
-            aria-label="上一首"
-            @click="player.playPrevious"
-          >
-            ⏮
-          </button>
-          <button class="ctl play" :aria-label="isPlaying ? '暂停' : '播放'" @click="togglePlay">
-            {{ isPlaying ? "⏸" : "▶" }}
-          </button>
-          <button class="ctl" :disabled="!hasNext" aria-label="下一首" @click="player.playNext">
-            ⏭
-          </button>
+        <div class="center">
+          <div class="controls">
+            <button
+              class="ctl"
+              type="button"
+              :disabled="!hasPrevious"
+              aria-label="上一首"
+              @click="player.playPrevious"
+            >
+              <BaseIcon name="previous" :size="18" />
+            </button>
+            <button
+              class="ctl play"
+              type="button"
+              :aria-label="isPlaying ? '暂停' : '播放'"
+              @click="togglePlay"
+            >
+              <BaseIcon :name="isPlaying ? 'pause' : 'play'" :size="18" fill />
+            </button>
+            <button
+              class="ctl"
+              type="button"
+              :disabled="!hasNext"
+              aria-label="下一首"
+              @click="player.playNext"
+            >
+              <BaseIcon name="next" :size="18" />
+            </button>
+          </div>
+          <div class="progress">
+            <span class="time">{{ formatDuration(Math.floor(currentTime)) || "0:00" }}</span>
+            <input
+              class="bar"
+              type="range"
+              min="0"
+              :max="duration || 0"
+              :value="currentTime"
+              :style="{ '--progress': `${progress * 100}%` }"
+              aria-label="播放进度"
+              @input="onSeek"
+            />
+            <span class="time">{{ formatDuration(Math.floor(duration)) || "0:00" }}</span>
+          </div>
         </div>
 
-        <div class="progress">
-          <span class="time">{{ formatDuration(Math.floor(currentTime)) || "0:00" }}</span>
-          <input
-            class="bar"
-            type="range"
-            min="0"
-            :max="duration || 0"
-            :value="currentTime"
-            :style="{ '--progress': `${progress * 100}%` }"
-            aria-label="播放进度"
-            @input="onSeek"
-          />
-          <span class="time">{{ formatDuration(Math.floor(duration)) || "0:00" }}</span>
-        </div>
-
-        <button class="ctl close" aria-label="关闭播放栏" @click="closeBar">✕</button>
+        <button class="ctl close" type="button" aria-label="关闭播放栏" @click="closeBar">
+          <BaseIcon name="close" :size="16" />
+        </button>
       </div>
     </Transition>
   </Teleport>
@@ -215,160 +232,197 @@ const progress = computed(() => (duration.value > 0 ? currentTime.value / durati
 <style scoped lang="scss">
 .music-bar {
   position: fixed;
-  inset: auto 0 0 0;
-  z-index: 60;
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto minmax(200px, 2fr) auto;
+  left: 50%;
+  bottom: 16px;
+  z-index: 45;
+  width: min(960px, calc(100vw - 32px));
+  display: flex;
   align-items: center;
-  gap: var(--fbz-space-5);
-  padding: var(--fbz-space-3) var(--fbz-space-6);
-  background: var(--fbz-color-panel-strong);
-  border-top: 1px solid var(--fbz-color-line-soft);
+  gap: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-glass-strong);
+  box-shadow: var(--ui-shadow-dialog);
+  backdrop-filter: blur(20px);
+  transform: translateX(-50%);
 }
 
 .now-playing {
+  flex: 0 1 260px;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-3);
+  gap: 10px;
+}
+
+.cover {
+  flex: 0 0 auto;
+  width: 44px;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+}
+
+.meta {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 
-  .cover {
-    width: 44px;
-    flex: none;
+  .title,
+  .subtitle {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
-  .meta {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-
-    .title {
-      font-size: var(--fbz-font-size-sm);
-      font-weight: 600;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .subtitle {
-      font-size: var(--fbz-font-size-xs);
-      color: var(--fbz-color-text-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
+  .title {
+    color: var(--ui-text);
+    font-size: 13px;
+    font-weight: 600;
   }
+
+  .subtitle {
+    color: var(--ui-text-muted);
+    font-size: 11.5px;
+  }
+}
+
+.center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
 }
 
 .controls {
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-2);
+  gap: 6px;
 }
 
 .ctl {
+  width: 34px;
+  height: 34px;
   display: grid;
-  place-content: center;
-  width: 36px;
-  height: 36px;
-  border: none;
-  border-radius: 50%;
+  place-items: center;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
   background: transparent;
-  color: var(--fbz-color-text);
-  font-size: var(--fbz-font-size-md);
+  color: var(--ui-text);
   cursor: pointer;
-  transition:
-    background var(--fbz-motion-fast),
-    color var(--fbz-motion-fast);
 
   &:hover:not(:disabled) {
-    background: var(--fbz-color-panel);
+    background: var(--ui-surface-hover);
   }
 
   &:disabled {
-    color: var(--fbz-color-text-muted);
+    opacity: 0.35;
     cursor: default;
-    opacity: 0.4;
   }
 
   &.play {
-    background: var(--fbz-color-brand-500);
-    color: #0a0a0b;
+    width: 38px;
+    height: 38px;
+    padding-left: 2px;
+    border-radius: var(--ui-radius-md);
+    background: var(--ui-accent);
+    color: var(--ui-accent-contrast);
 
     &:hover {
-      background: var(--fbz-color-brand-500);
-      filter: brightness(1.1);
+      background: var(--ui-accent-hover);
     }
+  }
+
+  &.close {
+    flex: 0 0 auto;
+    color: var(--ui-text-muted);
   }
 }
 
 .progress {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-3);
+  gap: 10px;
+}
 
-  .time {
-    font-size: var(--fbz-font-size-xs);
-    color: var(--fbz-color-text-muted);
-    font-variant-numeric: tabular-nums;
-    min-width: 4ch;
-    text-align: center;
+.time {
+  flex: 0 0 auto;
+  min-width: 38px;
+  color: var(--ui-text-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.bar {
+  flex: 1;
+  height: 14px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+
+  &::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 99px;
+    background: linear-gradient(
+      90deg,
+      var(--ui-accent) 0 var(--progress, 0%),
+      rgb(255 255 255 / 16%) var(--progress, 0%) 100%
+    );
   }
 
-  .bar {
-    flex: 1;
+  &::-webkit-slider-thumb {
+    width: 12px;
+    height: 12px;
+    margin-top: -4px;
     appearance: none;
+    border-radius: 50%;
+    background: var(--ui-accent-hover);
+  }
+
+  &::-moz-range-track {
     height: 4px;
-    border-radius: 2px;
-    background: linear-gradient(
-      to right,
-      var(--fbz-color-brand-500) var(--progress, 0%),
-      var(--fbz-color-line-soft) var(--progress, 0%)
-    );
-    cursor: pointer;
+    border-radius: 99px;
+    background: rgb(255 255 255 / 16%);
+  }
 
-    &::-webkit-slider-thumb {
-      appearance: none;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: var(--fbz-color-brand-500);
-    }
-
-    &::-moz-range-thumb {
-      width: 12px;
-      height: 12px;
-      border: none;
-      border-radius: 50%;
-      background: var(--fbz-color-brand-500);
-    }
+  &::-moz-range-progress {
+    height: 4px;
+    border-radius: 99px;
+    background: var(--ui-accent);
   }
 }
 
 .music-bar-slide-enter-active,
 .music-bar-slide-leave-active {
-  transition: transform var(--fbz-motion-base);
+  transition:
+    transform var(--ui-duration-base) var(--ui-ease-out),
+    opacity var(--ui-duration-base);
 }
 
 .music-bar-slide-enter-from,
 .music-bar-slide-leave-to {
-  transform: translateY(100%);
+  opacity: 0;
+  transform: translate(-50%, 16px);
 }
 
 @media (max-width: 600px) {
   .music-bar {
-    grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto;
-    gap: var(--fbz-space-3);
-    padding: var(--fbz-space-3) var(--fbz-space-4);
+    bottom: 8px;
+    gap: 8px;
+    padding: 8px 10px;
   }
 
-  .progress {
-    grid-column: 1 / -1;
-    order: 3;
+  .now-playing {
+    flex-basis: 40%;
   }
 
-  .close {
+  .progress .time {
     display: none;
   }
 }

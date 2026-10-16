@@ -1,196 +1,247 @@
 <script setup lang="ts">
 import type { MediaVersion } from "@/types/media.ts";
+import { formatClock } from "@/service/modules/mediaInfo.ts";
 
 /**
- * 详情页头部 —— Emby 式 poster + fanart 布局。
- * fanart（剧照）铺满顶部作为背景，poster（海报）叠在左侧，元信息在右侧。
- * 支持：多版本切换（播放时带出所选版本 id）、收藏切换、续播（从上次位置继续）。
+ * 详情页头部（HDHive / Emby 气质）：剧照铺底 + 渐变遮罩，海报在左，元信息在右。
+ * - 复合规格徽章随所选版本切换（分辨率 · 动态范围 · 编码 · 音轨 · 容器）
+ * - 多版本下拉（v-model:version-id，与「媒体信息」面板同步）
+ * - 播放 / 续播 / 从头、收藏、已看、更多（右键菜单同款动作集）
  */
 interface Props {
   title: string;
+  originalTitle?: string;
   poster?: string;
   backdrop?: string;
   /** 标题下方的信息片段，如 ["2024", "2h 6m"] */
   meta?: string[];
-  /** 题材名列表，渲染为 chips 行 */
   genres?: string[];
-  /** 分级（如 PG-13），显示为边框徽章 */
   officialRating?: string;
   overview?: string;
   rating?: number | null;
+  /** 类型标识（电影 / 单集 / 视频 …）+ 图标 */
+  typeLabel?: string;
+  typeIcon?: string;
+  /** 海报比例：单集 / 家庭视频可用宽幅缩略图 */
+  posterRatio?: "poster" | "wide";
   /** 是否显示播放按钮（人物页不需要） */
   showActions?: boolean;
   /** 可选播放版本；多版本时显示下拉 */
   versions?: MediaVersion[];
-  /** 收藏态（点亮书签图标） */
   isFavorite?: boolean;
   /** 续播位置（秒）；有值时主按钮变「继续播放」并附「从头播放」 */
   resumePositionSeconds?: number;
-  /** 已看完（显示徽标） */
   played?: boolean;
+  /** 显示「已看」切换按钮（需要条目 id 的页面才开） */
+  showPlayedToggle?: boolean;
+  /** 显示「更多」按钮（打开条目右键菜单） */
+  showMore?: boolean;
+  busy?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   meta: () => [],
   genres: () => [],
+  posterRatio: "poster",
   showActions: true,
   versions: () => [],
   isFavorite: false,
   played: false,
+  showPlayedToggle: false,
+  showMore: false,
+  busy: false,
 });
+
 const emit = defineEmits<{
   /** 播放（从头）。载荷 = 所选版本 id（无版本信息时 undefined）。 */
   play: [versionId?: string];
   /** 续播（从 resumePositionSeconds 继续）。 */
   resume: [versionId?: string];
-  /** 收藏/取消收藏。 */
   toggleFavorite: [];
+  togglePlayed: [];
+  more: [event: MouseEvent];
 }>();
 
-const activeVersionId = ref(props.versions[0]?.id ?? "");
+const versionId = defineModel<string>("versionId", { default: "" });
+
 watch(
   () => props.versions,
-  (v) => {
-    activeVersionId.value = v[0]?.id ?? "";
+  (list) => {
+    if (!list.some((v) => v.id === versionId.value)) versionId.value = list[0]?.id ?? "";
   },
+  { immediate: true },
 );
 
 const activeVersion = computed(
-  () => props.versions.find((v) => v.id === activeVersionId.value) ?? props.versions[0],
+  () => props.versions.find((v) => v.id === versionId.value) ?? props.versions[0],
 );
-
 const versionOptions = computed(() => props.versions.map((v) => ({ label: v.label, value: v.id })));
 
-const resumeLabel = computed(() => {
-  const seconds = props.resumePositionSeconds;
-  if (!seconds) return "";
-  const totalMinutes = Math.floor(seconds / 60);
-  const h = Math.floor(totalMinutes / 60);
-  const m = totalMinutes % 60;
-  const s = Math.floor(seconds % 60);
-  const position = h
-    ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
-    : `${m}:${String(s).padStart(2, "0")}`;
-  return `从 ${position} 继续`;
-});
-
-function versionIdOrUndefined(): string | undefined {
-  return activeVersion.value?.id;
-}
+const resumeLabel = computed(() => formatClock(props.resumePositionSeconds));
 </script>
 
 <template>
   <header class="detail-hero">
-    <div class="backdrop">
-      <img v-if="props.backdrop" :src="props.backdrop" :alt="props.title" />
+    <div class="backdrop" aria-hidden="true">
+      <img v-if="props.backdrop" :src="props.backdrop" alt="" />
       <div class="backdrop-scrim" />
     </div>
 
+    <div class="hero-head">
+      <slot name="header" />
+    </div>
+
     <div class="hero-body">
-      <div class="poster">
-        <MediaPoster :src="props.poster" :title="props.title" ratio="poster" />
+      <div class="poster" :class="`is-${props.posterRatio}`">
+        <MediaPoster
+          :src="props.poster"
+          :title="props.title"
+          :ratio="props.posterRatio"
+          :icon="props.typeIcon"
+        />
+        <span v-if="props.played" class="poster-flag" title="已看完">
+          <BaseIcon name="check" :size="14" :stroke-width="3" />
+        </span>
       </div>
 
       <div class="info">
+        <span v-if="props.typeLabel" class="type-chip">
+          <BaseIcon v-if="props.typeIcon" :name="props.typeIcon" :size="12" />{{ props.typeLabel }}
+        </span>
         <h1 class="title">{{ props.title }}</h1>
+        <p v-if="props.originalTitle && props.originalTitle !== props.title" class="original">
+          {{ props.originalTitle }}
+        </p>
 
-        <div v-if="props.meta.length || props.rating != null || props.officialRating" class="meta">
-          <span v-if="props.rating != null" class="rating">★ {{ props.rating.toFixed(1) }}</span>
-          <span v-if="props.officialRating" class="cert">{{ props.officialRating }}</span>
-          <template v-for="(m, i) in props.meta" :key="i">
-            <span class="dot" />
+        <div class="meta c-meta">
+          <span v-if="props.rating != null && props.rating > 0" class="rating">
+            <BaseIcon name="star" :size="13" fill :stroke-width="2" />{{ props.rating.toFixed(1) }}
+          </span>
+          <template v-for="(m, i) in props.meta" :key="`${m}-${i}`">
+            <span v-if="i > 0 || (props.rating != null && props.rating > 0)" class="c-dot" />
             <span>{{ m }}</span>
           </template>
-          <span v-if="props.played" class="played-badge">已看完</span>
+          <span v-if="props.genres.length" class="c-dot" />
+          <span v-if="props.genres.length">{{ props.genres.slice(0, 4).join(" / ") }}</span>
+          <span v-if="props.officialRating" class="cert">{{ props.officialRating }}</span>
         </div>
 
-        <div v-if="props.genres.length" class="genres">
-          <span v-for="genre in props.genres" :key="genre" class="genre-chip">{{ genre }}</span>
+        <div v-if="activeVersion?.tags.length" class="specs" aria-label="规格">
+          <span
+            v-for="(t, i) in activeVersion.tags"
+            :key="t"
+            class="spec"
+            :class="{ strong: i === 0, accent: /HDR|Dolby|HLG/.test(t) }"
+            >{{ t }}</span
+          >
+          <span
+            v-if="props.versions.length > 1"
+            class="spec ver"
+            :title="`${props.versions.length} 个版本`"
+          >
+            <BaseIcon name="versions" :size="11" :stroke-width="2.2" />{{ props.versions.length }}
+            版本
+          </span>
+          <span
+            v-if="activeVersion.subtitles.length"
+            class="spec subs"
+            :title="activeVersion.subtitles.join(' / ')"
+          >
+            <BaseIcon name="subtitles" :size="11" :stroke-width="2.2" />{{
+              activeVersion.subtitles.length
+            }}
+            字幕
+          </span>
         </div>
 
-        <!-- 版本规格 tag（随所选版本同步） -->
-        <div v-if="activeVersion" class="tags">
-          <span v-for="t in activeVersion.tags" :key="t" class="tag">{{ t }}</span>
-        </div>
-        <div v-if="activeVersion?.subtitles.length" class="subs">
-          <span class="subs-label">字幕</span>
-          <span>{{ activeVersion.subtitles.join(" / ") }}</span>
+        <div v-if="props.showActions" class="actions">
+          <template v-if="props.resumePositionSeconds">
+            <button
+              class="du-btn du-btn-primary act-main"
+              type="button"
+              :disabled="props.busy"
+              @click="emit('resume', activeVersion?.id)"
+            >
+              <BaseIcon name="play" :size="16" fill />继续播放<span class="sub">{{
+                resumeLabel
+              }}</span>
+            </button>
+            <button
+              class="du-btn act"
+              type="button"
+              :disabled="props.busy"
+              @click="emit('play', activeVersion?.id)"
+            >
+              <BaseIcon name="rewind" :size="15" />从头播放
+            </button>
+          </template>
+          <button
+            v-else
+            class="du-btn du-btn-primary act-main"
+            type="button"
+            :disabled="props.busy"
+            @click="emit('play', activeVersion?.id)"
+          >
+            <BaseIcon
+              :name="props.busy ? 'loading' : 'play'"
+              :size="16"
+              :fill="!props.busy"
+              :class="{ 'c-spin': props.busy }"
+            />播放
+          </button>
+
+          <label v-if="props.versions.length > 1" class="version-pick">
+            <BaseIcon name="versions" :size="15" />
+            <BaseSelect
+              v-model="versionId"
+              :options="versionOptions"
+              size="sm"
+              aria-label="选择版本"
+            />
+          </label>
+
+          <button
+            class="du-btn act icon"
+            :class="{ 'is-on fav': props.isFavorite }"
+            type="button"
+            :aria-pressed="props.isFavorite"
+            :title="props.isFavorite ? '取消收藏' : '收藏'"
+            @click="emit('toggleFavorite')"
+          >
+            <BaseIcon name="heart" :size="16" :fill="props.isFavorite" />
+            <span class="lbl">{{ props.isFavorite ? "已收藏" : "收藏" }}</span>
+          </button>
+          <button
+            v-if="props.showPlayedToggle"
+            class="du-btn act icon"
+            :class="{ 'is-on': props.played }"
+            type="button"
+            :aria-pressed="props.played"
+            :title="props.played ? '标记未看' : '标记已看'"
+            @click="emit('togglePlayed')"
+          >
+            <BaseIcon name="check" :size="16" :stroke-width="props.played ? 2.6 : 1.7" />
+            <span class="lbl">{{ props.played ? "已看" : "标记已看" }}</span>
+          </button>
+          <slot name="actions" />
+          <button
+            v-if="props.showMore"
+            class="du-btn act square"
+            type="button"
+            aria-label="更多操作"
+            title="更多操作"
+            @click.stop="emit('more', $event)"
+          >
+            <BaseIcon name="more" :size="18" />
+          </button>
         </div>
 
         <p v-if="props.overview" class="overview">{{ props.overview }}</p>
 
-        <div v-if="props.showActions" class="actions">
-          <!-- 有续播位置：主按钮 = 续播，附「从头播放」次按钮 -->
-          <button
-            v-if="props.resumePositionSeconds"
-            class="btn btn-play"
-            type="button"
-            @click="emit('resume', versionIdOrUndefined())"
-          >
-            <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            <span>{{ resumeLabel }}</span>
-          </button>
-          <button
-            v-if="props.resumePositionSeconds"
-            class="btn btn-ghost"
-            type="button"
-            @click="emit('play', versionIdOrUndefined())"
-          >
-            <span>从头播放</span>
-          </button>
-
-          <button
-            v-else
-            class="btn btn-play"
-            type="button"
-            @click="emit('play', versionIdOrUndefined())"
-          >
-            <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            <span>播放</span>
-          </button>
-
-          <!-- 多版本下拉 -->
-          <BaseSelect
-            v-if="props.versions.length > 1"
-            v-model="activeVersionId"
-            :options="versionOptions"
-            size="md"
-            aria-label="选择版本"
-            class="version-select"
-          />
-          <span v-else-if="activeVersion" class="version-single">{{ activeVersion.label }}</span>
-
-          <button
-            class="btn btn-ghost fav-btn"
-            :class="{ active: props.isFavorite }"
-            type="button"
-            :aria-pressed="props.isFavorite"
-            @click="emit('toggleFavorite')"
-          >
-            <svg
-              class="btn-icon"
-              viewBox="0 0 24 24"
-              width="18"
-              height="18"
-              :fill="props.isFavorite ? 'currentColor' : 'none'"
-              stroke="currentColor"
-              stroke-width="2.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-            </svg>
-            <span>{{ props.isFavorite ? "已收藏" : "收藏" }}</span>
-          </button>
+        <div v-if="$slots.facts" class="facts">
+          <slot name="facts" />
         </div>
-
-        <div class="extra">
-          <slot name="extra" />
-        </div>
+        <slot name="extra" />
       </div>
     </div>
   </header>
@@ -199,21 +250,25 @@ function versionIdOrUndefined(): string | undefined {
 <style scoped lang="scss">
 .detail-hero {
   position: relative;
+  isolation: isolate;
+  // 宿主页面（.c-page.detail-page）不留顶部内边距，剧照贴着顶栏铺开。
+  margin: 0 calc(var(--ui-shell-gutter) * -1);
+  padding: 16px var(--ui-shell-gutter) 8px;
 }
 
 .backdrop {
   position: absolute;
-  inset: 0 0 auto 0;
-  height: 62vh;
-  min-height: 440px;
-  max-height: 100%;
-  z-index: 0;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: min(620px, 92%);
+  overflow: hidden;
 
   img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     object-position: center 20%;
+    opacity: 0.55;
   }
 }
 
@@ -221,274 +276,268 @@ function versionIdOrUndefined(): string | undefined {
   position: absolute;
   inset: 0;
   background:
-    linear-gradient(90deg, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.4) 45%, rgba(0, 0, 0, 0.1) 75%),
-    linear-gradient(0deg, var(--fbz-color-bg) 1%, rgba(0, 0, 0, 0.25) 38%, rgba(0, 0, 0, 0.45) 100%);
+    linear-gradient(
+      180deg,
+      rgb(var(--ui-scrim) / 30%) 0%,
+      rgb(var(--ui-scrim) / 78%) 60%,
+      var(--ui-background) 100%
+    ),
+    linear-gradient(90deg, rgb(var(--ui-scrim) / 80%) 0%, rgb(var(--ui-scrim) / 0%) 70%);
+}
+
+.hero-head {
+  margin-bottom: 28px;
 }
 
 .hero-body {
-  position: relative;
-  z-index: 1;
   display: flex;
+  gap: 36px;
   align-items: flex-end;
-  gap: var(--fbz-space-8);
-  max-width: 1280px;
-  margin: 0 auto;
-  // 顶部留出 header 高度即可；用 min-height 让内容稳定贴在 backdrop 底部，
-  // 不再用大比例 vh 顶部内边距（缩放/短视口时会导致海报诡异地底部对齐）
-  min-height: calc(62vh - var(--fbz-space-8));
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-6)) var(--fbz-space-8) var(--fbz-space-8);
 }
 
 .poster {
-  flex: 0 0 232px;
-  width: 232px;
-  align-self: flex-end;
-  border-radius: var(--fbz-radius-hero);
+  position: relative;
+  flex: 0 0 auto;
+  width: 260px;
   overflow: hidden;
-  border: 1px solid var(--fbz-color-line);
-  box-shadow: var(--fbz-shadow-panel);
+  border: 1px solid var(--ui-glass-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-raised);
+  box-shadow: var(--ui-shadow-float);
+
+  &.is-wide {
+    width: 400px;
+  }
+}
+
+.poster-flag {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 45%);
 }
 
 .info {
   flex: 1;
   min-width: 0;
-  padding-bottom: var(--fbz-space-2);
-  color: #ffffff; /* 确保在亮色主题下，叠加在剧照大图上的文字依然为白色，以保证最佳可读性 */
+  padding-bottom: 4px;
+}
+
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  margin-bottom: 10px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-glass-border);
+  border-radius: 5px;
+  background: var(--ui-glass);
+  color: var(--ui-text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .title {
-  margin: 0 0 var(--fbz-space-3);
-  font-size: 40px;
-  line-height: 1.1;
-  font-weight: 800;
-  color: #ffffff;
+  margin: 0;
+  color: var(--ui-text);
+  font-size: clamp(28px, 3.6vw, 44px);
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+}
+
+.original {
+  margin: 6px 0 0;
+  color: var(--ui-text-muted);
+  font-size: 14px;
 }
 
 .meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--fbz-space-3);
-  margin-bottom: var(--fbz-space-3);
-  font-size: var(--fbz-font-size-md);
-  color: rgba(255, 255, 255, 0.85);
-
-  .dot {
-    width: 3px;
-    height: 3px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.4);
-  }
-
-  .rating {
-    color: var(--fbz-color-brand-500);
-    font-weight: 700;
-  }
-
-  .cert {
-    padding: 1px 7px;
-    border: 1px solid rgba(255, 255, 255, 0.35);
-    border-radius: 3px;
-    font-size: var(--fbz-font-size-xs);
-    font-weight: 700;
-    letter-spacing: 0.5px;
-  }
-
-  .played-badge {
-    padding: 1px 8px;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--fbz-color-brand-500) 16%, transparent);
-    color: var(--fbz-color-brand-500);
-    font-size: var(--fbz-font-size-xs);
-    font-weight: 700;
-  }
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12.5px;
 }
 
-.genres {
+.rating {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-warning);
+  font-weight: 700;
+}
+
+.cert {
+  height: 19px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 4px;
+  color: var(--ui-text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.specs {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--fbz-space-2);
-  margin-bottom: var(--fbz-space-3);
+  gap: 6px;
+  margin-top: 12px;
 }
 
-.genre-chip {
-  padding: 3px 11px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.06);
-  font-size: var(--fbz-font-size-xs);
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.85);
-}
+.spec {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 5px;
+  background: rgb(0 0 0 / 22%);
+  color: var(--ui-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 
-.tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--fbz-space-2);
-  margin-bottom: var(--fbz-space-3);
-}
-
-.tag {
-  padding: 3px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 3px;
-  font-size: var(--fbz-font-size-xs);
-  font-weight: 600;
-  letter-spacing: 0.4px;
-  color: rgba(255, 255, 255, 0.85);
-}
-
-.subs {
-  display: flex;
-  gap: var(--fbz-space-2);
-  margin-bottom: var(--fbz-space-4);
-  font-size: var(--fbz-font-size-sm);
-  color: rgba(255, 255, 255, 0.85);
-
-  .subs-label {
-    color: rgba(255, 255, 255, 0.5);
+  &.strong {
+    color: var(--ui-text);
   }
-}
 
-.overview {
-  max-width: 720px;
-  margin: 0 0 var(--fbz-space-5);
-  font-size: var(--fbz-font-size-md);
-  line-height: 1.7;
-  color: rgba(255, 255, 255, 0.8);
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-  line-clamp: 4;
-  overflow: hidden;
+  &.accent {
+    border-color: rgb(var(--ui-accent-channel) / 55%);
+    color: var(--ui-accent-hover);
+  }
+
+  &.ver,
+  &.subs {
+    font-weight: 600;
+  }
 }
 
 .actions {
   display: flex;
-  align-items: center;
   flex-wrap: wrap;
-  gap: var(--fbz-space-3);
-  margin-bottom: var(--fbz-space-5);
-}
-
-.btn {
-  height: 44px;
-  padding: 0 22px;
-  border: 1px solid transparent;
-  border-radius: var(--fbz-radius-control);
-  font-size: var(--fbz-font-size-md);
-  font-weight: 700;
-  text-decoration: none;
-  display: inline-flex;
   align-items: center;
   gap: 8px;
-  cursor: pointer;
-  transition:
-    background var(--fbz-motion-fast) ease,
-    border-color var(--fbz-motion-fast) ease,
-    box-shadow var(--fbz-motion-fast) ease,
-    transform var(--fbz-motion-fast) ease;
+  margin-top: 20px;
+}
 
-  &:active {
-    transform: scale(0.96);
+.act-main {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 20px;
+  border-radius: var(--ui-radius-md);
+
+  .sub {
+    margin-left: 2px;
+    opacity: 0.72;
+    font-family: var(--ui-font-mono);
+    font-size: 12px;
   }
 }
 
-.btn-icon {
-  flex: 0 0 auto;
-}
-
-.btn-play {
-  color: #07120a;
-  background: var(--fbz-color-brand-500);
+.act {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-md);
+  background: rgb(0 0 0 / 18%);
+  color: var(--ui-text);
 
   &:hover {
-    background: var(--fbz-color-brand-600);
-    box-shadow: 0 6px 20px color-mix(in srgb, var(--fbz-color-brand-500) 30%, transparent);
-    transform: translateY(-2px);
+    background: var(--ui-surface-hover);
+    border-color: var(--ui-border-strong);
+  }
+
+  &.square {
+    width: 40px;
+    padding: 0;
+  }
+
+  &.is-on {
+    border-color: rgb(var(--ui-accent-channel) / 60%);
+    color: var(--ui-accent-hover);
+  }
+
+  &.is-on.fav {
+    border-color: rgb(251 113 133 / 55%);
+    color: #fb7185;
   }
 }
 
-.btn-ghost {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.16);
+:slotted(.act) {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-md);
+  background: rgb(0 0 0 / 18%);
+  color: var(--ui-text);
+}
 
-  &:hover {
-    background: rgba(255, 255, 255, 0.18);
-    border-color: rgba(255, 255, 255, 0.35);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
-    transform: translateY(-2px);
+.version-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-md);
+  background: rgb(0 0 0 / 18%);
+  color: var(--ui-text-muted);
+
+  :deep(.base-select) {
+    max-width: 260px;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
   }
 }
 
-.fav-btn.active {
-  color: var(--fbz-color-brand-500);
-  border-color: color-mix(in srgb, var(--fbz-color-brand-500) 45%, transparent);
-  background: color-mix(in srgb, var(--fbz-color-brand-500) 10%, transparent);
+.overview {
+  max-width: 880px;
+  margin: 20px 0 0;
+  color: var(--ui-text-muted);
+  font-size: 13.5px;
+  line-height: 1.75;
+  white-space: pre-line;
 }
 
-.version-single {
-  font-size: var(--fbz-font-size-sm);
-  color: rgba(255, 255, 255, 0.5);
+.facts {
+  margin-top: 18px;
 }
 
-.extra :deep(.fact) {
-  dt {
-    color: rgba(255, 255, 255, 0.5) !important;
-  }
-  dd {
-    color: rgba(255, 255, 255, 0.85) !important;
-  }
-  .link {
-    color: var(--fbz-color-brand-500) !important;
-  }
-}
-
-@media (max-width: 1024px) {
-  .poster {
-    flex-basis: 180px;
-    width: 180px;
-  }
-
-  .title {
-    font-size: 32px;
-  }
-}
-
-@media (max-width: 600px) {
-  .backdrop {
-    height: 42vh;
-    min-height: 280px;
-  }
-
+@media (max-width: 900px) {
   .hero-body {
     flex-direction: column;
+    // stretch：信息区占满容器宽度，操作按钮才能换行而不是撑出屏幕。
     align-items: stretch;
-    gap: var(--fbz-space-4);
-    min-height: 0;
-    padding: calc(var(--header-h, 56px) + 30vw) var(--fbz-space-4) var(--fbz-space-5);
+    gap: 20px;
   }
 
   .poster {
-    flex-basis: auto;
-    width: 120px;
     align-self: flex-start;
+    width: 180px;
+
+    &.is-wide {
+      width: min(100%, 420px);
+    }
   }
 
-  .title {
-    font-size: 26px;
-  }
-
-  .actions .btn {
-    flex: 1;
-    justify-content: center;
-  }
-
-  .version-select {
-    flex: 1 0 100%;
-    display: block;
+  .act .lbl {
+    display: none;
   }
 }
 </style>

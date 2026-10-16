@@ -1,6 +1,7 @@
 import "virtual:uno.css";
 import "./styles/daisy.css";
 import "./style.scss";
+import "./styles/theme/hdhive.scss";
 
 import { createApp } from "vue";
 

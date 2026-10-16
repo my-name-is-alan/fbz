@@ -80,7 +80,10 @@ watch(itemId, () => void load());
 <template>
   <main class="book-reader">
     <header class="reader-bar">
-      <button type="button" class="ghost" @click="router.back()">‹ 返回</button>
+      <button type="button" class="bar-btn" aria-label="返回" @click="router.back()">
+        <BaseIcon name="back" :size="16" /><span>返回</span>
+      </button>
+      <BaseIcon name="book" :size="16" class="bar-ic" />
       <span class="title">{{ manifest?.Title ?? "阅读" }}</span>
       <span
         v-if="manifest"
@@ -90,17 +93,30 @@ watch(itemId, () => void load());
         "
         >{{ formatBadge(manifest) }}</span
       >
-      <a v-if="manifest?.Converted" class="ghost original" :href="fileUrl(itemId)" download
-        >下载原文件</a
-      >
+      <a v-if="manifest?.Converted" class="bar-btn" :href="fileUrl(itemId)" download>
+        <BaseIcon name="download" :size="15" /><span>下载原文件</span>
+      </a>
       <span v-if="total > 1" class="pos">{{ index + 1 }} / {{ total }}</span>
     </header>
 
-    <p v-if="error" class="hint">{{ error }}</p>
-    <p v-else-if="!manifest" class="hint">加载中…</p>
-    <p v-else-if="!manifest.Readable" class="hint">
-      暂不支持在线阅读 {{ manifest.Format }} 格式，可在详情中下载。
+    <div v-if="total > 1" class="reader-progress" aria-hidden="true">
+      <span :style="{ width: `${((index + 1) / total) * 100}%` }" />
+    </div>
+
+    <p v-if="error" class="c-state is-error"><BaseIcon name="error" :size="16" />{{ error }}</p>
+    <p v-else-if="!manifest" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />加载中…
     </p>
+    <BaseEmptyState
+      v-else-if="!manifest.Readable"
+      icon="book"
+      :title="`暂不支持在线阅读 ${manifest.Format} 格式`"
+      description="可下载原文件后使用本地阅读器打开。"
+    >
+      <a class="du-btn du-btn-ghost" :href="fileUrl(itemId)" download>
+        <BaseIcon name="download" :size="15" />下载原文件
+      </a>
+    </BaseEmptyState>
 
     <!-- eslint-disable-next-line vue/no-v-html -- sanitized by rewriteChapterHtml -->
     <article
@@ -117,11 +133,17 @@ watch(itemId, () => void load());
     <iframe v-else-if="manifest.Format === 'pdf'" class="pdf" :src="fileUrl(itemId)" title="PDF" />
 
     <nav v-if="manifest && manifest.Readable && total > 1" class="pager">
-      <button type="button" :disabled="index === 0" @click="go(-1)">
-        上一{{ manifest.Format === "cbz" ? "页" : "章" }}
+      <button type="button" class="du-btn du-btn-ghost" :disabled="index === 0" @click="go(-1)">
+        <BaseIcon name="left" :size="16" />上一{{ manifest.Format === "cbz" ? "页" : "章" }}
       </button>
-      <button type="button" :disabled="index >= total - 1" @click="go(1)">
-        下一{{ manifest.Format === "cbz" ? "页" : "章" }}
+      <span class="c-meta">{{ index + 1 }} / {{ total }} · 方向键翻页</span>
+      <button
+        type="button"
+        class="du-btn du-btn-ghost"
+        :disabled="index >= total - 1"
+        @click="go(1)"
+      >
+        下一{{ manifest.Format === "cbz" ? "页" : "章" }}<BaseIcon name="right" :size="16" />
       </button>
     </nav>
   </main>
@@ -129,74 +151,102 @@ watch(itemId, () => void load());
 
 <style scoped lang="scss">
 .book-reader {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-6)) var(--fbz-space-6) 80px;
-  min-height: 100vh;
-  max-width: 920px;
-  margin: 0 auto;
+  min-height: calc(100vh - var(--ui-header-height));
+  display: flex;
+  flex-direction: column;
 }
 
 .reader-bar {
+  position: sticky;
+  top: var(--ui-header-height);
+  z-index: 10;
   display: flex;
   align-items: center;
-  gap: var(--fbz-space-4);
-  margin-bottom: var(--fbz-space-5);
-
-  .title {
-    flex: 1;
-    font-weight: 700;
-    font-size: var(--fbz-font-size-lg);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .format {
-    padding: 2px var(--fbz-space-2);
-    border: 1px solid var(--fbz-color-border, currentColor);
-    border-radius: 999px;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-xs, 12px);
-    white-space: nowrap;
-  }
-
-  .original {
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
-    white-space: nowrap;
-  }
-
-  .pos {
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
-  }
+  gap: 10px;
+  padding: 10px var(--ui-shell-gutter);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-glass-strong);
+  backdrop-filter: blur(14px);
 }
 
-button {
-  border: 1px solid var(--fbz-color-line-soft);
-  background: var(--fbz-color-panel);
-  color: inherit;
-  border-radius: 999px;
-  padding: 6px 16px;
+.bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font-size: 12.5px;
+  text-decoration: none;
   cursor: pointer;
 
-  &:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-
-  &.ghost {
-    background: none;
+  &:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-surface-hover);
   }
 }
 
-.hint {
-  color: var(--fbz-color-text-muted);
+.bar-ic {
+  color: var(--ui-text-subtle);
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.format {
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 4px;
+  color: var(--ui-text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.pos {
+  color: var(--ui-text-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: 12px;
+}
+
+.reader-progress {
+  height: 2px;
+  background: var(--ui-border);
+
+  span {
+    display: block;
+    height: 100%;
+    background: var(--ui-accent);
+    transition: width var(--ui-duration-base);
+  }
+}
+
+.c-state {
+  padding: 40px var(--ui-shell-gutter);
 }
 
 .epub {
-  line-height: 1.8;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px var(--ui-shell-gutter) 24px;
+  color: var(--ui-text);
   font-size: 17px;
-  transition: opacity var(--fbz-motion-fast);
+  line-height: 1.9;
+  transition: opacity var(--ui-duration-fast);
 
   &.dim {
     opacity: 0.5;
@@ -206,26 +256,48 @@ button {
     max-width: 100%;
     height: auto;
   }
+
+  :deep(a) {
+    color: var(--ui-accent);
+  }
 }
 
-.comic img {
-  display: block;
-  max-width: 100%;
-  margin: 0 auto;
-  cursor: pointer;
+.comic {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+
+  img {
+    max-width: 100%;
+    max-height: calc(100vh - var(--ui-header-height) - 140px);
+    border-radius: var(--ui-radius-sm);
+    cursor: pointer;
+  }
 }
 
 .pdf {
+  flex: 1;
   width: 100%;
-  height: calc(100vh - 180px);
-  border: 1px solid var(--fbz-color-line-soft);
-  border-radius: 10px;
+  min-height: calc(100vh - var(--ui-header-height) - 60px);
+  border: 0;
   background: #fff;
 }
 
 .pager {
   display: flex;
-  justify-content: space-between;
-  margin-top: var(--fbz-space-6);
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px var(--ui-shell-gutter) 40px;
+}
+
+@media (max-width: 600px) {
+  .bar-btn span {
+    display: none;
+  }
+
+  .epub {
+    font-size: 16px;
+  }
 }
 </style>

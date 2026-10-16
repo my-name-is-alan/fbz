@@ -8,6 +8,8 @@ interface Props {
   size?: "normal" | "large" | "xlarge";
   /** 「查看全部」跳转目标 */
   to?: string;
+  /** 标题前的 Lucide 图标 */
+  icon?: string;
   showResolution?: boolean;
   showRating?: boolean;
 }
@@ -19,31 +21,28 @@ const props = withDefaults(defineProps<Props>(), {
   showRating: true,
 });
 
-const isLarge = computed(() => props.size === "large");
-const isXLarge = computed(() => props.size === "xlarge");
-
 const colWidth = computed(() => {
-  if (props.layout === "poster") return "150px";
-
-  if (isXLarge.value) return "272px";
-  if (isLarge.value) return "312px";
-  if (props.layout === "wide") return "260px";
-
-  return undefined;
+  if (props.layout === "poster") return "var(--row-poster-col)";
+  if (props.size === "xlarge") return "var(--row-wide-col-xl)";
+  return "var(--row-wide-col)";
 });
 </script>
 
 <template>
   <section class="media-row">
     <header class="head">
-      <h2>{{ props.title }}</h2>
-      <RouterLink v-if="props.to" :to="props.to" class="more">查看全部</RouterLink>
+      <component
+        :is="props.to ? 'RouterLink' : 'h2'"
+        :to="props.to"
+        class="c-section-title title-link"
+      >
+        <BaseIcon v-if="props.icon" :name="props.icon" :size="16" class="lead" />
+        {{ props.title }}
+        <span class="count">{{ props.items.length }}</span>
+        <BaseIcon v-if="props.to" name="right" :size="16" class="chev" />
+      </component>
     </header>
-    <BaseScroller
-      class="scroller"
-      :class="`is-${props.layout} ${props.size === 'large' ? 'is-large' : ''} ${props.size === 'xlarge' ? 'is-xlarge' : ''}`"
-      :col-width="colWidth"
-    >
+    <BaseScroller class="scroller" :col-width="colWidth" gap="16px">
       <MediaCard
         v-for="(item, i) in props.items"
         :key="item.id"
@@ -59,41 +58,62 @@ const colWidth = computed(() => {
 
 <style scoped lang="scss">
 .media-row {
-  margin-bottom: var(--fbz-space-8);
+  --row-poster-col: 156px;
+  --row-wide-col: 260px;
+  --row-wide-col-xl: 300px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--fbz-space-4);
-
-  h2 {
-    margin: 0;
-    font-size: var(--fbz-font-size-lg);
-    font-weight: 700;
-    letter-spacing: -0.2px;
-  }
 }
 
-.more {
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 600;
-  color: var(--fbz-color-text-muted);
+.title-link {
+  color: var(--ui-text);
   text-decoration: none;
-  transition: color var(--fbz-motion-fast);
 
-  &::after {
-    content: " ›";
+  .lead {
+    color: var(--ui-text-subtle);
   }
 
-  &:hover {
-    color: var(--fbz-color-brand-500);
+  .count {
+    margin-left: 2px;
+    color: var(--ui-text-subtle);
+    font-size: 12px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chev {
+    color: var(--ui-text-subtle);
+    transition: transform var(--ui-duration-fast);
   }
 }
 
-// 每列宽度按 layout / 尺寸覆盖 BaseScroller 的 --col（通过 col-width prop）。
-.scroller.is-poster :deep(.track) {
-  --col: 150px;
+a.title-link:hover {
+  color: var(--ui-accent);
+
+  .chev {
+    color: var(--ui-accent);
+    transform: translateX(2px);
+  }
+}
+
+// BaseScroller 内留出 hover 位移空间，同时与页面左缘对齐。
+.scroller :deep(.track) {
+  padding: 6px 2px 10px;
+}
+
+@media (max-width: 600px) {
+  .media-row {
+    --row-poster-col: 118px;
+    --row-wide-col: 220px;
+    --row-wide-col-xl: 240px;
+  }
 }
 </style>

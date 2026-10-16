@@ -50,27 +50,45 @@ function initial(name: string): string {
 </script>
 
 <template>
-  <main class="music-library">
+  <main class="c-page music-library">
     <header class="page-head">
-      <h1>{{ library?.name ?? "音乐" }}</h1>
-      <p class="sub">{{ artists.length }} 位艺术家</p>
+      <nav class="crumbs" aria-label="面包屑">
+        <RouterLink to="/library"><BaseIcon name="library" :size="14" />媒体库</RouterLink>
+        <BaseIcon name="right" :size="13" class="sep" />
+        <span>{{ library?.name ?? "音乐" }}</span>
+      </nav>
+      <div class="title-row">
+        <span class="type-ic"><BaseIcon name="music" :size="20" /></span>
+        <h1 class="c-page-title">{{ library?.name ?? "音乐" }}</h1>
+        <span class="c-meta">{{ artists.length }} 位艺术家</span>
+      </div>
     </header>
 
-    <p v-if="loading" class="hint">加载中…</p>
-    <p v-else-if="failed" class="hint">无法连接到服务器，请检查登录状态。</p>
-    <p v-else-if="!artists.length" class="hint">该音乐库暂无艺术家。扫描音乐文件后将自动归类。</p>
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />加载中…
+    </p>
+    <p v-else-if="failed" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />无法连接到服务器，请检查登录状态。
+    </p>
+    <BaseEmptyState
+      v-else-if="!artists.length"
+      icon="artist"
+      title="该音乐库暂无艺术家"
+      description="扫描音乐文件后将按艺术家 → 专辑 → 曲目自动归类。"
+    />
 
     <div v-else class="grid">
       <RouterLink
-        v-for="(artist, i) in artists"
+        v-for="artist in artists"
         :key="artist.id"
         :to="`/artist/${artist.id}`"
         class="artist-card"
       >
-        <div class="avatar" :class="{ alt: i % 2 === 1 }">
-          <span>{{ initial(artist.name) }}</span>
+        <div class="avatar">
+          <span class="initial">{{ initial(artist.name) }}</span>
+          <BaseIcon name="artist" :size="14" class="badge" />
         </div>
-        <span class="name">{{ artist.name }}</span>
+        <span class="name" :title="artist.name">{{ artist.name }}</span>
       </RouterLink>
     </div>
   </main>
@@ -78,89 +96,122 @@ function initial(name: string): string {
 
 <style scoped lang="scss">
 .music-library {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-8)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
-.page-head {
-  margin-bottom: var(--fbz-space-6);
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--ui-text-subtle);
+  font-size: 12.5px;
 
-  h1 {
-    margin: 0 0 var(--fbz-space-2);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 800;
-  }
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--ui-text-muted);
+    text-decoration: none;
 
-  .sub {
-    margin: 0;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-md);
+    &:hover {
+      color: var(--ui-accent);
+    }
   }
 }
 
-.hint {
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-md);
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.type-ic {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface);
+  color: var(--ui-accent);
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: var(--fbz-space-5);
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 22px 16px;
 }
 
 .artist-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--fbz-space-3);
-  text-decoration: none;
+  gap: 8px;
   color: inherit;
+  text-decoration: none;
+
+  &:hover {
+    .avatar {
+      border-color: var(--ui-accent);
+      transform: translateY(-2px);
+    }
+
+    .name {
+      color: var(--ui-accent-hover);
+    }
+  }
 }
 
 .avatar {
+  position: relative;
   width: 100%;
   aspect-ratio: 1;
-  border-radius: 50%;
-  border: 1px solid var(--fbz-color-line-soft);
-  background: var(--fbz-color-panel);
   display: grid;
-  place-content: center;
+  place-items: center;
+  border: 1px solid var(--ui-border);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 30% 25%, rgb(var(--ui-accent-channel) / 12%), transparent 60%),
+    var(--ui-surface-raised);
   transition:
-    border-color var(--fbz-motion-fast),
-    transform var(--fbz-motion-fast);
+    border-color var(--ui-duration-fast),
+    transform var(--ui-duration-base) var(--ui-ease-out);
 
-  &.alt {
-    background: var(--fbz-color-panel-strong);
+  .initial {
+    color: var(--ui-text-muted);
+    font-size: 34px;
+    font-weight: 600;
   }
 
-  span {
-    font-family: var(--fbz-font-display);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 700;
-    color: var(--fbz-color-text-muted);
-  }
-
-  .artist-card:hover & {
-    border-color: var(--fbz-color-brand-500);
-    transform: translateY(-3px);
+  .badge {
+    position: absolute;
+    right: 10%;
+    bottom: 10%;
+    padding: 4px;
+    box-sizing: content-box;
+    border-radius: 50%;
+    background: var(--ui-surface);
+    color: var(--ui-text-subtle);
   }
 }
 
 .name {
-  font-size: var(--fbz-font-size-sm);
-  font-weight: 600;
-  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: color var(--ui-duration-fast);
 }
 
 @media (max-width: 600px) {
-  .music-library {
-    padding: calc(var(--header-h, 56px) + var(--fbz-space-5)) var(--fbz-space-4) 60px;
-  }
-
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: var(--fbz-space-4);
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
   }
 }
 </style>

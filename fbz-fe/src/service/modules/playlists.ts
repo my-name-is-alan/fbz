@@ -94,7 +94,9 @@ function toContinueItem(dto: BaseItemDto): ContinueItem {
     title: isEpisode && dto.SeriesName ? dto.SeriesName : dto.Name,
     meta: isEpisode
       ? `第 ${dto.ParentIndexNumber ?? 1} 季 · 第 ${dto.IndexNumber ?? "—"} 集`
-      : [dto.ProductionYear, dto.Type].filter(Boolean).join(" · "),
+      : dto.ProductionYear != null
+        ? String(dto.ProductionYear)
+        : "",
     detailType,
     poster: dto.ImageTags?.Primary ? mediaImageUrl(`/Items/${dto.Id}/Images/Primary`) : undefined,
     year: dto.ProductionYear ?? undefined,
@@ -106,6 +108,7 @@ function toContinueItem(dto: BaseItemDto): ContinueItem {
         : undefined,
     serverItem: toServerItem(dto),
     playlistItemId: dto.PlaylistItemId ?? undefined,
+    itemType: dto.Type,
   };
 }
 

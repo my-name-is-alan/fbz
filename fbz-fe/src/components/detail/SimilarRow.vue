@@ -4,17 +4,21 @@ import type { MediaItem } from "@/types/media.ts";
 interface Props {
   title?: string;
   items: MediaItem[];
+  icon?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   title: "相似推荐",
+  icon: "sparkles",
 });
 </script>
 
 <template>
   <section v-if="props.items.length" class="similar-row">
-    <h2 class="section-title">{{ props.title }}</h2>
-    <BaseScroller class="scroller">
+    <h2 class="c-section-title">
+      <BaseIcon :name="props.icon" :size="16" class="lead" />{{ props.title }}
+    </h2>
+    <BaseScroller class="scroller" col-width="var(--similar-col)" gap="16px">
       <MediaCard
         v-for="(item, i) in props.items"
         :key="item.id"
@@ -28,28 +32,24 @@ const props = withDefaults(defineProps<Props>(), {
 
 <style scoped lang="scss">
 .similar-row {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 0 var(--fbz-space-8) var(--fbz-space-8);
-}
+  --similar-col: 160px;
 
-.section-title {
-  margin: 0 0 var(--fbz-space-4);
-  font-size: var(--fbz-font-size-lg);
-  font-weight: 700;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  .lead {
+    color: var(--ui-text-subtle);
+  }
 }
 
 .scroller :deep(.track) {
-  --col: 132px;
+  padding: 6px 2px 10px;
 }
 
 @media (max-width: 600px) {
   .similar-row {
-    padding: 0 var(--fbz-space-4) var(--fbz-space-5);
-  }
-
-  .scroller :deep(.track) {
-    --col: 112px;
+    --similar-col: 118px;
   }
 }
 </style>

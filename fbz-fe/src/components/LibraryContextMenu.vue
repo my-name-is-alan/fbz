@@ -119,7 +119,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="scanLibrary"
         @keydown.space.prevent="scanLibrary"
       >
-        <span class="icon" aria-hidden="true">🔍</span>
+        <span class="icon"><BaseIcon name="scan" :size="15" /></span>
         <span>{{ busyAction === "scan" ? "正在入队…" : "扫描媒体库" }}</span>
       </li>
       <li
@@ -131,7 +131,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="refreshMetadata"
         @keydown.space.prevent="refreshMetadata"
       >
-        <span class="icon" aria-hidden="true">🔄</span>
+        <span class="icon"><BaseIcon name="refresh" :size="15" /></span>
         <span>{{ busyAction === "refresh" ? "正在入队…" : "刷新元数据" }}</span>
       </li>
       <li
@@ -142,7 +142,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="editLibrary"
         @keydown.space.prevent="editLibrary"
       >
-        <span class="icon" aria-hidden="true">⚙️</span>
+        <span class="icon"><BaseIcon name="settings" :size="15" /></span>
         <span>编辑设置</span>
       </li>
 
@@ -156,14 +156,14 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="showDeleteConfirm = true"
         @keydown.space.prevent="showDeleteConfirm = true"
       >
-        <span class="icon" aria-hidden="true">🗑️</span>
+        <span class="icon"><BaseIcon name="trash" :size="15" /></span>
         <span>删除媒体库</span>
       </li>
     </ul>
 
     <div v-else class="confirm-box" role="dialog" aria-modal="true" aria-label="确认删除媒体库">
       <span class="confirm-title">
-        <span aria-hidden="true">⚠️ </span>确认删除媒体库？仅移除库记录，磁盘文件保留。
+        <BaseIcon name="warning" :size="16" />确认删除媒体库？仅移除库记录，磁盘文件保留。
       </span>
       <div class="confirm-actions">
         <button class="confirm-btn cancel" type="button" @click="showDeleteConfirm = false">
@@ -226,7 +226,7 @@ useEventListener(window, "keydown", (e) => {
   padding: 8px 12px;
   border-radius: 4px;
   font-size: var(--fbz-font-size-sm);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--fbz-color-text-soft);
   cursor: pointer;
   user-select: none;
@@ -251,7 +251,9 @@ useEventListener(window, "keydown", (e) => {
   }
 
   .icon {
-    font-size: 14px;
+    display: inline-flex;
+    width: 16px;
+    color: var(--fbz-color-text-muted);
   }
 
   &.disabled {
@@ -275,6 +277,10 @@ useEventListener(window, "keydown", (e) => {
   text-align: center;
 
   .confirm-title {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
     font-size: var(--fbz-font-size-xs);
     font-weight: 700;
     color: var(--fbz-color-danger-500);

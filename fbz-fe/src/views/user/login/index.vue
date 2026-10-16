@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/stores/auth.ts";
 import { useUiStore } from "@/stores/ui.ts";
+import { useCSurface } from "@/composables/useCSurface.ts";
+
+useCSurface();
 
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
 const uiStore = useUiStore();
-
-const columns = [0, 1, 2, 3];
-const tilesPerColumn = 8;
 
 /* ---------- 表单状态 ---------- */
 const username = ref(authStore.username || "");
@@ -25,7 +25,7 @@ const languageOptions = [
   { label: "日本語", value: "ja-JP" },
 ];
 
-const features = ["Emby 兼容", "硬件转码", "插件生态", "多用户权限"];
+const features = ["Emby 客户端兼容", "多库 · 多版本", "转码与直放", "多用户权限"];
 
 const appVersion = "FBZ Server · v0.1.0";
 
@@ -55,164 +55,107 @@ function handleForgot() {
 
 <template>
   <div class="login-view">
-    <!-- 左：媒体海报墙 + 品牌 -->
     <section class="login-art" aria-hidden="true">
-      <div class="poster-wall">
-        <div
-          v-for="(col, ci) in columns"
-          :key="ci"
-          class="poster-col"
-          :class="ci % 2 === 0 ? 'drift-up' : 'drift-down'"
-        >
-          <div v-for="tile in tilesPerColumn" :key="`${col}-${tile}`" class="poster-tile">
-            <span class="poster-fallback">{{ (col * tilesPerColumn + tile) % 9 }}</span>
-          </div>
-        </div>
+      <div class="art-grid">
+        <span v-for="n in 24" :key="n" class="tile" :class="`t${n % 5}`" />
       </div>
-
       <div class="art-veil" />
-
       <div class="art-brand">
         <div class="brand-mark">
-          <span class="brand-glyph">◢</span>
+          <span class="brand-ic"><BaseIcon name="clapperboard" :size="22" /></span>
           <span class="brand-word">FBZ</span>
         </div>
         <h1 class="art-title">自托管媒体中心</h1>
-        <p class="art-sub">扫描、刮削、转码与串流，统一管理你的本地影视与音乐媒体库。</p>
+        <p class="art-sub">
+          扫描、刮削、转码与串流，统一管理你的本地与云端影视、音乐与图书媒体库。
+        </p>
         <ul class="art-features">
-          <li v-for="f in features" :key="f"><span class="dot" />{{ f }}</li>
+          <li v-for="f in features" :key="f"><BaseIcon name="check" :size="14" />{{ f }}</li>
         </ul>
       </div>
     </section>
 
-    <!-- 右：登录面板 -->
     <section class="login-panel">
       <div class="panel-inner">
-        <!-- 移动端品牌 -->
         <div class="mobile-brand">
-          <span class="brand-glyph">◢</span>
+          <span class="brand-ic"><BaseIcon name="clapperboard" :size="18" /></span>
           <span class="brand-word">FBZ</span>
         </div>
 
         <header class="panel-head">
-          <span class="indicator" />
-          <div>
-            <h2>登录到 FBZ</h2>
-            <p>输入账户凭据以进入媒体工作台。</p>
-          </div>
+          <h2>登录到 FBZ</h2>
+          <p>输入账户凭据以进入媒体工作台。</p>
         </header>
 
         <form class="login-form" @submit.prevent="handleLogin">
-          <div class="form-group">
-            <label for="login-username">用户名</label>
-            <div class="control-wrap">
-              <svg class="lead-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M12 12a4 4 0 100-8 4 4 0 000 8zM5 20a7 7 0 0114 0"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
+          <label class="field" for="login-username">
+            <span class="field-label">用户名</span>
+            <span class="control">
+              <BaseIcon name="user" :size="16" class="lead" />
               <input
                 id="login-username"
                 v-model="username"
                 type="text"
                 placeholder="请输入登录用户名"
-                class="control-input has-icon"
                 autocomplete="username"
               />
-            </div>
-          </div>
+            </span>
+          </label>
 
-          <div class="form-group">
-            <label for="login-password">登录密码</label>
-            <div class="control-wrap">
-              <svg class="lead-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M6 10V8a6 6 0 0112 0v2m-13 0h14v10H5z"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
+          <label class="field" for="login-password">
+            <span class="field-label">登录密码</span>
+            <span class="control">
+              <BaseIcon name="lock" :size="16" class="lead" />
               <input
                 id="login-password"
                 v-model="password"
                 :type="showPassword ? 'text' : 'password'"
                 placeholder="请输入密码"
-                class="control-input has-icon has-trail"
                 autocomplete="current-password"
               />
               <button
                 type="button"
-                class="trail-btn"
+                class="trail"
                 :aria-label="showPassword ? '隐藏密码' : '显示密码'"
                 @click="showPassword = !showPassword"
               >
-                <svg v-if="showPassword" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M3 3l18 18M10.6 10.6a2 2 0 002.8 2.8M9.9 5.1A9.8 9.8 0 0112 5c5 0 9 4.5 10 7-0.4 1-1.3 2.3-2.6 3.5M6.1 6.1C4 7.4 2.6 9.2 2 12c1 2.5 5 7 10 7 1.2 0 2.3-.2 3.3-.6"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.6"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                </svg>
-                <svg v-else viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.6"
-                    stroke-linejoin="round"
-                  />
-                  <circle
-                    cx="12"
-                    cy="12"
-                    r="3"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.6"
-                  />
-                </svg>
+                <BaseIcon :name="showPassword ? 'eye-off' : 'eye'" :size="16" />
               </button>
-            </div>
-          </div>
+            </span>
+          </label>
 
           <div class="form-row">
             <label class="remember">
-              <span class="glow-switch">
-                <input v-model="remember" type="checkbox" />
-                <span class="switch-slide-thumb" />
-              </span>
-              <span class="remember-text">记住此设备</span>
+              <input
+                v-model="remember"
+                class="du-toggle du-toggle-sm du-toggle-primary"
+                type="checkbox"
+              />
+              <span>记住此设备</span>
             </label>
             <button type="button" class="link-btn" @click="handleForgot">忘记密码？</button>
           </div>
 
-          <button type="submit" class="submit-btn" :class="{ loading }" :disabled="loading">
-            <span v-if="loading" class="spinner" />
-            <span>{{ loading ? "正在登录…" : "登 录" }}</span>
+          <button type="submit" class="du-btn du-btn-primary submit-btn" :disabled="loading">
+            <BaseIcon
+              :name="loading ? 'loading' : 'key'"
+              :size="16"
+              :class="{ 'c-spin': loading }"
+            />
+            {{ loading ? "正在登录…" : "登录" }}
           </button>
         </form>
 
         <footer class="panel-foot">
-          <div class="lang-group">
-            <span class="foot-label">界面语言</span>
+          <label class="lang-group">
+            <BaseIcon name="languages" :size="15" />
             <BaseSelect
               v-model="language"
               :options="languageOptions"
               size="sm"
               aria-label="界面语言"
-              class="lang-select"
             />
-          </div>
+          </label>
           <span class="version">{{ appVersion }}</span>
         </footer>
       </div>
@@ -222,89 +165,49 @@ function handleForgot() {
 
 <style scoped lang="scss">
 .login-view {
-  display: grid;
-  grid-template-columns: 1.05fr 0.95fr;
   min-height: 100vh;
-  background: var(--fbz-color-bg);
-  color: var(--fbz-color-text);
-
-  @media (max-width: 900px) {
-    grid-template-columns: 1fr;
-  }
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(380px, 0.8fr);
+  background: var(--ui-background);
 }
 
-/* ---------------- 左侧海报墙 ---------------- */
+/* ---------- 左侧品牌区 ---------- */
 .login-art {
   position: relative;
   overflow: hidden;
-  background: var(--fbz-color-bg-strong);
-  border-right: 1px solid var(--fbz-color-line-soft);
-
-  @media (max-width: 900px) {
-    display: none;
-  }
+  border-right: 1px solid var(--ui-border);
 }
 
-.poster-wall {
+.art-grid {
   position: absolute;
-  inset: -8% -4%;
+  inset: -40px;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--fbz-space-3);
-  transform: rotate(-6deg) scale(1.18);
+  grid-template-columns: repeat(6, 1fr);
+  gap: 14px;
+  transform: rotate(-8deg) scale(1.15);
   opacity: 0.55;
 }
 
-.poster-col {
-  display: flex;
-  flex-direction: column;
-  gap: var(--fbz-space-3);
-
-  &.drift-up {
-    animation: drift-up 38s linear infinite;
-  }
-  &.drift-down {
-    animation: drift-down 44s linear infinite;
-  }
-}
-
-.poster-tile {
+.tile {
   aspect-ratio: 2 / 3;
-  border-radius: var(--fbz-radius-card);
-  overflow: hidden;
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--fbz-color-brand-500) 20%, var(--fbz-color-panel-strong)),
-    var(--fbz-color-panel)
-  );
-  border: 1px solid var(--fbz-color-line-soft);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-raised);
 
-  .poster-fallback {
-    width: 100%;
-    height: 100%;
-    display: grid;
-    place-content: center;
-    font-family: var(--fbz-font-display);
-    font-size: 28px;
-    color: var(--fbz-color-text-muted);
+  &.t1 {
+    background: linear-gradient(
+      160deg,
+      rgb(var(--ui-accent-channel) / 18%),
+      var(--ui-surface-raised)
+    );
   }
-}
 
-// 漂移：移动一个 tile 高度，循环无缝
-@keyframes drift-up {
-  from {
-    transform: translateY(0);
+  &.t2 {
+    background: var(--ui-surface);
   }
-  to {
-    transform: translateY(-12%);
-  }
-}
-@keyframes drift-down {
-  from {
-    transform: translateY(-12%);
-  }
-  to {
-    transform: translateY(0);
+
+  &.t3 {
+    background: linear-gradient(200deg, var(--ui-surface-hover), var(--ui-surface));
   }
 }
 
@@ -312,25 +215,21 @@ function handleForgot() {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(
-      120% 90% at 18% 88%,
-      color-mix(in srgb, var(--fbz-color-brand-500) 22%, transparent) 0%,
-      transparent 52%
-    ),
+    radial-gradient(circle at 20% 80%, rgb(var(--ui-accent-channel) / 14%), transparent 50%),
     linear-gradient(
-      75deg,
-      var(--fbz-color-bg-strong) 12%,
-      color-mix(in srgb, var(--fbz-color-bg-strong) 70%, transparent) 48%,
-      color-mix(in srgb, var(--fbz-color-bg-strong) 30%, transparent) 100%
+      90deg,
+      rgb(var(--ui-scrim) / 92%) 0%,
+      rgb(var(--ui-scrim) / 70%) 60%,
+      rgb(var(--ui-scrim) / 88%) 100%
     );
 }
 
 .art-brand {
   position: absolute;
-  left: var(--fbz-space-8);
-  bottom: var(--fbz-space-8);
-  right: var(--fbz-space-8);
-  z-index: 1;
+  left: 56px;
+  right: 56px;
+  bottom: 64px;
+  max-width: 520px;
 }
 
 .brand-mark,
@@ -338,243 +237,181 @@ function handleForgot() {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  font-family: var(--fbz-font-display);
-  font-weight: 800;
+}
 
-  .brand-glyph {
-    color: var(--fbz-color-brand-500);
-    font-size: 26px;
-    line-height: 1;
-    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--fbz-color-brand-500) 55%, transparent));
-  }
+.brand-ic {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
+  box-shadow: var(--ui-shadow-accent);
+}
 
-  .brand-word {
-    font-size: 30px;
-    letter-spacing: 4px;
-    color: var(--fbz-color-text);
-  }
+.brand-word {
+  color: var(--ui-text);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .art-title {
-  margin: var(--fbz-space-5) 0 var(--fbz-space-2);
-  font-size: 30px;
-  font-weight: 800;
-  letter-spacing: 1px;
+  margin: 24px 0 8px;
+  color: var(--ui-text);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .art-sub {
   margin: 0;
-  max-width: 420px;
-  font-size: var(--fbz-font-size-md);
-  line-height: 1.6;
-  color: var(--fbz-color-text-soft);
+  color: var(--ui-text-muted);
+  font-size: 14px;
+  line-height: 1.7;
 }
 
 .art-features {
-  list-style: none;
-  margin: var(--fbz-space-5) 0 0;
-  padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: var(--fbz-space-2) var(--fbz-space-3);
+  gap: 8px;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
 
   li {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    padding: 5px 12px 5px 9px;
-    border-radius: var(--fbz-radius-round);
-    border: 1px solid var(--fbz-color-line);
-    background: color-mix(in srgb, var(--fbz-color-panel) 70%, transparent);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
-    font-size: var(--fbz-font-size-xs);
-    font-weight: 600;
-    color: var(--fbz-color-text-soft);
-  }
+    gap: 6px;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--ui-border-strong);
+    border-radius: var(--ui-radius-sm);
+    background: rgb(var(--ui-scrim) / 60%);
+    color: var(--ui-text);
+    font-size: 12.5px;
 
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--fbz-color-brand-500);
-    box-shadow: 0 0 6px color-mix(in srgb, var(--fbz-color-brand-500) 70%, transparent);
+    :deep(.fbz-icon) {
+      color: var(--ui-accent);
+    }
   }
 }
 
-/* ---------------- 右侧登录面板 ---------------- */
+/* ---------- 右侧表单 ---------- */
 .login-panel {
   display: grid;
   place-items: center;
-  padding: var(--fbz-space-8) var(--fbz-space-6);
-  background:
-    radial-gradient(
-      90% 60% at 80% 0%,
-      color-mix(in srgb, var(--fbz-color-brand-500) 7%, transparent),
-      transparent 60%
-    ),
-    var(--fbz-color-bg);
+  padding: 40px 24px;
+  background: var(--ui-surface);
 }
 
 .panel-inner {
   width: 100%;
   max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .mobile-brand {
   display: none;
-  margin-bottom: var(--fbz-space-6);
 
-  @media (max-width: 900px) {
-    display: inline-flex;
+  .brand-ic {
+    width: 34px;
+    height: 34px;
   }
 
-  .brand-glyph {
-    font-size: 22px;
-  }
   .brand-word {
-    font-size: 26px;
+    font-size: 20px;
   }
 }
 
 .panel-head {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--fbz-space-3);
-  margin-bottom: var(--fbz-space-6);
-
-  .indicator {
-    flex: 0 0 auto;
-    width: 3px;
-    height: 38px;
-    border-radius: 2px;
-    background: var(--fbz-color-brand-500);
-    box-shadow: 0 0 10px color-mix(in srgb, var(--fbz-color-brand-500) 45%, transparent);
-  }
-
   h2 {
-    margin: 0 0 4px;
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 800;
-    letter-spacing: 0.5px;
+    margin: 0 0 6px;
+    color: var(--ui-text);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
 
   p {
     margin: 0;
-    font-size: var(--fbz-font-size-sm);
-    color: var(--fbz-color-text-muted);
+    color: var(--ui-text-muted);
+    font-size: 13px;
   }
 }
 
 .login-form {
   display: flex;
   flex-direction: column;
-  gap: var(--fbz-space-4);
+  gap: 16px;
 }
 
-.form-group {
+.field {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-
-  label {
-    font-size: var(--fbz-font-size-xs);
-    font-weight: 700;
-    color: var(--fbz-color-text-soft);
-  }
+  gap: 6px;
 }
 
-.control-wrap {
-  position: relative;
+.field-label {
+  color: var(--ui-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.control {
   display: flex;
   align-items: center;
-}
-
-.lead-icon {
-  position: absolute;
-  left: 11px;
-  width: 17px;
-  height: 17px;
-  color: var(--fbz-color-text-muted);
-  pointer-events: none;
-  transition: color var(--fbz-motion-fast);
-}
-
-.control-input {
-  width: 100%;
-  height: 42px;
-  background: var(--fbz-color-panel);
-  border: 1px solid var(--fbz-color-line);
-  border-radius: var(--fbz-radius-control);
-  padding: 0 var(--fbz-space-3);
-  color: var(--fbz-color-text);
-  font-size: var(--fbz-font-size-md);
+  gap: 8px;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-input);
   transition:
-    border-color var(--fbz-motion-fast),
-    box-shadow var(--fbz-motion-fast),
-    background var(--fbz-motion-fast);
+    border-color var(--ui-duration-fast),
+    box-shadow var(--ui-duration-fast);
 
-  &.has-icon {
-    padding-left: 36px;
-  }
-  &.has-trail {
-    padding-right: 40px;
+  &:focus-within {
+    border-color: rgb(var(--ui-accent-channel) / 60%);
+    box-shadow: 0 0 0 3px rgb(var(--ui-accent-channel) / 12%);
   }
 
-  &::placeholder {
-    color: var(--fbz-color-text-disabled);
+  .lead {
+    color: var(--ui-text-subtle);
   }
 
-  &:hover {
-    border-color: var(--fbz-color-line-bright);
-  }
-
-  &:focus {
+  input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border: 0;
     outline: none;
-    border-color: var(--fbz-color-brand-500);
-    box-shadow: var(--fbz-shadow-focus);
-    background: var(--fbz-color-panel-strong);
-  }
+    background: transparent;
+    color: var(--ui-text);
+    font-size: 14px;
 
-  &:focus + .lead-icon,
-  &:focus ~ .lead-icon {
-    color: var(--fbz-color-brand-500);
+    &::placeholder {
+      color: var(--ui-text-subtle);
+    }
   }
 }
 
-.control-wrap:focus-within .lead-icon {
-  color: var(--fbz-color-brand-500);
-}
-
-.trail-btn {
-  position: absolute;
-  right: 6px;
-  display: grid;
-  place-content: center;
+.trail {
   width: 30px;
   height: 30px;
+  display: grid;
+  place-items: center;
   border: 0;
-  border-radius: var(--fbz-radius-control);
+  border-radius: var(--ui-radius-sm);
   background: transparent;
-  color: var(--fbz-color-text-muted);
+  color: var(--ui-text-subtle);
   cursor: pointer;
-  transition:
-    color var(--fbz-motion-fast),
-    background var(--fbz-motion-fast);
-
-  svg {
-    width: 18px;
-    height: 18px;
-  }
 
   &:hover {
-    color: var(--fbz-color-text);
-    background: var(--fbz-color-panel-elevated);
-  }
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: var(--fbz-shadow-focus);
+    color: var(--ui-text);
   }
 }
 
@@ -582,179 +419,74 @@ function handleForgot() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: -2px;
 }
 
 .remember {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  color: var(--ui-text-muted);
+  font-size: 13px;
   cursor: pointer;
-  user-select: none;
-
-  .remember-text {
-    font-size: var(--fbz-font-size-sm);
-    color: var(--fbz-color-text-soft);
-  }
-}
-
-.glow-switch {
-  position: relative;
-  display: inline-block;
-  width: 38px;
-  height: 20px;
-  flex-shrink: 0;
-
-  input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .switch-slide-thumb {
-    position: absolute;
-    inset: 0;
-    background-color: var(--fbz-color-line-bright);
-    border-radius: 20px;
-    transition: background-color var(--fbz-motion-fast);
-
-    &::before {
-      position: absolute;
-      content: "";
-      height: 14px;
-      width: 14px;
-      left: 3px;
-      bottom: 3px;
-      background-color: #fff;
-      border-radius: 50%;
-      transition: transform var(--fbz-motion-fast);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-    }
-  }
-
-  input:checked + .switch-slide-thumb {
-    background-color: var(--fbz-color-brand-500);
-
-    &::before {
-      transform: translateX(18px);
-    }
-  }
-
-  input:focus-visible + .switch-slide-thumb {
-    box-shadow: var(--fbz-shadow-focus);
-  }
 }
 
 .link-btn {
+  padding: 0;
   border: 0;
   background: transparent;
-  padding: 0;
-  font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  color: var(--ui-accent);
+  font-size: 13px;
   cursor: pointer;
-  transition: color var(--fbz-motion-fast);
 
   &:hover {
-    color: var(--fbz-color-brand-500);
+    color: var(--ui-accent-hover);
   }
 }
 
 .submit-btn {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
   height: 44px;
-  margin-top: var(--fbz-space-2);
-  border: 0;
-  border-radius: var(--fbz-radius-control);
-  background: var(--fbz-color-brand-500);
-  color: #07120a;
-  font-size: var(--fbz-font-size-md);
-  font-weight: 800;
-  letter-spacing: 2px;
-  cursor: pointer;
-  transition:
-    background var(--fbz-motion-fast),
-    box-shadow var(--fbz-motion-base),
-    transform var(--fbz-motion-fast);
-
-  &:hover:not(:disabled) {
-    background: var(--fbz-color-brand-600);
-    box-shadow: 0 0 18px color-mix(in srgb, var(--fbz-color-brand-500) 38%, transparent);
-  }
-
-  &:active:not(:disabled) {
-    transform: translateY(1px);
-  }
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: var(--fbz-shadow-focus);
-  }
-
-  &:disabled {
-    cursor: progress;
-    opacity: 0.85;
-  }
-}
-
-.spinner {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: 2px solid color-mix(in srgb, #07120a 35%, transparent);
-  border-top-color: #07120a;
-  animation: spin 0.7s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+  min-height: 44px;
+  border-radius: var(--ui-radius-md);
+  font-size: 14px;
 }
 
 .panel-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--fbz-space-3);
-  margin-top: var(--fbz-space-6);
-  padding-top: var(--fbz-space-4);
-  border-top: 1px solid var(--fbz-color-line-soft);
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ui-border);
+}
 
-  .lang-group {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--fbz-space-2);
-  }
+.lang-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-text-subtle);
 
-  .foot-label {
-    font-size: var(--fbz-font-size-xs);
-    color: var(--fbz-color-text-muted);
-  }
-
-  .lang-select {
-    width: 116px;
-  }
-
-  .version {
-    font-family: var(--fbz-font-display);
-    font-size: var(--fbz-font-size-xs);
-    letter-spacing: 0.5px;
-    color: var(--fbz-color-text-disabled);
+  :deep(.base-select) {
+    min-width: 128px;
   }
 }
 
-/* 尊重减少动态偏好 */
-@media (prefers-reduced-motion: reduce) {
-  .poster-col.drift-up,
-  .poster-col.drift-down {
-    animation: none;
+.version {
+  color: var(--ui-text-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .login-view {
+    grid-template-columns: 1fr;
   }
-  .spinner {
-    animation-duration: 1.4s;
+
+  .login-art {
+    display: none;
+  }
+
+  .mobile-brand {
+    display: inline-flex;
   }
 }
 </style>

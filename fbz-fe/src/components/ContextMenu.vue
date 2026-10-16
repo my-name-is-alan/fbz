@@ -335,7 +335,7 @@ useEventListener(window, "keydown", (e) => {
           role="menuitem"
           @click="addToCollection(col)"
         >
-          <span class="icon" aria-hidden="true">▣</span>
+          <span class="icon"><BaseIcon name="collection" :size="15" /></span>
           <span>{{ col.name }}</span>
         </li>
         <li class="menu-separator" aria-hidden="true" />
@@ -346,11 +346,11 @@ useEventListener(window, "keydown", (e) => {
           role="menuitem"
           @click="createAndAddCollection"
         >
-          <span class="icon" aria-hidden="true">＋</span>
+          <span class="icon"><BaseIcon name="plus" :size="15" /></span>
           <span>新建并加入</span>
         </li>
         <li class="menu-item" tabindex="0" role="menuitem" @click="showCollectionPicker = false">
-          <span class="icon" aria-hidden="true">←</span>
+          <span class="icon"><BaseIcon name="back" :size="15" /></span>
           <span>返回</span>
         </li>
       </ul>
@@ -376,7 +376,7 @@ useEventListener(window, "keydown", (e) => {
           role="menuitem"
           @click="addToPlaylist(pl)"
         >
-          <span class="icon" aria-hidden="true">♫</span>
+          <span class="icon"><BaseIcon name="playlist" :size="15" /></span>
           <span>{{ pl.name }}</span>
         </li>
         <li class="menu-separator" aria-hidden="true" />
@@ -387,11 +387,11 @@ useEventListener(window, "keydown", (e) => {
           role="menuitem"
           @click="createAndAddPlaylist"
         >
-          <span class="icon" aria-hidden="true">＋</span>
+          <span class="icon"><BaseIcon name="plus" :size="15" /></span>
           <span>新建并加入</span>
         </li>
         <li class="menu-item" tabindex="0" role="menuitem" @click="showPlaylistPicker = false">
-          <span class="icon" aria-hidden="true">←</span>
+          <span class="icon"><BaseIcon name="back" :size="15" /></span>
           <span>返回</span>
         </li>
       </ul>
@@ -409,7 +409,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="playFromMenu(true)"
         @keydown.space.prevent="playFromMenu(true)"
       >
-        <span class="icon" aria-hidden="true">▶️</span>
+        <span class="icon"><BaseIcon name="play" :size="15" /></span>
         <span>继续播放</span>
       </li>
       <li
@@ -421,7 +421,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="playFromMenu(false)"
         @keydown.space.prevent="playFromMenu(false)"
       >
-        <span class="icon" aria-hidden="true">{{ canResume ? "🔁" : "▶️" }}</span>
+        <span class="icon"><BaseIcon :name="canResume ? 'rewind' : 'play'" :size="15" /></span>
         <span>{{ canResume ? "从头播放" : "播放" }}</span>
       </li>
       <li class="menu-separator" aria-hidden="true" />
@@ -434,7 +434,9 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="toggleFavorite"
         @keydown.space.prevent="toggleFavorite"
       >
-        <span class="icon" aria-hidden="true">⭐</span>
+        <span class="icon"
+          ><BaseIcon name="heart" :size="15" :fill="Boolean(contextMenu.item?.isFavorite)"
+        /></span>
         <span>{{ contextMenu.item?.isFavorite ? "取消收藏" : "加入收藏" }}</span>
       </li>
       <li
@@ -446,7 +448,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="openPlaylistPicker"
         @keydown.space.prevent="openPlaylistPicker"
       >
-        <span class="icon" aria-hidden="true">♫</span>
+        <span class="icon"><BaseIcon name="playlist" :size="15" /></span>
         <span>加入播放列表</span>
       </li>
       <li
@@ -459,7 +461,7 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="openCollectionPicker"
         @keydown.space.prevent="openCollectionPicker"
       >
-        <span class="icon" aria-hidden="true">▣</span>
+        <span class="icon"><BaseIcon name="collection" :size="15" /></span>
         <span>加入合集</span>
       </li>
       <li
@@ -471,7 +473,9 @@ useEventListener(window, "keydown", (e) => {
         @keydown.enter="togglePlayed"
         @keydown.space.prevent="togglePlayed"
       >
-        <span class="icon" aria-hidden="true">{{ contextMenu.item?.isPlayed ? "👁️" : "✅" }}</span>
+        <span class="icon"
+          ><BaseIcon :name="contextMenu.item?.isPlayed ? 'eye' : 'check'" :size="15"
+        /></span>
         <span>{{ contextMenu.item?.isPlayed ? "标记未看" : "标记已看" }}</span>
       </li>
 
@@ -485,7 +489,7 @@ useEventListener(window, "keydown", (e) => {
           @keydown.enter="refreshMetadata"
           @keydown.space.prevent="refreshMetadata"
         >
-          <span class="icon" aria-hidden="true">🔄</span>
+          <span class="icon"><BaseIcon name="refresh" :size="15" /></span>
           <span>{{ busyAction === "refresh" ? "正在入队…" : "刷新元数据" }}</span>
         </li>
         <li
@@ -496,7 +500,7 @@ useEventListener(window, "keydown", (e) => {
           @keydown.enter="openIdentify"
           @keydown.space.prevent="openIdentify"
         >
-          <span class="icon" aria-hidden="true">🔍</span>
+          <span class="icon"><BaseIcon name="identify" :size="15" /></span>
           <span>识别</span>
         </li>
         <li
@@ -507,7 +511,7 @@ useEventListener(window, "keydown", (e) => {
           @keydown.enter="openEditMetadata"
           @keydown.space.prevent="openEditMetadata"
         >
-          <span class="icon" aria-hidden="true">✏️</span>
+          <span class="icon"><BaseIcon name="edit" :size="15" /></span>
           <span>修改元数据</span>
         </li>
 
@@ -521,7 +525,7 @@ useEventListener(window, "keydown", (e) => {
           @keydown.enter="showDeleteConfirm = true"
           @keydown.space.prevent="showDeleteConfirm = true"
         >
-          <span class="icon" aria-hidden="true">🗑️</span>
+          <span class="icon"><BaseIcon name="trash" :size="15" /></span>
           <span>删除条目</span>
         </li>
       </template>
@@ -530,7 +534,7 @@ useEventListener(window, "keydown", (e) => {
     <!-- Inline Secondary Confirmation -->
     <div v-else class="confirm-box" role="dialog" aria-modal="true" aria-label="确认删除">
       <span class="confirm-title"
-        ><span aria-hidden="true">⚠️ </span>确认永久删除视频及 NFO 元数据文件吗？</span
+        ><BaseIcon name="warning" :size="16" />确认永久删除视频及 NFO 元数据文件吗？</span
       >
       <div class="confirm-actions">
         <button class="confirm-btn cancel" type="button" @click="showDeleteConfirm = false">
@@ -597,7 +601,7 @@ useEventListener(window, "keydown", (e) => {
   padding: 8px 12px;
   border-radius: 4px;
   font-size: var(--fbz-font-size-sm);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--fbz-color-text-soft);
   cursor: pointer;
   user-select: none;
@@ -622,7 +626,14 @@ useEventListener(window, "keydown", (e) => {
   }
 
   .icon {
-    font-size: 14px;
+    display: inline-flex;
+    width: 16px;
+    color: var(--fbz-color-text-muted);
+  }
+
+  &:hover .icon,
+  &:focus-visible .icon {
+    color: inherit;
   }
 
   &.disabled {
@@ -646,6 +657,10 @@ useEventListener(window, "keydown", (e) => {
   text-align: center;
 
   .confirm-title {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
     font-size: var(--fbz-font-size-xs);
     font-weight: 700;
     color: var(--fbz-color-danger-500);

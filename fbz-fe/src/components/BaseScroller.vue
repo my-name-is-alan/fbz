@@ -61,16 +61,7 @@ function scrollStep(dir: 1 | -1) {
         aria-label="向左滚动"
         @click="scrollStep(-1)"
       >
-        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
-          <path
-            d="M15 5l-7 7 7 7"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
+        <span class="edge-ic"><BaseIcon name="left" :size="18" /></span>
       </button>
     </Transition>
 
@@ -86,16 +77,7 @@ function scrollStep(dir: 1 | -1) {
         aria-label="向右滚动"
         @click="scrollStep(1)"
       >
-        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
-          <path
-            d="M9 5l7 7-7 7"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
+        <span class="edge-ic"><BaseIcon name="right" :size="18" /></span>
       </button>
     </Transition>
   </div>
@@ -141,16 +123,25 @@ function scrollStep(dir: 1 | -1) {
   background: transparent;
   transition: opacity var(--fbz-motion-fast);
 
-  svg {
+  .edge-ic {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--fbz-color-line-bright);
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--fbz-color-panel-strong) 88%, transparent);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
     transition:
       color var(--fbz-motion-fast),
+      border-color var(--fbz-motion-fast),
       transform var(--fbz-motion-fast);
-    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
   }
 
-  &:hover svg {
+  &:hover .edge-ic {
     color: var(--fbz-color-brand-500);
-    transform: scale(1.12);
+    border-color: color-mix(in srgb, var(--fbz-color-brand-500) 60%, transparent);
+    transform: scale(1.06);
   }
 
   &.prev {

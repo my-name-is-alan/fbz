@@ -1,4 +1,9 @@
 import { request, getAccessToken, setAccessToken } from "@/service/request.ts";
+import {
+  sourceLabel,
+  toMediaSourceInfo,
+  type MediaSourceDto,
+} from "@/service/modules/mediaInfo.ts";
 
 export interface ServerSession {
   token: string;
@@ -239,39 +244,16 @@ export interface PlaybackMediaSourceOption {
   label: string;
 }
 
-function mediaSourceLabel(
-  source: { Id: string; Name?: string; Container?: string },
-  index: number,
-): string {
-  const parts = [source.Name?.trim(), source.Container?.toUpperCase()].filter(Boolean);
-  if (parts.length) return parts.join(" · ");
-  return `版本 ${index + 1}`;
+/** 版本切换文案：版本名 + 分辨率 / 动态范围 / 容器（来自真实 MediaStreams）。 */
+function mediaSourceLabel(source: MediaSourceDto, index: number): string {
+  return sourceLabel(toMediaSourceInfo(source, index), index);
 }
 
 export async function preparePlayback(item: ServerItem, mediaSourceId?: string) {
   const detail = await itemDetail(item.Id);
   const info = await serverRequest<{
     PlaySessionId: string;
-    MediaSources: {
-      Id: string;
-      Name?: string;
-      DirectStreamUrl?: string;
-      RunTimeTicks?: number;
-      Container?: string;
-      Size?: number;
-      IsRemote?: boolean;
-      MediaStreams?: {
-        Index?: number;
-        Type?: string;
-        Codec?: string;
-        Language?: string;
-        DisplayTitle?: string;
-        Title?: string;
-        IsExternal?: boolean;
-        DeliveryMethod?: string;
-        DeliveryUrl?: string;
-      }[];
-    }[];
+    MediaSources: (MediaSourceDto & { Id: string; DirectStreamUrl?: string })[];
   }>(`/emby/Items/${encodeURIComponent(item.Id)}/PlaybackInfo`, {
     UserId: readSession()?.userId,
     DeviceId: deviceId(),
@@ -317,7 +299,7 @@ export async function preparePlayback(item: ServerItem, mediaSourceId?: string) 
         Boolean(s.DeliveryUrl?.trim()),
     )
     .map((s, index) => {
-      const raw = s.DeliveryUrl!.trim();
+      const raw = (s.DeliveryUrl ?? "").trim();
       const deliveryUrl =
         raw.startsWith("http://") || raw.startsWith("https://")
           ? raw
@@ -351,9 +333,10 @@ export async function preparePlayback(item: ServerItem, mediaSourceId?: string) 
     mediaSources,
     chapters: chapters.length ? chapters : undefined,
     subtitleTracks: subtitleTracks.length ? subtitleTracks : undefined,
+    mediaInfo: toMediaSourceInfo(source, Math.max(0, playable.indexOf(source))),
     source: {
       uri: uri.href,
-      size: source.Size,
+      size: source.Size ?? undefined,
       proxyUri: proxy?.href,
       mimeType: source.Container === "mp4" ? "video/mp4" : undefined,
     },
@@ -380,6 +363,12 @@ export function mediaCard(item: ServerItem): import("@/types/media.ts").Continue
         ? `第 ${item.ParentIndexNumber ?? 1} 季 · 第 ${item.IndexNumber ?? "—"} 集`
         : [item.ProductionYear, type, item.Genres?.[0]].filter(Boolean).join(" · "),
     serverItem: item,
+    itemType: item.Type,
+    seriesId: item.SeriesId,
+    seasonNumber: item.ParentIndexNumber,
+    episodeNumber: item.IndexNumber,
+    versionCount: item.MediaSources?.length,
+    isFavorite: item.UserData?.IsFavorite ?? false,
     isPlayed: item.UserData?.Played ?? false,
     progress:
       !item.UserData?.Played && item.UserData?.PlaybackPositionTicks && item.RunTimeTicks

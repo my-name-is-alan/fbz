@@ -4,17 +4,18 @@ import { useUiStore } from "@/stores/ui.ts";
 const uiStore = useUiStore();
 const { toasts } = storeToRefs(uiStore);
 
+/** 提示类型 → Lucide 图标名（禁止 emoji）。 */
 function getToastIcon(type: string) {
   switch (type) {
     case "success":
-      return "✨";
+      return "success";
     case "error":
-      return "🚨";
+      return "error";
     case "warning":
-      return "⚠️";
+      return "warning";
     case "info":
     default:
-      return "💡";
+      return "info";
   }
 }
 </script>
@@ -29,9 +30,11 @@ function getToastIcon(type: string) {
         :class="toast.type"
         @click="uiStore.removeToast(toast.id)"
       >
-        <span class="toast-icon">{{ getToastIcon(toast.type) }}</span>
+        <span class="toast-icon"><BaseIcon :name="getToastIcon(toast.type)" :size="18" /></span>
         <span class="toast-message">{{ toast.message }}</span>
-        <button class="toast-close-btn" type="button" aria-label="关闭">✕</button>
+        <button class="toast-close-btn" type="button" aria-label="关闭">
+          <BaseIcon name="close" :size="14" />
+        </button>
       </div>
     </TransitionGroup>
   </div>

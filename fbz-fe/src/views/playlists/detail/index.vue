@@ -20,6 +20,7 @@ import { usePlaybackStore } from "@/stores/playback.ts";
 import { useUiStore } from "@/stores/ui.ts";
 import type { ContinueItem } from "@/types/media.ts";
 import type { ServerItem } from "@/service/modules/server.ts";
+import { itemTypeMeta } from "@/utils/itemType.ts";
 
 const route = useRoute();
 const authStore = useAuthStore();
@@ -103,6 +104,21 @@ const removeShare = (share: PlaylistShare) =>
   shareAction(() => unsharePlaylist(playlistId.value, share.UserId));
 
 const addOpen = ref(false);
+
+/** 头部封面拼图：取前四个有海报的条目。 */
+const mosaic = computed(() => items.value.filter((i) => i.poster).slice(0, 4));
+const shareUserOptions = computed(() => [
+  { label: unsharedUsers.value.length ? "选择用户" : "没有可共享的用户", value: "" },
+  ...unsharedUsers.value.map((u) => ({ label: u.name, value: u.id })),
+]);
+const totalRuntime = computed(() => {
+  const ticks = serverItems.value.reduce((sum, it) => sum + (it.RunTimeTicks ?? 0), 0);
+  if (!ticks) return "";
+  const minutes = Math.round(ticks / 600_000_000);
+  return minutes >= 60
+    ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`
+    : `${minutes} 分钟`;
+});
 const addIdsText = ref("");
 
 function isPlayable(item: ServerItem): boolean {
@@ -258,73 +274,119 @@ watch(
 </script>
 
 <template>
-  <main class="playlist-detail">
-    <PageHeader :title="playlist?.name" fallback="/playlists" />
+  <main class="c-page playlist-detail">
+    <PageHeader
+      :title="playlist?.name"
+      :crumbs="[{ label: '播放列表', to: '/playlists', icon: 'playlist' }]"
+      fallback="/playlists"
+    />
 
-    <p v-if="loading" class="state-text">正在打开播放列表…</p>
-    <p v-else-if="error" class="state-text is-error">{{ error }}</p>
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />正在打开播放列表…
+    </p>
+    <p v-else-if="error" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />{{ error }}
+    </p>
 
     <template v-else>
       <header class="hero">
-        <div class="hero-ic" aria-hidden="true">♫</div>
+        <div class="cover" :class="{ mosaic: mosaic.length >= 4 }">
+          <template v-if="mosaic.length >= 4">
+            <img v-for="m in mosaic" :key="m.id" :src="m.poster" alt="" loading="lazy" />
+          </template>
+          <img v-else-if="mosaic.length" :src="mosaic[0]!.poster" alt="" />
+          <BaseIcon v-else name="playlist" :size="44" :stroke-width="1.3" />
+        </div>
         <div class="hero-body">
+          <span class="type-chip"><BaseIcon name="playlist" :size="12" />播放列表</span>
           <h1>{{ playlist?.name ?? "播放列表" }}</h1>
-          <p class="meta">{{ total }} 个条目</p>
+          <p class="c-meta">
+            {{ total }} 个条目<template v-if="totalRuntime"> · 共 {{ totalRuntime }}</template>
+          </p>
           <div class="actions">
             <button
-              class="btn-play"
+              class="du-btn du-btn-primary act-main"
               type="button"
               :disabled="playing || busy || !serverItems.some(isPlayable)"
               @click="playAll"
             >
+              <BaseIcon
+                :name="playing ? 'loading' : 'play'"
+                :size="16"
+                :fill="!playing"
+                :class="{ 'c-spin': playing }"
+              />
               {{ playing ? "准备中…" : "播放" }}
             </button>
-            <button class="btn-secondary" type="button" :disabled="busy" @click="openRename">
-              改名
+            <button class="du-btn act" type="button" :disabled="busy" @click="openRename">
+              <BaseIcon name="edit" :size="15" />改名
             </button>
-            <button class="btn-secondary" type="button" :disabled="busy" @click="openAdd">
-              添加条目
+            <button class="du-btn act" type="button" :disabled="busy" @click="openAdd">
+              <BaseIcon name="playlist-add" :size="15" />添加条目
             </button>
-            <button class="btn-secondary" type="button" :disabled="busy" @click="openShare">
-              共享
+            <button class="du-btn act" type="button" :disabled="busy" @click="openShare">
+              <BaseIcon name="share" :size="15" />共享
             </button>
           </div>
         </div>
       </header>
 
       <section class="items">
-        <h2 class="section-title">列表内容</h2>
+        <h2 class="c-section-title"><BaseIcon name="list" :size="16" class="lead" />列表内容</h2>
         <BaseEmptyState
           v-if="!items.length"
-          icon="♫"
+          compact
+          icon="playlist"
           title="列表为空"
           description="点击「添加条目」粘贴媒体 Id，或从媒体卡片右键「加入播放列表」。"
         />
         <ol v-else class="track-list">
           <li v-for="(item, i) in items" :key="`${entryIds[i] || item.id}-${i}`" class="track">
-            <button class="track-play" type="button" :disabled="playing || busy" @click="playAt(i)">
-              ▶
+            <span class="idx">{{ i + 1 }}</span>
+            <button
+              class="track-play"
+              type="button"
+              :disabled="playing || busy || !serverItems[i] || !isPlayable(serverItems[i]!)"
+              :aria-label="`播放 ${item.title}`"
+              @click="playAt(i)"
+            >
+              <BaseIcon name="play" :size="14" fill />
             </button>
-            <MediaPoster
-              class="track-poster"
-              :src="item.poster"
-              :title="item.title"
-              ratio="poster"
-              :variant="(i % 2) as 0 | 1"
-            />
+            <div class="track-poster">
+              <MediaPoster
+                :src="item.poster"
+                :title="item.title"
+                ratio="poster"
+                :icon="itemTypeMeta(serverItems[i]?.Type).icon"
+              />
+            </div>
             <div class="track-info">
               <span class="track-title">{{ item.title }}</span>
-              <span class="track-meta">{{ item.meta }}</span>
+              <span class="track-meta c-meta">
+                <BaseIcon :name="itemTypeMeta(serverItems[i]?.Type).icon" :size="12" />
+                {{
+                  [itemTypeMeta(serverItems[i]?.Type).label, item.meta].filter(Boolean).join(" · ")
+                }}
+              </span>
             </div>
+            <span v-if="item.isPlayed" class="played" title="已看">
+              <BaseIcon name="check" :size="14" :stroke-width="2.6" />
+            </span>
             <RouterLink
               v-if="item.detailType"
-              class="track-open"
+              class="du-btn du-btn-ghost du-btn-xs"
               :to="`/${item.detailType}/${item.id}`"
             >
               详情
             </RouterLink>
-            <button class="track-remove" type="button" :disabled="busy" @click="removeAt(i)">
-              移除
+            <button
+              class="track-remove"
+              type="button"
+              :disabled="busy"
+              :aria-label="`移除 ${item.title}`"
+              @click="removeAt(i)"
+            >
+              <BaseIcon name="trash" :size="15" />
             </button>
           </li>
         </ol>
@@ -341,17 +403,22 @@ watch(
         <span class="field-label">名称</span>
         <input
           v-model="renameName"
-          class="field-input"
+          class="du-input field-input"
           type="text"
           maxlength="256"
           @keydown.enter.prevent="submitRename"
         />
       </label>
       <template #actions>
-        <button class="btn-ghost" type="button" :disabled="busy" @click="renameOpen = false">
+        <button
+          class="du-btn du-btn-ghost"
+          type="button"
+          :disabled="busy"
+          @click="renameOpen = false"
+        >
           取消
         </button>
-        <button class="btn-play" type="button" :disabled="busy" @click="submitRename">
+        <button class="du-btn du-btn-primary" type="button" :disabled="busy" @click="submitRename">
           {{ busy ? "保存中…" : "保存" }}
         </button>
       </template>
@@ -363,18 +430,26 @@ watch(
       description="公开后所有用户可见；也可单独共享给指定用户，并决定对方能否编辑。"
       @close="shareOpen = false"
     >
-      <label class="field share-row">
-        <input type="checkbox" :checked="openAccess" :disabled="busy" @change="togglePublic" />
-        <span class="field-label">公开给所有用户（只读）</span>
+      <label class="check-row">
+        <input
+          class="du-toggle du-toggle-sm du-toggle-primary"
+          type="checkbox"
+          :checked="openAccess"
+          :disabled="busy"
+          @change="togglePublic"
+        />
+        <span>公开给所有用户（只读）</span>
       </label>
       <div class="field">
         <span class="field-label">已共享</span>
-        <p v-if="!shares.length" class="share-note">尚未共享给任何人。</p>
+        <p v-if="!shares.length" class="c-meta">尚未共享给任何人。</p>
         <ul v-else class="share-list">
           <li v-for="share in shares" :key="share.UserId" class="share-row">
+            <BaseIcon name="user" :size="15" />
             <span class="share-name">{{ userName(share.UserId) }}</span>
-            <label class="share-row">
+            <label class="check-row">
               <input
+                class="du-checkbox du-checkbox-sm"
                 type="checkbox"
                 :checked="share.CanEdit"
                 :disabled="busy"
@@ -382,31 +457,45 @@ watch(
               />
               可编辑
             </label>
-            <button class="btn-ghost" type="button" :disabled="busy" @click="removeShare(share)">
-              移除
+            <button
+              class="du-btn du-btn-ghost du-btn-xs"
+              type="button"
+              :disabled="busy"
+              @click="removeShare(share)"
+            >
+              <BaseIcon name="close" :size="13" />移除
             </button>
           </li>
         </ul>
       </div>
       <div class="field">
         <span class="field-label">共享给</span>
-        <div class="share-row">
-          <select
+        <div class="share-add">
+          <BaseSelect
             v-model="shareTarget"
-            class="field-input"
-            :disabled="busy || !unsharedUsers.length"
-          >
-            <option value="">{{ unsharedUsers.length ? "选择用户" : "没有可共享的用户" }}</option>
-            <option v-for="u in unsharedUsers" :key="u.id" :value="u.id">{{ u.name }}</option>
-          </select>
-          <label class="share-row"><input v-model="shareCanEdit" type="checkbox" />可编辑</label>
+            :options="shareUserOptions"
+            size="sm"
+            aria-label="选择共享用户"
+          />
+          <label class="check-row">
+            <input
+              v-model="shareCanEdit"
+              class="du-checkbox du-checkbox-sm"
+              type="checkbox"
+            />可编辑
+          </label>
         </div>
       </div>
-      <p v-if="shareError" class="share-note is-error">{{ shareError }}</p>
+      <p v-if="shareError" class="c-state is-error">{{ shareError }}</p>
       <template #actions>
-        <button class="btn-ghost" type="button" @click="shareOpen = false">关闭</button>
-        <button class="btn-play" type="button" :disabled="busy || !shareTarget" @click="addShare">
-          {{ busy ? "保存中…" : "共享" }}
+        <button class="du-btn du-btn-ghost" type="button" @click="shareOpen = false">关闭</button>
+        <button
+          class="du-btn du-btn-primary"
+          type="button"
+          :disabled="busy || !shareTarget"
+          @click="addShare"
+        >
+          <BaseIcon name="share" :size="15" />{{ busy ? "保存中…" : "共享" }}
         </button>
       </template>
     </BaseModal>
@@ -421,16 +510,16 @@ watch(
         <span class="field-label">条目 Id</span>
         <textarea
           v-model="addIdsText"
-          class="field-input field-area"
+          class="du-textarea field-input"
           rows="3"
           placeholder="uuid-1, uuid-2"
         />
       </label>
       <template #actions>
-        <button class="btn-ghost" type="button" :disabled="busy" @click="addOpen = false">
+        <button class="du-btn du-btn-ghost" type="button" :disabled="busy" @click="addOpen = false">
           取消
         </button>
-        <button class="btn-play" type="button" :disabled="busy" @click="submitAdd">
+        <button class="du-btn du-btn-primary" type="button" :disabled="busy" @click="submitAdd">
           {{ busy ? "添加中…" : "添加" }}
         </button>
       </template>
@@ -440,283 +529,300 @@ watch(
 
 <style scoped lang="scss">
 .playlist-detail {
-  /* 顶栏 + 固定返回条（PageHeader：顶栏下 12px、高 36px）之下再留白；原用未定义的 --fbz-space-10 致 calc 失效、内容顶到导航栏。 */
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-8) * 2 + var(--fbz-space-4))
-    var(--fbz-space-8) 80px;
-  min-height: 100vh;
-  max-width: 960px;
-  margin: 0 auto;
-}
-
-.state-text {
-  margin: var(--fbz-space-8) 0;
-  color: var(--fbz-color-text-muted);
-  text-align: center;
-
-  &.is-error {
-    color: var(--fbz-color-danger, #e57373);
-  }
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .hero {
   display: flex;
-  gap: var(--fbz-space-5);
-  align-items: center;
-  margin-bottom: var(--fbz-space-8);
+  align-items: flex-end;
+  gap: 24px;
+  padding: 20px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background:
+    radial-gradient(circle at 0% 0%, rgb(var(--ui-accent-channel) / 10%), transparent 60%),
+    var(--ui-surface);
 }
 
-.hero-ic {
-  width: 96px;
-  height: 96px;
-  border-radius: 12px;
+.cover {
+  flex: 0 0 auto;
+  width: 180px;
+  height: 180px;
   display: grid;
-  place-content: center;
-  font-size: 36px;
-  background: var(--fbz-color-panel, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--fbz-color-line);
-  color: var(--fbz-color-brand-500);
-  flex-shrink: 0;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-subtle);
+  box-shadow: var(--ui-shadow-surface);
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  &.mosaic {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    place-items: stretch;
+  }
 }
 
 .hero-body {
-  h1 {
-    margin: 0 0 var(--fbz-space-2);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 700;
-  }
+  flex: 1;
+  min-width: 0;
 
-  .meta {
-    margin: 0 0 var(--fbz-space-4);
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-sm);
+  h1 {
+    margin: 8px 0 4px;
+    color: var(--ui-text);
+    font-size: clamp(24px, 3vw, 34px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
+}
+
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 5px;
+  color: var(--ui-text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--fbz-space-3);
+  gap: 8px;
+  margin-top: 16px;
 }
 
-.btn-play {
-  appearance: none;
-  border: none;
-  border-radius: 999px;
-  padding: 10px 22px;
-  font-weight: 700;
-  cursor: pointer;
-  background: var(--fbz-color-brand-500);
-  color: #fff;
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+.act-main,
+.act {
+  height: 38px;
+  min-height: 38px;
+  border-radius: var(--ui-radius-md);
 }
 
-.btn-secondary,
-.btn-ghost {
-  appearance: none;
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 999px;
-  padding: 10px 16px;
-  font-weight: 600;
-  cursor: pointer;
+.act {
+  border: 1px solid var(--ui-border-strong);
   background: transparent;
-  color: inherit;
+  color: var(--ui-text);
 
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  &:hover {
+    background: var(--ui-surface-hover);
   }
 }
 
-.section-title {
-  margin: 0 0 var(--fbz-space-4);
-  font-size: var(--fbz-font-size-lg);
-  font-weight: 700;
+.items {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .lead {
+    color: var(--ui-text-subtle);
+  }
 }
 
 .track-list {
-  list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
-  gap: var(--fbz-space-2);
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-surface);
+  list-style: none;
 }
 
 .track {
-  display: grid;
-  grid-template-columns: 36px 48px 1fr auto auto;
-  gap: var(--fbz-space-3);
+  display: flex;
   align-items: center;
-  padding: var(--fbz-space-3);
-  border-radius: 8px;
-  border: 1px solid transparent;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ui-border);
+
+  &:last-child {
+    border-bottom: 0;
+  }
 
   &:hover {
-    background: var(--fbz-color-panel, rgba(255, 255, 255, 0.04));
-    border-color: var(--fbz-color-line);
+    background: var(--ui-surface-hover);
   }
+}
+
+.idx {
+  width: 24px;
+  flex: 0 0 auto;
+  color: var(--ui-text-subtle);
+  font-family: var(--ui-font-mono);
+  font-size: 12px;
+  text-align: right;
 }
 
 .track-play {
-  appearance: none;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding-left: 2px;
+  border: 0;
   border-radius: 50%;
-  border: 1px solid var(--fbz-color-line);
-  background: transparent;
-  color: var(--fbz-color-text-soft);
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
   cursor: pointer;
 
   &:hover:not(:disabled) {
-    color: var(--fbz-color-brand-500);
-    border-color: var(--fbz-color-brand-500);
+    background: var(--ui-accent-hover);
   }
 
   &:disabled {
-    opacity: 0.5;
+    opacity: 0.3;
+    cursor: default;
   }
 }
 
-/* 48px 缩略图放不下占位文字（「图片加载失败」会溢出），只留图标。 */
-.track-poster :deep(.fallback-title),
-.track-poster :deep(.fallback-tips) {
-  display: none;
-}
-
 .track-poster {
-  width: 48px;
-  border-radius: 4px;
+  width: 40px;
+  flex: 0 0 auto;
   overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 5px;
 }
 
 .track-info {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 0;
 }
 
 .track-title {
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 13.5px;
   font-weight: 600;
   white-space: nowrap;
-  overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .track-meta {
-  font-size: var(--fbz-font-size-xs);
-  color: var(--fbz-color-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
-.track-open {
-  color: var(--fbz-color-brand-500);
-  text-decoration: none;
-  font-size: var(--fbz-font-size-sm);
-  padding: 6px 8px;
-
-  &:hover {
-    text-decoration: underline;
-  }
+.played {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
 }
 
 .track-remove {
-  appearance: none;
-  border: none;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
   background: transparent;
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-sm);
+  color: var(--ui-text-subtle);
   cursor: pointer;
-  padding: 6px 8px;
 
   &:hover:not(:disabled) {
-    color: var(--fbz-color-danger, #e57373);
-  }
-
-  &:disabled {
-    opacity: 0.5;
+    background: rgb(251 113 133 / 10%);
+    color: var(--ui-danger);
   }
 }
 
 .field {
-  display: grid;
-  gap: var(--fbz-space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
 }
 
 .field-label {
-  font-size: var(--fbz-font-size-sm);
-  color: var(--fbz-color-text-muted);
+  color: var(--ui-text-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .field-input {
-  appearance: none;
-  border: 1px solid var(--fbz-color-line);
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: var(--fbz-color-bg-strong, rgba(0, 0, 0, 0.2));
-  color: inherit;
-  font-size: var(--fbz-font-size-md, 15px);
-  font-family: inherit;
+  width: 100%;
 }
 
-.field-area {
-  resize: vertical;
-  min-height: 72px;
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
 }
 
-@media (max-width: 600px) {
-  .playlist-detail {
-    padding: calc(var(--header-h, 60px) + var(--fbz-space-8)) var(--fbz-space-4) 60px;
-  }
-
-  .hero-ic {
-    width: 72px;
-    height: 72px;
-    font-size: 28px;
-  }
-
-  .track {
-    grid-template-columns: 32px 40px 1fr auto;
-    grid-template-rows: auto auto;
-
-    .track-open {
-      grid-column: 3;
-    }
-
-    .track-remove {
-      grid-column: 4;
-    }
-  }
+.share-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .share-row {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.share-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
 }
 
 .share-name {
   flex: 1;
-  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.share-note {
-  margin: 0;
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-sm);
+.share-add {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 
-  &.is-error {
-    color: var(--fbz-color-danger, #ef4444);
+  :deep(.base-select) {
+    flex: 1;
+  }
+}
+
+@media (max-width: 600px) {
+  .hero {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .cover {
+    width: 140px;
+    height: 140px;
+  }
+
+  .idx {
+    display: none;
   }
 }
 </style>

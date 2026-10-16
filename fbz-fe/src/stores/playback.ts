@@ -63,6 +63,8 @@ export interface PlaybackItem {
   audioTracks?: PlaybackTrack[];
   subtitleTracks?: PlaybackTrack[];
   playlist?: PlaybackEpisode[];
+  /** 当前 MediaSource 的技术信息（容器 / 码率 / 音视频流），播放器信息面板展示。 */
+  mediaInfo?: import("@/service/modules/mediaInfo.ts").MediaSourceInfo;
 }
 
 export const usePlaybackStore = defineStore("playback", () => {

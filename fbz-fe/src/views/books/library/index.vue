@@ -82,21 +82,40 @@ function bookMeta(book: BookItem): string {
 </script>
 
 <template>
-  <main class="books-library">
+  <main class="c-page books-library">
     <header class="page-head">
-      <h1>{{ library?.name ?? "书籍" }}</h1>
-      <p class="sub">{{ books.length }} 本电子书 · {{ audioBooks.length }} 部有声书</p>
+      <nav class="crumbs" aria-label="面包屑">
+        <RouterLink to="/library"><BaseIcon name="library" :size="14" />媒体库</RouterLink>
+        <BaseIcon name="right" :size="13" class="sep" />
+        <span>{{ library?.name ?? "书籍" }}</span>
+      </nav>
+      <div class="title-row">
+        <span class="type-ic"><BaseIcon name="book" :size="20" /></span>
+        <h1 class="c-page-title">{{ library?.name ?? "书籍" }}</h1>
+        <span class="c-meta">{{ books.length }} 本电子书 · {{ audioBooks.length }} 部有声书</span>
+      </div>
     </header>
 
-    <p v-if="loading" class="hint">加载中…</p>
-    <p v-else-if="failed" class="hint">无法连接到服务器，请检查登录状态。</p>
-    <p v-else-if="!items.length" class="hint">
-      该书库暂无内容。支持 epub / pdf / cbz（阅读）与 m4b / mp3 等有声书目录。
+    <p v-if="loading" class="c-state">
+      <BaseIcon name="loading" :size="16" class="c-spin" />加载中…
     </p>
+    <p v-else-if="failed" class="c-state is-error">
+      <BaseIcon name="error" :size="16" />无法连接到服务器，请检查登录状态。
+    </p>
+    <BaseEmptyState
+      v-else-if="!items.length"
+      icon="book"
+      title="该书库暂无内容"
+      description="支持 epub / pdf / cbz / mobi / azw3 / cbr（在线阅读）与 m4b / mp3 等有声书目录。"
+    />
 
     <template v-else>
       <section v-if="books.length" class="section">
-        <h2>电子书</h2>
+        <h2 class="c-section-title">
+          <BaseIcon name="book" :size="16" class="lead" />电子书<span class="n">{{
+            books.length
+          }}</span>
+        </h2>
         <div class="grid">
           <button
             v-for="(book, i) in books"
@@ -107,16 +126,24 @@ function bookMeta(book: BookItem): string {
           >
             <div class="cover" :class="{ alt: i % 2 === 1 }">
               <img v-if="book.poster" :src="book.poster" alt="" loading="lazy" />
-              <span v-else>{{ initial(book.name) }}</span>
+              <div v-else class="cover-ph">
+                <BaseIcon name="book" :size="28" :stroke-width="1.3" />
+                <span>{{ initial(book.name) }}</span>
+              </div>
+              <span class="open-hint"><BaseIcon name="book" :size="14" />阅读</span>
             </div>
-            <span class="name">{{ book.name }}</span>
-            <span v-if="bookMeta(book)" class="meta">{{ bookMeta(book) }}</span>
+            <span class="name" :title="book.name">{{ book.name }}</span>
+            <span v-if="bookMeta(book)" class="c-meta">{{ bookMeta(book) }}</span>
           </button>
         </div>
       </section>
 
       <section v-if="audioBooks.length" class="section">
-        <h2>有声书</h2>
+        <h2 class="c-section-title">
+          <BaseIcon name="audiobook" :size="16" class="lead" />有声书<span class="n">{{
+            audioBooks.length
+          }}</span>
+        </h2>
         <div class="grid">
           <button
             v-for="(group, i) in audioBooks"
@@ -125,17 +152,21 @@ function bookMeta(book: BookItem): string {
             class="book-card"
             @click="playAudioBook(group)"
           >
-            <div class="cover audio" :class="{ alt: i % 2 === 1 }">
+            <div class="cover square" :class="{ alt: i % 2 === 1 }">
               <img
                 v-if="group.tracks[0]?.poster"
                 :src="group.tracks[0].poster"
                 alt=""
                 loading="lazy"
               />
-              <span v-else>{{ initial(group.title) }}</span>
+              <div v-else class="cover-ph">
+                <BaseIcon name="audiobook" :size="28" :stroke-width="1.3" />
+                <span>{{ initial(group.title) }}</span>
+              </div>
+              <span class="open-hint"><BaseIcon name="play" :size="13" fill />收听</span>
             </div>
-            <span class="name">{{ group.title }}</span>
-            <span class="meta">{{ resumeLabel(group.tracks) }}</span>
+            <span class="name" :title="group.title">{{ group.title }}</span>
+            <span class="c-meta">{{ resumeLabel(group.tracks) }}</span>
           </button>
         </div>
       </section>
@@ -145,78 +176,118 @@ function bookMeta(book: BookItem): string {
 
 <style scoped lang="scss">
 .books-library {
-  padding: calc(var(--header-h, 60px) + var(--fbz-space-8)) var(--fbz-space-8) 80px;
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
-.page-head {
-  margin-bottom: var(--fbz-space-6);
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--ui-text-subtle);
+  font-size: 12.5px;
 
-  h1 {
-    margin: 0 0 var(--fbz-space-2);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 800;
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--ui-text-muted);
+    text-decoration: none;
+
+    &:hover {
+      color: var(--ui-accent);
+    }
+  }
+}
+
+.title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.type-ic {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-surface);
+  color: var(--ui-accent);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .lead,
+  .n {
+    color: var(--ui-text-subtle);
   }
 
-  .sub {
-    margin: 0;
-    color: var(--fbz-color-text-muted);
-    font-size: var(--fbz-font-size-md);
+  .n {
+    font-size: 12px;
+    font-weight: 500;
   }
-}
-
-.section + .section {
-  margin-top: var(--fbz-space-8);
-}
-
-.section h2 {
-  margin: 0 0 var(--fbz-space-4);
-  font-size: var(--fbz-font-size-lg);
-  font-weight: 700;
-}
-
-.hint {
-  color: var(--fbz-color-text-muted);
-  font-size: var(--fbz-font-size-md);
 }
 
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: var(--fbz-space-5);
+  gap: 20px 16px;
 }
 
 .book-card {
   display: flex;
   flex-direction: column;
-  gap: var(--fbz-space-2);
+  gap: 2px;
+  min-width: 0;
   padding: 0;
   border: 0;
-  background: none;
+  background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
+
+  &:hover {
+    .cover {
+      border-color: var(--ui-border-strong);
+      transform: translateY(-2px);
+    }
+
+    .open-hint {
+      opacity: 1;
+    }
+
+    .name {
+      color: var(--ui-accent-hover);
+    }
+  }
 }
 
 .cover {
-  width: 100%;
+  position: relative;
   aspect-ratio: 2 / 3;
-  border-radius: var(--fbz-radius-md, 10px);
-  border: 1px solid var(--fbz-color-line-soft);
-  background: var(--fbz-color-panel);
-  display: grid;
-  place-content: center;
+  margin-bottom: 6px;
   overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-surface-raised);
   transition:
-    border-color var(--fbz-motion-fast),
-    transform var(--fbz-motion-fast);
+    transform var(--ui-duration-base) var(--ui-ease-out),
+    border-color var(--ui-duration-fast);
 
-  &.audio {
+  &.square {
     aspect-ratio: 1;
   }
 
   &.alt {
-    background: var(--fbz-color-panel-strong);
+    background: var(--ui-surface);
   }
 
   img {
@@ -224,38 +295,62 @@ function bookMeta(book: BookItem): string {
     height: 100%;
     object-fit: cover;
   }
+}
+
+.cover-ph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--ui-border-strong);
 
   span {
-    font-family: var(--fbz-font-display);
-    font-size: var(--fbz-font-size-xl);
-    font-weight: 700;
-    color: var(--fbz-color-text-muted);
+    color: var(--ui-text-subtle);
+    font-size: 22px;
+    font-weight: 600;
   }
+}
 
-  .book-card:hover & {
-    border-color: var(--fbz-color-brand-500);
-    transform: translateY(-3px);
-  }
+.open-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--ui-accent);
+  color: var(--ui-accent-contrast);
+  font-size: 11.5px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity var(--ui-duration-fast);
 }
 
 .name {
-  font-size: var(--fbz-font-size-sm);
+  overflow: hidden;
+  color: var(--ui-text);
+  font-size: 13.5px;
   font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: color var(--ui-duration-fast);
 }
 
-.meta {
-  font-size: var(--fbz-font-size-xs, 12px);
-  color: var(--fbz-color-text-muted);
+@media (hover: none) {
+  .open-hint {
+    opacity: 1;
+  }
 }
 
 @media (max-width: 600px) {
-  .books-library {
-    padding: calc(var(--header-h, 56px) + var(--fbz-space-5)) var(--fbz-space-4) 60px;
-  }
-
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: var(--fbz-space-4);
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   }
 }
 </style>
